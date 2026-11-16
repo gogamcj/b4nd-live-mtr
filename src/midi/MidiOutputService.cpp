@@ -5,6 +5,9 @@
 #include <thread>
 
 #if JUCE_WINDOWS
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
  #include <windows.h>
  #include <timeapi.h>
  #pragma comment(lib, "winmm.lib")
@@ -325,13 +328,13 @@ void MidiOutputService::sendTestNote (int slot, int note, int velocity, int leng
         return;
     const auto ch = (std::uint8_t) slots[(size_t) slot].channel.load();
     sendLater (slot, MidiBytes::make ((std::uint8_t) (0x90 | ch), (std::uint8_t) (note & 0x7f), (std::uint8_t) std::clamp (velocity, 1, 127)), 0.0);
-    sendLater (slot, MidiBytes::make ((std::uint8_t) (0x80 | ch), (std::uint8_t) (note & 0x7f), 0), (double) std::max (10, lengthMs));
+    sendLater (slot, MidiBytes::make ((std::uint8_t) (0x80 | ch), (std::uint8_t) (note & 0x7f), 0), (double) (std::max) (10, lengthMs));
 }
 
 void MidiOutputService::sendLater (int slot, const MidiBytes& m, double delayMs)
 {
     Pending p;
-    p.dueNs = AudioEngine::clockNs() + (std::int64_t) (std::max (0.0, delayMs) * 1.0e6);
+    p.dueNs = AudioEngine::clockNs() + (std::int64_t) ((std::max) (0.0, delayMs) * 1.0e6);
     p.slot = slot;
     p.msg = m;
     const juce::ScopedLock sl (immediateLock);

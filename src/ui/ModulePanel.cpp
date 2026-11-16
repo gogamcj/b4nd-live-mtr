@@ -313,7 +313,8 @@ void ModulePanel::rebuildTrackRows()
                 message = err;
                 messageIsError = true;
                 trackRowsFor.clear();   // restore the real assignment
-                juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<ModulePanel> (this)] { if (safe) safe->rebuildTrackRows(); });
+                juce::Component::SafePointer<ModulePanel> safe (this);
+                juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->rebuildTrackRows(); });
             }
             repaint();
         };
