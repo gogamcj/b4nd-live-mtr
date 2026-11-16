@@ -133,6 +133,8 @@ private:
     mutable juce::CriticalSection lock;
     juce::String current;
     std::atomic<int> done { 0 }, total { 0 };
+    // Callbacks queued on the message thread check this, so a scanner destroyed first is never touched.
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
 };
 
 } // namespace b4nd

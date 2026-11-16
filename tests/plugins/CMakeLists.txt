@@ -3,6 +3,7 @@
 
 function(b4nd_test_plugin target code name variant is_synth)
     juce_add_plugin(${target}
+        BUNDLE_ID "com.b4nd.${target}"
         COMPANY_NAME "B4ND Test"
         PLUGIN_MANUFACTURER_CODE B4tt
         PLUGIN_CODE ${code}

@@ -21,7 +21,8 @@ namespace b4nd
       is marked failed and stays silent; the rest of the show keeps playing. A fault that
       corrupted memory can still take the process down (that needs L2, a separate process).
 */
-class PluginInstrument final : public InstrumentProcessor
+class PluginInstrument final : public InstrumentProcessor,
+                               private juce::AudioProcessorListener
 {
 public:
     explicit PluginInstrument (std::unique_ptr<juce::AudioPluginInstance>);
@@ -45,6 +46,10 @@ public:
     /** Average share of the block duration spent inside the plugin (0..1+), for the UI. */
     float getLoad() const noexcept { return load.load (std::memory_order_relaxed); }
 
+    /** True once after the plugin reported a parameter / preset / state change (any thread),
+        so the project can be marked unsaved. */
+    bool takeChanged() noexcept { return changed.exchange (false); }
+
 private:
     std::unique_ptr<juce::AudioPluginInstance> plugin;
     juce::CriticalSection lock;
@@ -55,6 +60,14 @@ private:
     std::atomic<bool> failed { false };
     std::atomic<int> failureCode { 0 };
     std::atomic<float> load { 0.0f };
+    std::atomic<bool> changed { false };
+
+    void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override { changed.store (true); }
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails& d) override
+    {
+        if (d.programChanged || d.nonParameterStateChanged || d.parameterInfoChanged)
+            changed.store (true);
+    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginInstrument)
 };

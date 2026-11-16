@@ -1,5 +1,5 @@
 // B4ND Plugin Scanner: loads and checks one plugin file in its own process (docs/05 §2).
-//   "B4ND Plugin Scanner" --scan <plugin file> --out <report.xml>
+//   b4nd_plugin_scanner --scan <plugin file> --out <report.xml>
 // If a plugin crashes or hangs here, only this process dies; the app blacklists the file.
 
 #include <juce_audio_processors/juce_audio_processors.h>

@@ -56,6 +56,7 @@ public:
     }
     void releaseResources() override {}
 
+    using juce::AudioProcessor::processBlock;
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
     {
         buffer.clear();

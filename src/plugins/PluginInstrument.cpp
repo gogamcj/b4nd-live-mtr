@@ -60,10 +60,12 @@ PluginInstrument::PluginInstrument (std::unique_ptr<juce::AudioPluginInstance> p
     : plugin (std::move (p))
 {
     midi.ensureSize (16384);
+    plugin->addListener (this);
 }
 
 PluginInstrument::~PluginInstrument()
 {
+    plugin->removeListener (this);
     const juce::ScopedLock sl (lock);
     if (plugin != nullptr && preparedRate > 0.0)
     {

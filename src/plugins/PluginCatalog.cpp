@@ -324,6 +324,7 @@ PluginScanner::PluginScanner (PluginCatalog& c) : juce::Thread ("B4ND plugin sca
 
 PluginScanner::~PluginScanner()
 {
+    alive->store (false);
     cancel();
 }
 
@@ -333,9 +334,9 @@ juce::File PluginScanner::findScannerExecutable()
         return juce::File (env);
     const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
    #if JUCE_WINDOWS
-    return exe.getSiblingFile ("B4ND Plugin Scanner.exe");
+    return exe.getSiblingFile ("b4nd_plugin_scanner.exe");
    #else
-    return exe.getSiblingFile ("B4ND Plugin Scanner");
+    return exe.getSiblingFile ("b4nd_plugin_scanner");
    #endif
 }
 
@@ -397,7 +398,8 @@ std::unique_ptr<juce::XmlElement> PluginScanner::scanOne (const juce::File& scan
     out.deleteFile();
     if (xml == nullptr || ! xml->hasTagName ("B4NDSCAN") || ! xml->getBoolAttribute ("complete"))
     {
-        failure = "crashed while loading (scanner exit code " + juce::String ((juce::int64) code) + ")";
+        failure = code != 0 ? "crashed while loading (scanner exit code " + juce::String ((juce::int64) code) + ")"
+                            : juce::String ("crashed while loading (the scanner wrote no report)");
         return nullptr;
     }
     return xml;
@@ -415,8 +417,10 @@ void PluginScanner::run()
         }
         juce::String failure;
         std::shared_ptr<juce::XmlElement> report (scanOne (scannerExe, file, timeoutMs, failure).release());
-        juce::MessageManager::callAsync ([this, file, report, failure]
+        juce::MessageManager::callAsync ([this, a = alive, file, report, failure]
         {
+            if (! a->load())
+                return;
             if (report != nullptr)
                 catalog.applyScanReport (file, *report);
             else
@@ -431,8 +435,10 @@ void PluginScanner::run()
         const juce::ScopedLock sl (lock);
         current.clear();
     }
-    juce::MessageManager::callAsync ([this]
+    juce::MessageManager::callAsync ([this, a = alive]
     {
+        if (! a->load())
+            return;
         juce::Logger::writeToLog ("Plugin scan finished");
         if (onFinished)
             onFinished();
