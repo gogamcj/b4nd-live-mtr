@@ -65,6 +65,14 @@ jobs:
             if ($p.ExitCode -ne 0) { throw "screenshot run failed ($($a -join ' ')): $($p.ExitCode)" }
           }
           Get-ChildItem screenshot-*.png
+          # Project package: save as, then reopen (exit code 0 means the open succeeded).
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-saved.png','--media',"$PWD/test-backing.wav",'--save-as',"$PWD/win-test.b4nd")
+          if ($p.ExitCode -ne 0) { throw "save-as run failed" }
+          if (-not (Test-Path "win-test.b4nd/project.db")) { throw "project.db not written" }
+          if (Test-Path "win-test.b4nd/session.lock") { throw "session.lock left behind after a clean exit" }
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-reopened.png','--project',"$PWD/win-test.b4nd")
+          if ($p.ExitCode -ne 0) { throw "reopen run failed" }
+          Get-ChildItem win-test.b4nd/backups
           Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
 
       - uses: actions/upload-artifact@v4
@@ -157,3 +165,42 @@ jobs:
           gt "$(peak play2.txt 2)" 0.05
           grep -q "DSP overloads 0" play8.txt
           grep -q "DSP overloads 0" play2.txt
+
+      - name: Project save / reopen / crash recovery test
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          python3 tools/make-test-wav.py test-backing.wav --rate 44100 --seconds 5
+          # 1. demo setlist + an audio file, saved as a new project package (Korean name on purpose)
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot shot-save.png --media test-backing.wav \
+            --save-as "$PWD/공연 테스트.b4nd" | tee save.txt
+          grep -q "project save-as: ok" save.txt
+          test -f "공연 테스트.b4nd/project.db"
+          test ! -e "공연 테스트.b4nd/session.lock"
+          # 2. reopen: same songs, track state and media
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot shot-open.png --project "$PWD/공연 테스트.b4nd" | tee open.txt
+          grep -q 'project: "공연 테스트" (3 songs), previous session closed cleanly: yes' open.txt
+          grep -q 'track "Original Mix" AUDIO 0.0 dB MUTE' open.txt
+          grep -q 'track "test-backing" AUDIO 0.0 dB media=test-backing.wav' open.txt
+          grep -q "media: 1 ready" open.txt
+          # 3. normal start reopens the last project; kill -9 leaves session.lock -> detected on next open
+          Xvfb :98 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          XVFB=$!
+          sleep 1
+          DISPLAY=:98 "$APP" &
+          APPPID=$!
+          sleep 6
+          test -e "공연 테스트.b4nd/session.lock"
+          kill -9 $APPPID
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot shot-crash.png --project "$PWD/공연 테스트.b4nd" | tee crash.txt
+          grep -q "previous session closed cleanly: NO" crash.txt
+          ls "공연 테스트.b4nd/backups"
+          kill $XVFB || true
+
+      - name: Verify vendored SQLite is the official release
+        run: |
+          curl -fsSL -o sqlite.zip https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+          unzip -q sqlite.zip -d sqlite-official
+          cmp sqlite-official/sqlite-amalgamation-3540100/sqlite3.c third_party/sqlite/sqlite3.c
+          cmp sqlite-official/sqlite-amalgamation-3540100/sqlite3.h third_party/sqlite/sqlite3.h
+          echo "third_party/sqlite matches sqlite.org 3.54.1"

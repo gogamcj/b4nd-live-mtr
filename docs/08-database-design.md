@@ -176,3 +176,17 @@ CREATE TABLE analysis_run (
 | 비정상 종료 복구 | 실행 시 `session.lock` 파일이 남아 있으면 마지막 자동 저장/백업 중 선택 |
 | 무결성 | 열 때 `PRAGMA quick_check`, 실패 시 최신 백업 제안 |
 | 누락 미디어 | 열 때 모든 `media_file` 존재·크기 확인 (sha256은 백그라운드) |
+
+## 5. 구현 메모 (Phase 3b, 2026-11-16)
+
+- 코드: `src/project` (`ProjectDatabase`, `ProjectPackage`, JUCE 비의존·단위 테스트), 앱 쪽 `src/app/ProjectSession` (프로젝트 IO 스레드).
+- SQLite 3.54.1 amalgamation을 `third_party/sqlite`에 그대로 포함한다. 빌드가 네트워크에 의존하지 않도록 하기 위함이며, CI가 sqlite.org 공식 파일과 바이트 단위로 비교한다.
+- 스키마 v1 = 위 정의 + 다음 추가 사항
+  - `clip` 테이블 (track_id, media_id, start_sec, offset_sec, length_sec): 오디오 트랙의 실제 배치. ER 개요의 track 1─* clip에 해당
+  - `track.destination_label`: Phase 4/5 전까지 MIDI 트랙 목적지 표시용 텍스트
+  - `output_assignment`에 CHECK 제약: PA 출력에 click/guide/monitor 버스 금지 (앱 검사와 별개로 DB도 거부)
+  - bus 6개는 고정 행 (`bus-main`, `bus-click` ...)
+- 저장은 트랜잭션 하나로 전체를 교체한다. 중간에 실패하면 롤백되어 직전 저장 상태가 그대로 남는다 (테스트로 확인).
+- 패키지 폴더: `<이름>.b4nd/` 안에 `project.db`, `media/`, `backups/`, `session.lock`. 패키지 안의 미디어는 상대 경로, 밖의 미디어는 절대 경로로 저장한다. 미디어를 패키지로 모으는 기능은 이후 단계.
+- 백업 파일 이름은 `project-YYYYMMDD-HHMMSS-NNN.db` (같은 초에 여러 개일 때 NNN).
+- 아직 저장하지 않는 것: 데모 MIDI 구간(Phase 4에서 실제 MIDI 클립으로 대체), 출력 라우팅(장치 기본 프리셋 사용, 라우팅 편집 UI와 함께 저장 예정), 마스터 볼륨.

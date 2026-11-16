@@ -75,7 +75,12 @@ void StatusBar::paint (juce::Graphics& g)
         else if (m.ready == 0)        dot = theme::textFaint;
         item ("MEDIA", v, dot, 150);
     }
-    item ("MIDI", "Phase 4", theme::textFaint, 90);
+    {
+        const auto t = state.getSaveStatusText();
+        const auto dot = state.hasSaveError() ? theme::danger : ! state.hasProjectFile() ? theme::warn
+                       : state.isDirty() ? theme::warn : theme::ok;
+        item ("PROJECT", t, dot, state.hasSaveError() ? 360 : 190);
+    }
 
     const auto mode = state.isLiveMode() ? juce::String ("LIVE") : juce::String ("EDIT");
     g.setColour (state.isLiveMode() ? theme::danger : theme::accent);

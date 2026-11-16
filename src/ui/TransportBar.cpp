@@ -81,7 +81,7 @@ void TransportBar::paint (juce::Graphics& g)
     auto info = infoArea.reduced (12, 8);
     g.setColour (theme::accent);
     g.setFont (theme::font (11.0f, true));
-    g.drawText ("B4ND LIVE MTR  |  " + state.getProjectName().toUpperCase(), info.removeFromTop (16),
+    g.drawText ("B4ND LIVE MTR  |  " + state.getProjectName().toUpperCase() + (state.isDirty() ? " *" : ""), info.removeFromTop (16),
                 juce::Justification::centredLeft);
     g.setColour (theme::text);
     g.setFont (theme::font (18.0f, true));

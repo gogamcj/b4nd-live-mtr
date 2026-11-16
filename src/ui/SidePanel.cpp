@@ -1,5 +1,6 @@
 #include "ui/SidePanel.h"
 #include "core/TimeFormat.h"
+#include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -23,6 +24,18 @@ SidePanel::SidePanel (AppState& s) : state (s)
         addAndMakeVisible (b);
     }
 
+    newButton.onClick  = [this] { projectCommands::newProject (state); };
+    openButton.onClick = [this] { projectCommands::openProject (state); };
+    saveButton.onClick = [this] { projectCommands::save (state); };
+    newButton.setTooltip ("New project (Ctrl+N)");
+    openButton.setTooltip ("Open project (Ctrl+O)");
+    saveButton.setTooltip ("Save (Ctrl+S). Changes are also saved automatically 5 s after each edit.");
+    for (auto* b : { &newButton, &openButton, &saveButton })
+    {
+        b->setWantsKeyboardFocus (false);
+        addAndMakeVisible (b);
+    }
+
     state.addChangeListener (this);
     songList.updateContent();
     songList.selectRow (state.getCurrentSongIndex(), true, true);
@@ -35,6 +48,18 @@ SidePanel::~SidePanel()
 
 void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
 {
+    if (songList.getNumRowsOnScreen() >= 0 && builtFor != state.getProjectFolder().getFullPathName() + juce::String ((int) state.getSongs().size()))
+    {
+        builtFor = state.getProjectFolder().getFullPathName() + juce::String ((int) state.getSongs().size());
+        songList.updateContent();
+        songList.repaint();
+        repaint();
+    }
+    const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
+    newButton.setEnabled (canChange);
+    openButton.setEnabled (canChange);
+    saveButton.setButtonText (state.isDirty() ? "SAVE *" : "SAVE");
+
     if (songList.getSelectedRow() != state.getCurrentSongIndex())
         songList.selectRow (state.getCurrentSongIndex(), true, true);
 
@@ -103,7 +128,7 @@ void SidePanel::paint (juce::Graphics& g)
         g.drawHorizontalLine (r.getBottom() - 1, 8.0f, (float) r.getRight() - 8.0f);
     };
 
-    header (songHeader, "PROJECT  /  SETLIST");
+    header (songHeader, "SETLIST");
     header (aiHeader, state.isLiveMode() ? "AI ANALYSIS  (locked in Live Mode)" : "AI ANALYSIS  (Phase 8+)");
 
     g.setColour (theme::textDim);
@@ -116,6 +141,13 @@ void SidePanel::resized()
 {
     auto r = getLocalBounds();
     songHeader = r.removeFromTop (30);
+    {
+        auto row = songHeader.reduced (8, 4).withTrimmedLeft (64);
+        const int w = row.getWidth() / 3;
+        saveButton.setBounds (row.removeFromRight (w).reduced (2, 0));
+        openButton.setBounds (row.removeFromRight (w).reduced (2, 0));
+        newButton.setBounds (row.reduced (2, 0));
+    }
 
     const int n = aiButtons.size();
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);

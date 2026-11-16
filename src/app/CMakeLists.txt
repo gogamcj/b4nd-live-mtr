@@ -8,6 +8,7 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     MainWindow.cpp
     MainComponent.cpp
     AppState.cpp
+    ProjectSession.cpp
     ../ui/B4ndLookAndFeel.cpp
     ../ui/TransportBar.cpp
     ../ui/SidePanel.cpp
@@ -17,6 +18,7 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../ui/LevelMeter.cpp
     ../ui/LiveModeView.cpp
     ../ui/AudioSettingsPanel.cpp
+    ../ui/ProjectCommands.cpp
     ../audio/AudioDeviceController.cpp
     ../media/MediaLoader.cpp)
 
@@ -54,6 +56,7 @@ target_link_libraries(B4ND_LIVE_MTR
     PRIVATE
         b4nd_core
         b4nd_engine
+        b4nd_project
         juce::juce_gui_extra
         juce::juce_audio_devices
         juce::juce_audio_formats

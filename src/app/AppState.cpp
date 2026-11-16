@@ -1,4 +1,6 @@
 #include "app/AppState.h"
+
+#include <map>
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -51,6 +53,7 @@ static TrackInfo makeTrack (const juce::String& name, TrackKind kind, const juce
                             std::vector<juce::Range<double>> regions, float volDb = 0.0f, bool mute = false)
 {
     TrackInfo t;
+    t.id = newUuid();
     t.name = name;
     t.kind = kind;
     t.destination = dest;
@@ -136,6 +139,8 @@ std::vector<SongInfo> AppState::createDemoSetlist()
         list.push_back (std::move (s));
     }
 
+    for (auto& s : list)
+        s.id = newUuid();
     return list;
 }
 
@@ -152,6 +157,7 @@ AppState::AppState (AudioEngine& e, AudioDeviceController& d)
 AppState::~AppState()
 {
     stopTimer();
+    closeProject();
     device.removeChangeListener (this);
 }
 
@@ -357,6 +363,7 @@ void AppState::setTrackVolume (int trackIndex, float db)
         {
             s->tracks[(size_t) trackIndex].volumeDb = db;
             engine.setTrackGain (trackIndex, juce::Decibels::decibelsToGain (db, -60.0f));
+            markDirty();
             sendChangeMessage();
         }
 }
@@ -368,6 +375,7 @@ void AppState::setTrackMute (int trackIndex, bool m)
         {
             s->tracks[(size_t) trackIndex].mute = m;
             engine.setTrackMute (trackIndex, m);
+            markDirty();
             sendChangeMessage();
         }
 }
@@ -379,6 +387,7 @@ void AppState::setTrackSolo (int trackIndex, bool so)
         {
             s->tracks[(size_t) trackIndex].solo = so;
             engine.setTrackSolo (trackIndex, so);
+            markDirty();
             sendChangeMessage();
         }
 }
@@ -440,6 +449,7 @@ void AppState::setTrackPan (int trackIndex, float pan)
         {
             s->tracks[(size_t) trackIndex].pan = juce::jlimit (-1.0f, 1.0f, pan);
             engine.setTrackPan (trackIndex, s->tracks[(size_t) trackIndex].pan);
+            markDirty();
             sendChangeMessage();
         }
 }
@@ -558,6 +568,7 @@ juce::String AppState::addAudioFile (const juce::File& file, int trackIndex)
         if ((int) s->tracks.size() >= AudioEngine::maxTracks)
             return "Too many tracks in this song";
         TrackInfo nt;
+        nt.id = newUuid();
         nt.name = file.getFileNameWithoutExtension();
         nt.kind = TrackKind::Audio;
         nt.destination = "Main L/R";
@@ -574,6 +585,7 @@ juce::String AppState::addAudioFile (const juce::File& file, int trackIndex)
     t->mediaError.clear();
     t->mediaStatus = TrackInfo::MediaStatus::Loading;
     juce::Logger::writeToLog ("Media assigned: " + t->name + " <- " + t->mediaPath);
+    markDirty();
     requestAllMedia();
     rebuildPlan();
     sendChangeMessage();
@@ -718,6 +730,23 @@ void AppState::timerCallback()
     applyFinishedMedia();
     engine.collectGarbage();
 
+    // Autosave (5 s after the last change) and periodic backups, all on the project IO thread.
+    if (session.isOpen())
+    {
+        const double now = juce::Time::getMillisecondCounterHiRes();
+        if (dirty && now - lastChangeMs >= autosaveDelayMs)
+        {
+            session.saveAsync (toProjectData());
+            dirty = false;
+            sendChangeMessage();
+        }
+        if (now - lastBackupMs >= backupIntervalMs)
+        {
+            lastBackupMs = now;
+            session.backupAsync();
+        }
+    }
+
     if (isEngineActive())
     {
         for (int i = 0; i < (int) outputLevels.size(); ++i)
@@ -803,6 +832,382 @@ void AppState::timerCallback()
         }
     }
     sendChangeMessage();
+}
+
+} // namespace b4nd
+
+//==============================================================================
+// Project files
+namespace b4nd
+{
+
+static std::string kindToDb (TrackKind k)
+{
+    switch (k)
+    {
+        case TrackKind::Audio:        return "audio";
+        case TrackKind::MidiVsti:     return "midi_vsti";
+        case TrackKind::MidiExternal: return "midi_external";
+        case TrackKind::Click:        return "click";
+        case TrackKind::Guide:        return "guide";
+    }
+    return "audio";
+}
+
+static TrackKind kindFromDb (const std::string& k)
+{
+    if (k == "midi_vsti")     return TrackKind::MidiVsti;
+    if (k == "midi_external") return TrackKind::MidiExternal;
+    if (k == "click")         return TrackKind::Click;
+    if (k == "guide")         return TrackKind::Guide;
+    return TrackKind::Audio;
+}
+
+static std::string busToDb (BusKind b)
+{
+    switch (b)
+    {
+        case BusKind::Main:    return "main";
+        case BusKind::Click:   return "click";
+        case BusKind::Guide:   return "guide";
+        case BusKind::Extra:   return "extra";
+        case BusKind::Monitor: return "monitor";
+        case BusKind::Aux:     return "aux";
+    }
+    return "main";
+}
+
+static BusKind busFromDb (const std::string& b)
+{
+    if (b == "click")   return BusKind::Click;
+    if (b == "guide")   return BusKind::Guide;
+    if (b == "extra")   return BusKind::Extra;
+    if (b == "monitor") return BusKind::Monitor;
+    if (b == "aux")     return BusKind::Aux;
+    return BusKind::Main;
+}
+
+static std::string u8 (const juce::String& s) { return s.toStdString(); }
+static juce::String fromU8 (const std::string& s) { return juce::String::fromUTF8 (s.c_str(), (int) s.size()); }
+
+juce::File AppState::getLastProjectRecordFile()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("B4ND LIVE MTR").getChildFile ("last-project.txt");
+}
+
+juce::File AppState::getDefaultProjectsFolder()
+{
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("B4ND Projects");
+}
+
+void AppState::markDirty()
+{
+    dirty = true;
+    lastChangeMs = juce::Time::getMillisecondCounterHiRes();
+}
+
+juce::String AppState::getSaveStatusText() const
+{
+    if (! session.isOpen())
+        return "NOT SAVED (no project file)";
+    if (const auto err = session.getLastError(); err.isNotEmpty())
+        return "SAVE FAILED: " + err;
+    if (dirty || session.isSaving())
+        return "SAVING...";
+    return "SAVED " + session.getLastSaveTime().formatted ("%H:%M:%S");
+}
+
+juce::String AppState::guardProjectChange() const
+{
+    if (liveMode)
+        return "Live Mode: projects cannot be changed during a show";
+    if (transport == TransportState::Playing)
+        return "Stop playback first";
+    return {};
+}
+
+ProjectData AppState::toProjectData() const
+{
+    ProjectData p;
+    p.id = u8 (projectId.isNotEmpty() ? projectId : juce::String (newUuid()));
+    p.name = u8 (projectName);
+    p.sampleRate = juce::roundToInt (mediaSampleRate());
+    p.createdAt = projectCreatedAt.isNotEmpty() ? u8 (projectCreatedAt) : nowIso8601();
+    p.modifiedAt = nowIso8601();
+    p.appVersion = JUCE_APPLICATION_VERSION_STRING;
+
+    const auto pkg = session.getPackage();
+    std::map<juce::String, std::string> mediaIds;   // absolute path -> media id
+
+    SetlistData setlist;
+    setlist.id = "setlist-main";
+    setlist.name = "Main";
+
+    for (const auto& s : songs)
+    {
+        SongData sd;
+        sd.id = u8 (s.id);
+        sd.title = u8 (s.title);
+        sd.artist = u8 (s.artist);
+        sd.key = u8 (s.key);
+        sd.baseBpm = s.tempo.bpmAtBeat (0.0);
+        sd.lengthSec = s.lengthSeconds;
+        sd.tempoPoints = s.tempo.getTempoPoints();
+        sd.timeSigPoints = s.tempo.getTimeSigPoints();
+        for (const auto& c : s.cues)
+        {
+            CueData cd;
+            cd.id = newUuid();
+            cd.name = u8 (c.name);
+            cd.positionSec = c.seconds;
+            sd.cues.push_back (cd);
+        }
+        for (const auto& t : s.tracks)
+        {
+            TrackData td;
+            td.id = u8 (t.id);
+            td.name = u8 (t.name);
+            td.kind = kindToDb (t.kind);
+            td.busKind = t.kind == TrackKind::Click ? "click" : t.kind == TrackKind::Guide ? "guide" : busToDb (t.bus);
+            td.destinationLabel = u8 (t.destination);
+            td.volumeDb = t.volumeDb;
+            td.pan = t.pan;
+            td.mute = t.mute;
+            td.solo = t.solo;
+            if (t.mediaPath.isNotEmpty())
+            {
+                auto it = mediaIds.find (t.mediaPath);
+                if (it == mediaIds.end())
+                {
+                    MediaRef m;
+                    m.id = newUuid();
+                    m.kind = t.kind == TrackKind::Guide ? "guide" : "original";
+                    m.path = session.isOpen() ? pkg.toStoredPath (u8 (t.mediaPath)) : u8 (t.mediaPath);
+                    if (t.media != nullptr && t.mediaRate > 0.0)
+                    {
+                        m.durationSec = (double) t.media->numFrames / t.mediaRate;
+                        m.channels = t.media->numChannels;
+                    }
+                    p.media.push_back (m);
+                    it = mediaIds.emplace (t.mediaPath, m.id).first;
+                }
+                ClipData c;
+                c.id = newUuid();
+                c.mediaId = it->second;
+                c.startSec = t.mediaStartSeconds;
+                td.clips.push_back (c);
+            }
+            sd.tracks.push_back (td);
+        }
+        if (s.tracks.empty() || std::none_of (s.tracks.begin(), s.tracks.end(), [] (const TrackInfo& t) { return t.kind == TrackKind::Click; }))
+            sd.click.enabled = false;
+        setlist.songIds.push_back (sd.id);
+        p.songs.push_back (std::move (sd));
+    }
+    p.setlists.push_back (setlist);
+    return p;
+}
+
+void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
+{
+    const ProjectPackage pkg (folder.getFullPathName().toStdString());
+
+    std::vector<SongInfo> loaded;
+    std::map<std::string, const SongData*> byId;
+    for (const auto& sd : p.songs)
+        byId[sd.id] = &sd;
+
+    // Show order from the first setlist; songs not in it follow in stored order.
+    std::vector<const SongData*> order;
+    if (! p.setlists.empty())
+        for (const auto& id : p.setlists.front().songIds)
+            if (auto it = byId.find (id); it != byId.end())
+                order.push_back (it->second);
+    for (const auto& sd : p.songs)
+        if (std::find (order.begin(), order.end(), &sd) == order.end())
+            order.push_back (&sd);
+
+    for (const auto* sdp : order)
+    {
+        const auto& sd = *sdp;
+        SongInfo s;
+        s.id = fromU8 (sd.id);
+        s.title = fromU8 (sd.title);
+        s.artist = fromU8 (sd.artist);
+        s.key = fromU8 (sd.key);
+        s.lengthSeconds = sd.lengthSec > 0.0 ? sd.lengthSec : 180.0;
+        s.tempo.setTempoPoints (sd.tempoPoints.empty() ? std::vector<TempoPoint> { { 0.0, sd.baseBpm > 0.0 ? sd.baseBpm : 120.0 } } : sd.tempoPoints);
+        if (! sd.timeSigPoints.empty())
+            s.tempo.setTimeSigPoints (sd.timeSigPoints);
+        for (const auto& c : sd.cues)
+            s.cues.push_back ({ fromU8 (c.name), c.positionSec });
+        for (const auto& td : sd.tracks)
+        {
+            TrackInfo t;
+            t.id = fromU8 (td.id);
+            t.name = fromU8 (td.name);
+            t.kind = kindFromDb (td.kind);
+            t.bus = busFromDb (td.busKind);
+            t.destination = fromU8 (td.destinationLabel);
+            t.volumeDb = (float) td.volumeDb;
+            t.pan = (float) td.pan;
+            t.mute = td.mute;
+            t.solo = td.solo;
+            if (t.kind == TrackKind::Click)
+                t.regions = { { 0.0, s.lengthSeconds } };
+            if (! td.clips.empty())
+                if (const auto* m = p.findMedia (td.clips.front().mediaId))
+                {
+                    t.mediaPath = fromU8 (pkg.toAbsolutePath (m->path));
+                    t.mediaStartSeconds = td.clips.front().startSec;
+                    t.mediaStatus = TrackInfo::MediaStatus::Loading;
+                }
+            s.tracks.push_back (std::move (t));
+        }
+        loaded.push_back (std::move (s));
+    }
+
+    // Swap the model in. The engine keeps playing nothing: we are stopped (guardProjectChange).
+    stop();
+    songs = std::move (loaded);
+    currentSong = 0;
+    position = 0.0;
+    trackLevels.fill (0.0f);
+    projectId = fromU8 (p.id);
+    projectCreatedAt = fromU8 (p.createdAt);
+    projectName = fromU8 (p.name).isNotEmpty() ? fromU8 (p.name) : folder.getFileNameWithoutExtension();
+    dirty = false;
+    mediaPool.purgeUnused();
+    requestAllMedia();
+    rebuildPlan();
+    sendChangeMessage();
+}
+
+void AppState::rememberLastProject() const
+{
+    auto f = getLastProjectRecordFile();
+    f.getParentDirectory().createDirectory();
+    f.replaceWithText (session.isOpen() ? session.getFolder().getFullPathName() : juce::String());
+}
+
+juce::String AppState::newProject (const juce::File& folder, const juce::String& name)
+{
+    if (auto g = guardProjectChange(); g.isNotEmpty())
+        return g;
+    ProjectData p;
+    p.id = newUuid();
+    p.name = u8 (name);
+    p.createdAt = p.modifiedAt = nowIso8601();
+    p.appVersion = JUCE_APPLICATION_VERSION_STRING;
+    SongData s;
+    s.id = newUuid();
+    s.title = "Song 1";
+    s.lengthSec = 180.0;
+    s.tempoPoints = { { 0.0, 120.0 } };
+    s.timeSigPoints = { { 0, 4, 4 } };
+    TrackData click;
+    click.id = newUuid();
+    click.name = "Click";
+    click.kind = "click";
+    click.busKind = "click";
+    click.volumeDb = -6.0;
+    s.tracks.push_back (click);
+    p.songs.push_back (s);
+    p.setlists.push_back ({ "setlist-main", "Main", "", "", { s.id } });
+
+    if (auto r = session.create (folder, p); ! r)
+        return fromU8 (r.error);
+    applyProjectData (p, folder);
+    staleLockOnOpen = false;
+    backupsOnOpen.clear();
+    missingOnOpen.clear();
+    lastBackupMs = juce::Time::getMillisecondCounterHiRes();
+    rememberLastProject();
+    return {};
+}
+
+juce::String AppState::openProject (const juce::File& folderOrDb)
+{
+    if (auto g = guardProjectChange(); g.isNotEmpty())
+        return g;
+    if (session.isOpen() && dirty)
+        session.saveNow (toProjectData());
+    dirty = false;
+
+    auto r = session.open (folderOrDb);
+    if (! r.result)
+        return fromU8 (r.result.error);
+
+    staleLockOnOpen = r.hadStaleLock;
+    backupsOnOpen.clear();
+    for (const auto& b : r.backups) backupsOnOpen.add (fromU8 (b));
+    missingOnOpen.clear();
+    for (const auto& m : r.missingMedia) missingOnOpen.add (fromU8 (m));
+    if (! missingOnOpen.isEmpty())
+        juce::Logger::writeToLog ("MEDIA MISSING on open: " + missingOnOpen.joinIntoString (", "));
+
+    applyProjectData (r.data, session.getFolder());
+    lastBackupMs = juce::Time::getMillisecondCounterHiRes();
+    rememberLastProject();
+    return {};
+}
+
+juce::String AppState::saveProject()
+{
+    if (! session.isOpen())
+        return "No project file yet: use Save As";
+    auto r = session.saveNow (toProjectData());
+    if (! r)
+        return fromU8 (r.error);
+    dirty = false;
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::saveProjectAs (const juce::File& folder)
+{
+    if (auto g = guardProjectChange(); g.isNotEmpty())
+        return g;
+    // The new package gets its own identity; media keep their absolute paths (outside the package).
+    const auto oldId = projectId;
+    projectId = newUuid();
+    projectName = folder.getFileNameWithoutExtension();
+    session.close();
+    auto p = toProjectData();
+    if (auto r = session.create (folder, p); ! r)
+    {
+        projectId = oldId;
+        return fromU8 (r.error);
+    }
+    dirty = false;
+    staleLockOnOpen = false;
+    lastBackupMs = juce::Time::getMillisecondCounterHiRes();
+    rememberLastProject();
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::restoreBackup (const juce::String& backupPath)
+{
+    if (auto g = guardProjectChange(); g.isNotEmpty())
+        return g;
+    auto r = session.restoreBackup (backupPath.toStdString());
+    if (! r.result)
+        return fromU8 (r.result.error);
+    staleLockOnOpen = false;
+    missingOnOpen.clear();
+    for (const auto& m : r.missingMedia) missingOnOpen.add (fromU8 (m));
+    applyProjectData (r.data, session.getFolder());
+    return {};
+}
+
+void AppState::closeProject()
+{
+    if (session.isOpen() && dirty)
+        session.saveAsync (toProjectData());
+    dirty = false;
+    session.close();   // writes the pending snapshot, removes session.lock
 }
 
 } // namespace b4nd
