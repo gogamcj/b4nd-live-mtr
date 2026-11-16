@@ -93,6 +93,18 @@ void StatusBar::paint (juce::Graphics& g)
         }
     }
     {
+        const auto ps = state.getPluginSummary();
+        if (ps.instruments > 0)
+        {
+            juce::String v = juce::String (ps.ready) + "/" + juce::String (ps.instruments) + " READY";
+            auto dot = theme::ok;
+            if (ps.problems > 0)          { v = juce::String (ps.problems) + " NOT LOADED"; dot = theme::danger; }
+            else if (ps.notCertified > 0) { v << "  " << ps.notCertified << " NOT CERT."; dot = theme::warn; }
+            v << "  DSP " << juce::roundToInt (ps.maxLoad * 100.0f) << "%";
+            item ("VSTi", v, dot, 190);
+        }
+    }
+    {
         const auto t = state.getSaveStatusText();
         const auto dot = state.hasSaveError() ? theme::danger : ! state.hasProjectFile() ? theme::warn
                        : state.isDirty() ? theme::warn : theme::ok;

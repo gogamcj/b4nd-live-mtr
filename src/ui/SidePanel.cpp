@@ -1,6 +1,7 @@
 #include "ui/SidePanel.h"
 #include "core/TimeFormat.h"
 #include "ui/ModulePanel.h"
+#include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
 
@@ -33,7 +34,9 @@ SidePanel::SidePanel (AppState& s) : state (s)
     saveButton.setTooltip ("Save (Ctrl+S). Changes are also saved automatically 5 s after each edit.");
     modulesButton.onClick = [this] { showModuleWindow (state); };
     modulesButton.setTooltip ("External MIDI sound modules: ports, channels, presets, status (Ctrl+M)");
-    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton })
+    pluginsButton.onClick = [this] { showPluginWindow (state); };
+    pluginsButton.setTooltip ("VST3 plugins: scan, Live Certified status, which plugin each VSTi track plays (Ctrl+P)");
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -71,6 +74,20 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
             modulesButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
         else
             modulesButton.removeColour (juce::TextButton::buttonColourId);
+    }
+
+    {
+        const auto ps = state.getPluginSummary();
+        pluginsButton.setButtonText (ps.instruments == 0  ? juce::String ("PLUGINS")
+                                     : ps.problems > 0    ? "PLUGINS - " + juce::String (ps.problems) + " NOT LOADED"
+                                     : ps.notCertified > 0 ? "PLUGINS - " + juce::String (ps.notCertified) + " NOT CERTIFIED"
+                                                           : "PLUGINS - " + juce::String (ps.ready) + " READY");
+        if (ps.problems > 0)
+            pluginsButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
+        else if (ps.notCertified > 0)
+            pluginsButton.setColour (juce::TextButton::buttonColourId, theme::warn.darker (0.6f));
+        else
+            pluginsButton.removeColour (juce::TextButton::buttonColourId);
     }
 
     if (songList.getSelectedRow() != state.getCurrentSongIndex())
@@ -166,6 +183,7 @@ void SidePanel::resized()
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
     totalArea = r.removeFromBottom (26);
+    pluginsButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     songList.setBounds (r.reduced (0, 4));
 

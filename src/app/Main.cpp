@@ -7,6 +7,7 @@
 #include "app/MainWindow.h"
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
+#include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
 
@@ -36,14 +37,16 @@ static void crashHandler (void*)
     --project <folder> opens a project package first; --save-as <folder> saves into a new one.
     --module <name> adds a sound module profile (no port), --midi <file.mid> adds an external MIDI
     track (as if dropped), --modules captures the MIDI module window instead of the main window.
+    --vsti <plugin.vst3> scans the plugin (scanner process) and adds a VSTi track with it,
+    --vsti-midi <file.mid> gives that track its notes, --plugins captures the plugin window.
     Without --screenshot, the last opened project is reopened at start-up. */
 struct ScreenshotRequest
 {
     juce::File file;
     bool live = false;
     bool settings = false;   // capture the audio settings window instead
-    bool modulesWindow = false;
-    juce::StringArray midiFiles, moduleNames;
+    bool modulesWindow = false, pluginsWindow = false;
+    juce::StringArray midiFiles, moduleNames, vstiPlugins, vstiMidi;
     int width = 1600, height = 960;
     int song = 0;
     double atSeconds = 0.0;
@@ -62,6 +65,7 @@ struct ScreenshotRequest
         r.live = args.contains ("--live");
         r.settings = args.contains ("--audio-settings");
         r.modulesWindow = args.contains ("--modules");
+        r.pluginsWindow = args.contains ("--plugins");
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -86,6 +90,10 @@ struct ScreenshotRequest
                 r.midiFiles.add (cwd.getChildFile (args[k + 1].unquoted()).getFullPathName());
             if (args[k] == "--module")
                 r.moduleNames.add (args[k + 1].unquoted());
+            if (args[k] == "--vsti")
+                r.vstiPlugins.add (cwd.getChildFile (args[k + 1].unquoted()).getFullPathName());
+            if (args[k] == "--vsti-midi")
+                r.vstiMidi.add (cwd.getChildFile (args[k + 1].unquoted()).getFullPathName());
         }
         return r;
     }
@@ -177,6 +185,10 @@ public:
                 if (const auto err = state->addMidiFile (juce::File (m)); err.isNotEmpty())
                     std::printf ("midi rejected: %s\n", err.toRawUTF8());
             printMidiSummary();
+            for (int v = 0; v < screenshot->vstiPlugins.size(); ++v)
+                addVstiTrack (screenshot->vstiPlugins[v], screenshot->vstiMidi[v]);
+            if (! screenshot->vstiPlugins.isEmpty() || state->getPluginSummary().instruments > 0)
+                printPluginSummary();
             if (screenshot->settings)
                 showAudioSettingsWindow (*state);
             if (screenshot->live)
@@ -187,6 +199,8 @@ public:
             }
             if (screenshot->modulesWindow)
                 showModuleWindow (*state, 0);
+            if (screenshot->pluginsWindow)
+                showPluginWindow (*state);
             startTimer (100);
         }
     }
@@ -206,6 +220,46 @@ public:
                              (double) t.volumeDb, t.mute ? " MUTE" : "", t.solo ? " SOLO" : "",
                              t.mediaPath.isNotEmpty() ? (" media=" + juce::File (t.mediaPath).getFileName()).toRawUTF8() : "");
         }
+        if (state->getPluginSummary().instruments > 0)
+            printPluginSummary();
+    }
+
+    void addVstiTrack (const juce::String& pluginFile, const juce::String& midiFile)
+    {
+        auto& catalog = state->getPluginHost().getCatalog();
+        if (catalog.needsScan (juce::File (pluginFile)))
+        {
+            const auto err = state->getPluginHost().scanFileNow (pluginFile);
+            std::printf ("vsti scan %s: %s\n", juce::File (pluginFile).getFileName().toRawUTF8(), err.isEmpty() ? "ok" : err.toRawUTF8());
+        }
+        juce::String uid;
+        for (const auto& r : catalog.getRecords())
+            if (r.file == pluginFile && r.status != PluginRecord::Status::Blacklisted)
+                uid = r.uid();
+        if (uid.isEmpty())
+        {
+            std::printf ("vsti rejected: %s is blacklisted or has no plugin\n", pluginFile.toRawUTF8());
+            return;
+        }
+        if (const auto err = state->setTrackPlugin (-1, uid); err.isNotEmpty())
+            std::printf ("vsti: %s\n", err.toRawUTF8());
+        if (midiFile.isNotEmpty())
+            if (const auto err = state->addMidiFile (juce::File (midiFile), (int) state->getCurrentSong()->tracks.size() - 1); err.isNotEmpty())
+                std::printf ("vsti midi rejected: %s\n", err.toRawUTF8());
+    }
+
+    void printPluginSummary()
+    {
+        const auto ps = state->getPluginSummary();
+        std::printf ("vsti: %d instruments (%d ready, %d not certified, %d not available), max plugin DSP load %.1f%%\n",
+                     ps.instruments, ps.ready, ps.notCertified, ps.problems, (double) ps.maxLoad * 100.0);
+        for (const auto& s : state->getSongs())
+            for (const auto& t : s.tracks)
+                if (t.kind == TrackKind::MidiVsti && t.pluginUid.isNotEmpty())
+                    std::printf ("  vsti track \"%s\" (song \"%s\"): %s [%s]%s%s, %d notes, state %d bytes\n", t.name.toRawUTF8(),
+                                 s.title.toRawUTF8(), t.pluginName.toRawUTF8(), AppState::pluginStatusText (t).toRawUTF8(),
+                                 t.pluginError.isNotEmpty() ? " " : "", t.pluginError.toRawUTF8(), t.midiNotes,
+                                 (int) t.pluginState.getSize());
     }
 
     void printMidiSummary()
@@ -234,6 +288,7 @@ public:
             state->closeProject();
         closeAudioSettingsWindow();
         closeModuleWindow();
+        closePluginWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -339,6 +394,15 @@ private:
                              (unsigned long long) mo.getSentCount(), (unsigned long long) mo.getDroppedCount(),
                              (unsigned long long) mo.getLateCount(), mo.getMaxLatenessMs(),
                              (unsigned long long) engine->getMidiDroppedCount(), sounding);
+                if (state->getPluginSummary().instruments > 0)
+                {
+                    int instNotes = 0;
+                    for (int k = 0; k < AudioEngine::maxTracks; ++k)
+                        instNotes += engine->getActiveInstrumentNotes (k);
+                    std::printf ("vsti play: instrument events dropped %llu, notes still on after stop %d\n",
+                                 (unsigned long long) engine->getInstrumentEventsDropped(), instNotes);
+                    printPluginSummary();
+                }
             }
             phase = 2;
             phaseStart = now;
@@ -354,6 +418,8 @@ private:
         juce::Component* comp = &window->getMainComponent();
         if (screenshot->modulesWindow && getModuleWindowContent() != nullptr)
             comp = getModuleWindowContent();
+        if (screenshot->pluginsWindow && getPluginWindowContent() != nullptr)
+            comp = getPluginWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))

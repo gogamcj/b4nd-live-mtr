@@ -51,7 +51,7 @@ private:
 
 PluginHost::PluginHost (juce::File cacheFile) : catalog (std::move (cacheFile))
 {
-    formats.addFormat (std::make_unique<juce::VST3PluginFormat>());
+    formats.addFormat (new juce::VST3PluginFormat());   // owned by the manager
     catalog.load();
 }
 

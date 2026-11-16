@@ -409,7 +409,7 @@ void TimelineView::fileDragMove (const juce::StringArray& files, int, int y)
     {
         const auto kind = state.getCurrentSong()->tracks[(size_t) t].kind;
         // A lane of the other kind gets a new track instead.
-        if (midiDrop ? kind != TrackKind::MidiExternal : (kind != TrackKind::Audio && kind != TrackKind::Guide))
+        if (midiDrop ? (kind != TrackKind::MidiExternal && kind != TrackKind::MidiVsti) : (kind != TrackKind::Audio && kind != TrackKind::Guide))
             t = -1;
     }
     if (t != dropTrack)
