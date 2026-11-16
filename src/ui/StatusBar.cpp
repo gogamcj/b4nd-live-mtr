@@ -6,12 +6,25 @@ namespace b4nd
 
 StatusBar::StatusBar (AppState& s) : state (s)
 {
-    startTimerHz (2);
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    setTooltip ("Click for audio device settings (Ctrl+,)");
+    startTimerHz (4);
+}
+
+void StatusBar::mouseUp (const juce::MouseEvent&)
+{
+    if (onAudioSettingsRequested)
+        onAudioSettingsRequested();
 }
 
 void StatusBar::paint (juce::Graphics& g)
 {
-    g.fillAll (theme::panel);
+    auto& dev = state.getDevice();
+    const auto status = dev.getStatus();
+    const bool running = status == AudioDeviceController::Status::Running;
+    const bool lost = status == AudioDeviceController::Status::Lost || status == AudioDeviceController::Status::SavedDeviceMissing;
+
+    g.fillAll (lost ? theme::danger.darker (0.6f) : theme::panel);
     g.setColour (theme::outline);
     g.drawHorizontalLine (0, 0.0f, (float) getWidth());
 
@@ -28,18 +41,32 @@ void StatusBar::paint (juce::Graphics& g)
         g.setFont (theme::font (10.0f, true));
         const int capW = (int) juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), caption) + 6;
         g.drawText (caption, c.removeFromLeft (capW), juce::Justification::centredLeft);
-        g.setColour (theme::textDim);
+        g.setColour (lost ? theme::text : theme::textDim);
         g.setFont (theme::font (11.0f));
         g.drawFittedText (value, c, juce::Justification::centredLeft, 1);
     };
 
-    // Phase 1: engines are not connected yet; state is shown honestly as such.
-    item ("AUDIO", "No device (audio engine: Phase 2)", theme::textFaint, 270);
-    item ("SR/BUF", "-- / --", theme::textFaint, 110);
-    item ("MIDI", "No ports (Phase 4)", theme::textFaint, 150);
-    item ("VSTi", "0 loaded (Phase 5)", theme::textFaint, 140);
-    item ("CPU", "--", theme::textFaint, 70);
-    item ("XRUN", "0", theme::ok, 70);
+    const auto audioDot = running ? theme::ok : lost ? theme::danger : theme::textFaint;
+    item ("AUDIO", dev.getStatusText(), audioDot, 300);
+
+    if (running)
+    {
+        item ("SR/BUF", juce::String (dev.getSampleRate() / 1000.0, 1) + "k / " + juce::String (dev.getBufferSize()), theme::ok, 120);
+        item ("LAT", juce::String (dev.getOutputLatencyMs(), 1) + " ms", theme::ok, 80);
+        const float load = state.getEngine().getLoad();
+        item ("CPU", juce::String (juce::roundToInt (load * 100.0f)) + "%", load > 0.7f ? theme::warn : theme::ok, 70);
+    }
+    else
+    {
+        item ("SR/BUF", "-- / --", theme::textFaint, 120);
+        item ("LAT", "--", theme::textFaint, 80);
+        item ("CPU", "--", theme::textFaint, 70);
+    }
+
+    const auto drops = state.getDropoutCount();
+    item ("DROPOUT", juce::String ((juce::int64) drops), drops == 0 ? theme::ok : theme::danger, 90);
+    item ("MIDI", "Phase 4", theme::textFaint, 100);
+    item ("VSTi", "Phase 5", theme::textFaint, 100);
 
     const auto mode = state.isLiveMode() ? juce::String ("LIVE") : juce::String ("EDIT");
     g.setColour (state.isLiveMode() ? theme::danger : theme::accent);

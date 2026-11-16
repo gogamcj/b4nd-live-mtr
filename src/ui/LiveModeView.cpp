@@ -190,7 +190,16 @@ void LiveModeView::paint (juce::Graphics& g)
         g.setFont (theme::font (16.0f, true));
         g.drawFittedText (text, r.reduced (10, 0), juce::Justification::centredLeft, 1);
     };
-    pill ("AUDIO: NOT CONNECTED", theme::textDim);
+    {
+        auto& dev = state.getDevice();
+        const auto devStatus = dev.getStatus();
+        if (devStatus == AudioDeviceController::Status::Running)
+            pill ("AUDIO: " + dev.getDeviceName().toUpperCase(), theme::ok);
+        else if (devStatus == AudioDeviceController::Status::Lost || devStatus == AudioDeviceController::Status::SavedDeviceMissing)
+            pill ("AUDIO LOST: " + dev.getSavedDeviceName().toUpperCase(), theme::danger);
+        else
+            pill ("AUDIO: NOT CONNECTED", theme::textDim);
+    }
     pill ("MIDI: NO PORTS", theme::textDim);
     pill ("VSTi: NONE", theme::textDim);
     if (state.isEmergencyStopped())

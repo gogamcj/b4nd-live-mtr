@@ -1,4 +1,5 @@
 #include "app/MainComponent.h"
+#include "ui/AudioSettingsPanel.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -16,6 +17,7 @@ MainComponent::MainComponent (AppState& s)
 
     transportBar.onLiveModeClicked = [this] { toggleLiveMode(); };
     liveView.onExitClicked = [this] { toggleLiveMode(); };
+    statusBar.onAudioSettingsRequested = [this] { showAudioSettingsWindow (state); };
 
     setWantsKeyboardFocus (true);
     state.addChangeListener (this);
@@ -74,6 +76,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress::F11Key)               { toggleLiveMode();        return true; }
     if (key == juce::KeyPress::pageDownKey)          { state.nextSong();        return true; }
     if (key == juce::KeyPress::pageUpKey)            { state.previousSong();    return true; }
+    if (key == juce::KeyPress (',', juce::ModifierKeys::commandModifier, 0)) { showAudioSettingsWindow (state); return true; }
     if (key.getKeyCode() == 'L')                     { state.toggleLoop();      return true; }
     if (key.getKeyCode() == juce::KeyPress::rightKey){ state.jumpToNextCue();   return true; }
     if (key.getKeyCode() == juce::KeyPress::returnKey) { state.stop();          return true; }

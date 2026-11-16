@@ -118,15 +118,37 @@ std::vector<SongInfo> AppState::createDemoSetlist()
     return list;
 }
 
-AppState::AppState()
-    : songs (createDemoSetlist())
+AppState::AppState (AudioEngine& e, AudioDeviceController& d)
+    : songs (createDemoSetlist()), engine (e), device (d)
 {
+    engine.setRouting (routing);
+    device.addChangeListener (this);
     startTimerHz (30);
 }
 
 AppState::~AppState()
 {
     stopTimer();
+    device.removeChangeListener (this);
+}
+
+bool AppState::isEngineActive() const noexcept
+{
+    return device.getStatus() == AudioDeviceController::Status::Running && engine.isPrepared();
+}
+
+void AppState::post (EngineCommand::Type type, std::int64_t samples)
+{
+    EngineCommand c;
+    c.type = type;
+    c.samples = samples;
+    if (! engine.postCommand (c))
+        juce::Logger::writeToLog ("Engine command queue full (command dropped)");
+}
+
+std::int64_t AppState::secondsToSamples (double seconds) const noexcept
+{
+    return (std::int64_t) std::llround (seconds * engine.getSampleRate());
 }
 
 const SongInfo* AppState::getCurrentSong() const noexcept
@@ -187,12 +209,20 @@ void AppState::setTransport (TransportState s)
 
 void AppState::play()
 {
-    if (getCurrentSong() == nullptr)
+    auto* song = getCurrentSong();
+    if (song == nullptr)
         return;
     emergency = false;
-    if (position >= getCurrentSong()->lengthSeconds)
+    if (position >= song->lengthSeconds)
         position = 0.0;
-    juce::Logger::writeToLog ("Transport: PLAY at " + juce::String (position, 3));
+    juce::Logger::writeToLog ("Transport: PLAY at " + juce::String (position, 3)
+                              + (isEngineActive() ? "" : " (no audio device: virtual transport)"));
+    if (isEngineActive())
+    {
+        post (EngineCommand::Type::SetSongLength, secondsToSamples (song->lengthSeconds));
+        post (EngineCommand::Type::Locate, secondsToSamples (position));
+        post (EngineCommand::Type::Play);
+    }
     setTransport (TransportState::Playing);
 }
 
@@ -201,6 +231,8 @@ void AppState::pause()
     if (transport == TransportState::Playing)
     {
         juce::Logger::writeToLog ("Transport: PAUSE at " + juce::String (position, 3));
+        if (isEngineActive())
+            post (EngineCommand::Type::Pause);
         setTransport (TransportState::Paused);
     }
 }
@@ -215,6 +247,8 @@ void AppState::stop()
 {
     if (transport != TransportState::Stopped)
         juce::Logger::writeToLog ("Transport: STOP at " + juce::String (position, 3));
+    if (isEngineActive())
+        post (EngineCommand::Type::Stop);
     setTransport (TransportState::Stopped);
     position = 0.0;
     sendChangeMessage();
@@ -228,6 +262,9 @@ void AppState::restart()
 void AppState::emergencyStop()
 {
     juce::Logger::writeToLog ("EMERGENCY STOP at " + juce::String (position, 3));
+    // Always sent, even if the transport looks stopped: it also kills output tests.
+    if (isEngineActive())
+        post (EngineCommand::Type::EmergencyStop);
     emergency = true;
     transport = TransportState::Stopped;
     sendChangeMessage();
@@ -238,9 +275,30 @@ void AppState::locate (double seconds)
     if (auto* s = getCurrentSong())
     {
         position = juce::jlimit (0.0, s->lengthSeconds, seconds);
+        if (isEngineActive())
+            post (EngineCommand::Type::Locate, secondsToSamples (position));
         lastTickMs = juce::Time::getMillisecondCounterHiRes();
         sendChangeMessage();
     }
+}
+
+bool AppState::startOutputTest (TestSignal signal, int output)
+{
+    if (! isEngineActive() || transport == TransportState::Playing)
+        return false;
+    EngineCommand c;
+    c.type = EngineCommand::Type::StartTest;
+    c.intValue = (int) signal;
+    c.output = output;
+    c.value = -20.0f;
+    juce::Logger::writeToLog ("Output test: mode " + juce::String ((int) signal) + " output " + juce::String (output + 1));
+    emergency = false;
+    return engine.postCommand (c);
+}
+
+void AppState::stopOutputTest()
+{
+    post (EngineCommand::Type::StopTest);
 }
 
 void AppState::toggleLoop()
@@ -303,15 +361,104 @@ void AppState::setLiveMode (bool shouldBeLive)
         return;
     liveMode = shouldBeLive;
     routing.setLocked (shouldBeLive);   // no routing edits during a show
+    device.setAutoReconnectAllowed (! shouldBeLive);   // on stage, reconnecting is a deliberate action
+    juce::Desktop::setScreenSaverEnabled (! shouldBeLive);
     juce::Logger::writeToLog (shouldBeLive ? "Entered LIVE MODE" : "Left LIVE MODE");
+    sendChangeMessage();
+}
+
+std::uint64_t AppState::getDropoutCount() const noexcept
+{
+    const auto driver = device.getDriverXrunCount();
+    return engine.getLateCallbackCount() + engine.getOverloadCount() + (std::uint64_t) juce::jmax (0, driver) + dropoutsBeforeRestart;
+}
+
+void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    const auto st = device.getStatus();
+    if (st != lastDeviceStatus)
+    {
+        if (lastDeviceStatus == AudioDeviceController::Status::Running)
+        {
+            // Device lost or closed: stop everything. The engine is no longer running.
+            dropoutsBeforeRestart += engine.getLateCallbackCount() + engine.getOverloadCount();
+            if (transport != TransportState::Stopped)
+                juce::Logger::writeToLog ("Transport stopped: audio device not running");
+            transport = TransportState::Stopped;
+        }
+        if (st == AudioDeviceController::Status::Running)
+        {
+            engine.setRouting (routing);
+            transport = TransportState::Stopped;
+        }
+        lastDeviceStatus = st;
+    }
+    outputLevels.fill (0.0f);
     sendChangeMessage();
 }
 
 void AppState::timerCallback()
 {
+    if (isEngineActive())
+    {
+        for (int i = 0; i < (int) outputLevels.size(); ++i)
+            outputLevels[(size_t) i] = engine.takeOutputPeak (i);
+
+        EngineEvent ev;
+        while (engine.popEvent (ev))
+        {
+            switch (ev.type)
+            {
+                case EngineEvent::Type::LateCallback:
+                    juce::Logger::writeToLog ("AUDIO DROPOUT (late callback) at sample " + juce::String (ev.samplePosition));
+                    break;
+                case EngineEvent::Type::DspOverload:
+                    juce::Logger::writeToLog ("AUDIO DSP OVERLOAD (load " + juce::String (ev.load * 100.0f, 0) + "%) at sample " + juce::String (ev.samplePosition));
+                    break;
+                case EngineEvent::Type::EmergencyComplete:
+                    juce::Logger::writeToLog ("Emergency stop complete: outputs silent");
+                    break;
+                case EngineEvent::Type::CommandRejected:
+                    juce::Logger::writeToLog ("Engine rejected a command (output test while playing)");
+                    break;
+                case EngineEvent::Type::SongEnded:
+                    if (auto* s = getCurrentSong())
+                        juce::Logger::writeToLog ("Song ended: " + s->title);
+                    if (looping)
+                    {
+                        post (EngineCommand::Type::Locate, 0);
+                        post (EngineCommand::Type::Play);
+                    }
+                    break;
+            }
+        }
+
+        const auto t = engine.getTransport();
+        const auto newState = t == EngineTransport::Playing ? TransportState::Playing
+                            : t == EngineTransport::Paused  ? TransportState::Paused
+                                                            : TransportState::Stopped;
+        const double newPos = (double) engine.getPosition() / engine.getSampleRate();
+        // Engine is the clock. Ignore the brief window before a posted PLAY is processed.
+        const bool pendingPlay = transport == TransportState::Playing && newState == TransportState::Stopped
+                                 && juce::Time::getMillisecondCounterHiRes() - lastTickMs < 250.0;
+        if (! pendingPlay)
+        {
+            if (newState != TransportState::Stopped || transport != TransportState::Stopped)
+                position = newPos;
+            transport = newState;
+        }
+        if (engine.isEmergencyStopped())
+            emergency = true;
+        else if (transport == TransportState::Playing)
+            emergency = false;
+        sendChangeMessage();
+        return;
+    }
+
     if (transport != TransportState::Playing)
         return;
 
+    // No audio device: virtual transport so the UI can still be rehearsed.
     const double now = juce::Time::getMillisecondCounterHiRes();
     const double dt = (now - lastTickMs) / 1000.0;
     lastTickMs = now;
