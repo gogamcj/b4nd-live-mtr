@@ -180,7 +180,7 @@ CREATE TABLE analysis_run (
 ## 5. 구현 메모 (Phase 3b, 2026-11-16)
 
 - 코드: `src/project` (`ProjectDatabase`, `ProjectPackage`, JUCE 비의존·단위 테스트), 앱 쪽 `src/app/ProjectSession` (프로젝트 IO 스레드).
-- SQLite 3.54.1 amalgamation을 `third_party/sqlite`에 그대로 포함한다. 빌드가 네트워크에 의존하지 않도록 하기 위함이며, CI가 sqlite.org 공식 파일과 바이트 단위로 비교한다.
+- SQLite 3.54.1 amalgamation은 빌드 시 sqlite.org에서 받으며, sqlite.org가 공개한 SHA3-256으로 검증한다 (`third_party/sqlite/CMakeLists.txt`). 오프라인 빌드는 `-DFETCHCONTENT_SOURCE_DIR_SQLITE=<sqlite3.c가 있는 폴더>`.
 - 스키마 v1 = 위 정의 + 다음 추가 사항
   - `clip` 테이블 (track_id, media_id, start_sec, offset_sec, length_sec): 오디오 트랙의 실제 배치. ER 개요의 track 1─* clip에 해당
   - `track.destination_label`: Phase 4/5 전까지 MIDI 트랙 목적지 표시용 텍스트

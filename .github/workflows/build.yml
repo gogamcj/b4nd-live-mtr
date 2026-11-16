@@ -197,10 +197,3 @@ jobs:
           ls "공연 테스트.b4nd/backups"
           kill $XVFB || true
 
-      - name: Verify vendored SQLite is the official release
-        run: |
-          curl -fsSL -o sqlite.zip https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
-          unzip -q sqlite.zip -d sqlite-official
-          cmp sqlite-official/sqlite-amalgamation-3540100/sqlite3.c third_party/sqlite/sqlite3.c
-          cmp sqlite-official/sqlite-amalgamation-3540100/sqlite3.h third_party/sqlite/sqlite3.h
-          echo "third_party/sqlite matches sqlite.org 3.54.1"
