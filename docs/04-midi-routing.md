@@ -98,3 +98,39 @@ MIDI 전송 시각 = 해당 샘플이 출력될 예정 시각 − moduleLatency 
 
 - 학습 모드(MIDI Learn)로 지정. 매핑은 전역 설정 + 프로젝트별 덮어쓰기.
 - 디바운스 50ms. 입력 처리는 MIDI 입력 콜백에서 Command Queue로만 전달한다.
+
+## 9. 구현 메모 (Phase 4, 2026-11-16)
+
+- 코드
+  - `src/core/Midi`: 960 PPQ 이벤트, 템포맵 변환, Note 추적, Preset Recall 순서 (JUCE 비의존, 단위 테스트)
+  - `src/engine/AudioEngine`: 오디오 스레드에서 MIDI 이벤트를 SPSC 큐로 넘김 (할당 0)
+  - `src/midi/MidiOutputService`: MIDI Out 스레드와 포트 관리
+  - `src/midi/MidiFileImport`: SMF 읽기
+  - `src/ui/ModulePanel`: 모듈 화면 (Ctrl+M / 좌측 MIDI MODULES)
+- 전송 시각
+  - 계산: 오디오 콜백 시작 시각 + 블록 안의 위치 + 출력 지연(드라이버 보고값) − 모듈 지연(`delay_offset_ms`)
+  - MIDI 스레드 동작: 2 ms보다 멀면 1 ms씩 잠들고, 가까우면 양보(yield)하며 기다린 뒤 최대 0.1 ms 일찍 보낸다. Windows에서는 `timeBeginPeriod(1)`을 쓴다
+  - 같은 시각의 이벤트 순서: Note Off → 기타 → Note On
+- 알려진 한계 (Phase 6에서 개선): 기준 시각이 콜백마다 측정한 벽시계라 콜백 지터가 그대로 MIDI 지터가 된다. 클럭 쌍 평활화와 lookahead는 Phase 6에서 다룬다
+- 포트 관리
+  - 1초마다 목록을 확인한다. 포트는 식별자로 먼저 찾고, 없으면 이름으로 찾는다 (USB 구멍을 바꾸면 식별자가 바뀔 수 있다)
+  - 포트가 사라지면 DISCONNECTED로 표시하고, 그 포트로 갈 이벤트는 버리고 개수를 센다
+  - 포트가 돌아오면 다시 열고 CC64 0과 CC123을 보낸 뒤 Preset Recall을 하고, PREPARING → settle 시간 후 READY가 된다
+  - 다른 프로그램이 포트를 쓰고 있으면 PORT BUSY로 표시한다
+  - 한 포트를 여러 모듈 프로필이 공유하면(같은 인터페이스, 다른 채널) 장치 객체 하나를 같이 쓴다. Windows는 한 포트를 한 번만 열 수 있기 때문이다
+- Note 복구
+  - 엔진: Pause / Locate / 비상 정지 / 정지 페이드 끝 / 곡 끝 / 곡 교체 때 울리는 음마다 Note Off를 보내고, 쓴 채널마다 CC64 0과 CC123을 보낸다
+  - MIDI 스레드: 자기가 보낸 메시지를 따로 추적한다. 오디오 장치가 끊겨 엔진이 멈추거나 비상 정지가 걸리면 `panic()`이 아직 보내지 않은 Note On을 버리고, 위와 같은 해제 메시지를 즉시 보낸다
+- 트랙
+  - `.mid` 파일을 타임라인에 끌어 놓으면 EXT MIDI 트랙이 된다. 기존 EXT MIDI 트랙 위에 놓으면 파일을 교체하고, 다른 곳에 놓으면 새 트랙을 만든다
+  - 파일의 박자는 곡 템포맵 위에 놓인다: 파일의 1마디 1박 = 곡의 시작
+  - 모든 이벤트는 트랙 채널로 보낸다. 트랙 채널이 0이면 모듈의 채널을 쓴다
+  - SysEx와 메타 이벤트는 실시간으로 보내지 않는다. SMPTE 시간 형식 파일은 거부한다
+- 트랙 페이더는 GM 곡선(dB = 40·log10(cc/127))으로 모듈 볼륨 CC를 보낸다. 모듈 프로필의 볼륨 값이 0 dB 기준이다
+- 모듈 프로필에서 서스테인을 끄면 그 모듈로 가는 CC64를 걸러 낸다 (음이 걸리는 장비용)
+- Live Mode: 모듈 편집은 잠기고, TEST NOTE와 SEND PRESET은 그대로 쓸 수 있다. 공연 화면 상태줄에 끊긴 모듈 이름이 빨간색으로 표시된다
+- 아직 없는 것
+  - MIDI Clock 출력 (Phase 6)
+  - 모듈 오디오 리턴(LINE IN) 경로와 모니터링 (Phase 7 믹서)
+  - 곡 시작 전 Preset Recall 자동 실행: 지금은 포트가 열릴 때와 프로필이 바뀔 때, 그리고 SEND PRESET을 누를 때만 보낸다. 곡별 프리셋은 Phase 13 세트리스트와 함께 다룬다
+  - 풋스위치 입력 (Phase 12)

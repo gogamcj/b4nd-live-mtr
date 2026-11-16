@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/Midi.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
 
@@ -44,6 +45,15 @@ struct TrackRuntime
     std::vector<AudioClip> clips;
 };
 
+/** A MIDI track that plays an external sound module (docs/04). */
+struct MidiTrackRuntime
+{
+    int slot = 0;                          // engine track parameter slot (mute / solo)
+    int port = 0;                          // MIDI output port index (see AudioEngine::maxMidiPorts)
+    double sendEarlyMs = 0.0;              // module latency + track offset: positive = send earlier
+    std::vector<MidiSampleEvent> events;   // sorted by sample
+};
+
 struct ClickSound
 {
     std::vector<float> accent;   // first beat of the bar
@@ -59,6 +69,7 @@ struct PlaybackPlan
     std::int64_t lengthSamples = 0;
     TempoMap tempo;
     std::vector<TrackRuntime> tracks;
+    std::vector<MidiTrackRuntime> midiTracks;
     bool hasClick = false;
     int clickSlot = -1;
     ClickSound click;

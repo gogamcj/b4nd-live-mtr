@@ -1,4 +1,5 @@
 #include "ui/TimelineView.h"
+#include "midi/MidiFileImport.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -178,12 +179,24 @@ void TimelineView::paint (juce::Graphics& g)
         g.drawHorizontalLine (lane.getBottom() - 1, 0.0f, (float) lane.getRight());
 
         const bool isMediaTrack = t.kind == TrackKind::Audio || t.kind == TrackKind::Guide;
-        if (isMediaTrack && t.mediaStatus != TrackInfo::MediaStatus::Ready)
+        const bool isExtMidi = t.kind == TrackKind::MidiExternal;
+        if ((isMediaTrack && t.mediaStatus != TrackInfo::MediaStatus::Ready)
+            || (isExtMidi && t.midiStatus != TrackInfo::MidiStatus::Ready))
         {
             // Audio lanes show what is really loaded: no demo regions pretending to be audio.
             juce::String label;
             auto c = theme::textFaint;
-            switch (t.mediaStatus)
+            if (isExtMidi)
+            {
+                switch (t.midiStatus)
+                {
+                    case TrackInfo::MidiStatus::None:    label = "NO MIDI FILE  -  drop a .mid file here"; break;
+                    case TrackInfo::MidiStatus::Missing: label = "MISSING FILE  " + t.midiPath; c = theme::danger; break;
+                    case TrackInfo::MidiStatus::Error:   label = "MIDI FILE ERROR  " + t.midiError; c = theme::danger; break;
+                    case TrackInfo::MidiStatus::Ready:   break;
+                }
+            }
+            else switch (t.mediaStatus)
             {
                 case TrackInfo::MediaStatus::None:    label = "NO MEDIA  -  drop an audio file here"; break;
                 case TrackInfo::MediaStatus::Loading: label = "LOADING  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
@@ -236,6 +249,35 @@ void TimelineView::paint (juce::Graphics& g)
                 }
             }
 
+            if (isExtMidi && t.midiEvents != nullptr && box.getWidth() > 4.0f)
+            {
+                // Note blocks: pitch range of the file mapped to the lane height.
+                int lo = 127, hi = 0;
+                for (const auto& e : *t.midiEvents)
+                    if (e.msg.isNoteOn()) { lo = juce::jmin (lo, (int) e.msg.data[1]); hi = juce::jmax (hi, (int) e.msg.data[1]); }
+                if (hi >= lo)
+                {
+                    const float span = (float) juce::jmax (12, hi - lo + 1);
+                    std::array<std::int64_t, 128> onAt;
+                    onAt.fill (-1);
+                    g.setColour (colour.withAlpha (t.mute ? 0.3f : 0.9f));
+                    for (const auto& e : *t.midiEvents)
+                    {
+                        const int n = e.msg.data[1] & 0x7f;
+                        if (e.msg.isNoteOn())
+                            onAt[(size_t) n] = e.tick;
+                        else if (e.msg.isNoteOff() && onAt[(size_t) n] >= 0)
+                        {
+                            const float xa = xForSeconds (song->tempo.secondsAtBeat ((double) onAt[(size_t) n] / midiPpq));
+                            const float xb = xForSeconds (song->tempo.secondsAtBeat ((double) e.tick / midiPpq));
+                            const float yy = box.getBottom() - 3.0f - ((float) (n - lo) + 1.0f) / span * (box.getHeight() - 6.0f);
+                            g.fillRect (xa, yy, juce::jmax (1.0f, xb - xa), juce::jmax (1.5f, (box.getHeight() - 6.0f) / span));
+                            onAt[(size_t) n] = -1;
+                        }
+                    }
+                }
+            }
+
             if (t.kind == TrackKind::Click)
             {
                 // beat ticks so the click lane reads as a click
@@ -264,7 +306,7 @@ void TimelineView::paint (juce::Graphics& g)
             g.fillRect (r);
             g.setColour (theme::text);
             g.setFont (theme::font (13.0f, true));
-            g.drawText ("+ ADD AUDIO TRACK", r.withHeight (th), juce::Justification::centred);
+            g.drawText (dropIsMidi ? "+ ADD EXTERNAL MIDI TRACK" : "+ ADD AUDIO TRACK", r.withHeight (th), juce::Justification::centred);
         }
     }
     if (notice.isNotEmpty() && juce::Time::getMillisecondCounter() - noticeTime < 6000)
@@ -353,19 +395,22 @@ void TimelineView::showNotice (const juce::String& text, bool isError)
 bool TimelineView::isInterestedInFileDrag (const juce::StringArray& files)
 {
     for (const auto& f : files)
-        if (state.canReadAudioFile (juce::File (f)))
+        if (state.canReadAudioFile (juce::File (f)) || isMidiFile (juce::File (f)))
             return true;
     return false;
 }
 
-void TimelineView::fileDragMove (const juce::StringArray&, int, int y)
+void TimelineView::fileDragMove (const juce::StringArray& files, int, int y)
 {
+    const bool midiDrop = ! files.isEmpty() && isMidiFile (juce::File (files[0]));
+    dropIsMidi = midiDrop;
     int t = trackAtY (y);
     if (t >= 0)
     {
         const auto kind = state.getCurrentSong()->tracks[(size_t) t].kind;
-        if (kind != TrackKind::Audio && kind != TrackKind::Guide)
-            t = -1;   // dropping on a MIDI/click lane adds a new audio track instead
+        // A lane of the other kind gets a new track instead.
+        if (midiDrop ? kind != TrackKind::MidiExternal : (kind != TrackKind::Audio && kind != TrackKind::Guide))
+            t = -1;
     }
     if (t != dropTrack)
     {
@@ -392,16 +437,21 @@ void TimelineView::filesDropped (const juce::StringArray& files, int x, int y)
     for (const auto& path : files)
     {
         const juce::File f (path);
-        if (! state.canReadAudioFile (f))
+        const bool midiFile = isMidiFile (f);
+        if (! midiFile && ! state.canReadAudioFile (f))
             continue;
         // The first file goes to the lane under the cursor; any others become new tracks.
-        const auto err = state.addAudioFile (f, first ? target : -1);
+        const auto err = midiFile ? state.addMidiFile (f, first ? target : -1) : state.addAudioFile (f, first ? target : -1);
         first = false;
         if (err.isEmpty()) ++added;
         else               lastError = err;
     }
     if (lastError.isNotEmpty())
         showNotice (lastError, true);
+    else if (added > 0 && state.getMidiSummary().tracksWithoutModule > 0)
+        showNotice ("MIDI file loaded. No sound module assigned yet: open MIDI MODULES (Ctrl+M).", true);
+    else if (added > 0 && dropIsMidi)
+        showNotice ("MIDI file loaded: " + juce::String (added) + " file(s)", false);
     else if (added > 0)
         showNotice ("Loading " + juce::String (added) + " file(s) into memory...", false);
     repaint();

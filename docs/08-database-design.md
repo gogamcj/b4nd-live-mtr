@@ -189,4 +189,12 @@ CREATE TABLE analysis_run (
 - 저장은 트랜잭션 하나로 전체를 교체한다. 중간에 실패하면 롤백되어 직전 저장 상태가 그대로 남는다 (테스트로 확인).
 - 패키지 폴더: `<이름>.b4nd/` 안에 `project.db`, `media/`, `backups/`, `session.lock`. 패키지 안의 미디어는 상대 경로, 밖의 미디어는 절대 경로로 저장한다. 미디어를 패키지로 모으는 기능은 이후 단계.
 - 백업 파일 이름은 `project-YYYYMMDD-HHMMSS-NNN.db` (같은 초에 여러 개일 때 NNN).
-- 아직 저장하지 않는 것: 데모 MIDI 구간(Phase 4에서 실제 MIDI 클립으로 대체), 출력 라우팅(장치 기본 프리셋 사용, 라우팅 편집 UI와 함께 저장 예정), 마스터 볼륨.
+- 아직 저장하지 않는 것: 데모 MIDI 구간(데모 VSTi 트랙의 구간 표시용), 출력 라우팅(장치 기본 프리셋 사용, 라우팅 편집 UI와 함께 저장 예정), 마스터 볼륨.
+
+### 스키마 v2 (Phase 4)
+
+- `module_profile`을 실제로 저장·로드한다. 추가 열 `midi_port_id`는 OS 포트 식별자로, 이름보다 안정적이다
+- `track.module_profile_id`, `track.midi_channel`(0 = 모듈 채널), `track.midi_rel_path`(.mid 파일 경로, 미디어와 같은 상대/절대 규칙)를 사용한다
+- v1 파일을 열면 트랜잭션 하나로 v2로 올린다 (`ALTER TABLE` + `schema_version` 갱신). 단계별 마이그레이션 표(`ProjectDatabase::migrate`)에 이어 붙이는 방식이다
+- v1 파일에서 올린 뒤 데이터가 그대로이고 새 열에 저장할 수 있는지 테스트로 확인했다
+- 열 때 없는 .mid 파일은 누락 미디어 경고에 포함된다

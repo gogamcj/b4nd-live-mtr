@@ -42,6 +42,7 @@ private:
     AppState& state;
     float lastPlayheadX = -1.0f;
     bool draggingPlayhead = false;
+    bool dropIsMidi = false;
     int dropTrack = -2;          // -2: no drag, -1: "add new track", >= 0: lane under the cursor
     juce::String notice;
     bool noticeIsError = false;

@@ -71,11 +71,22 @@ ProjectData sampleProject()
         c.id = newUuid(); c.name = "Click"; c.kind = "click"; c.busKind = "click"; c.volumeDb = -6.0;
         TrackData m;
         m.id = newUuid(); m.name = "Piano"; m.kind = "midi_vsti"; m.destinationLabel = "Main L/R";
-        s.tracks = { a, g, c, m };
+        TrackData x;
+        x.id = newUuid(); x.name = "Strings"; x.kind = "midi_external"; x.moduleProfileId = "mod-integra";
+        x.midiChannel = i == 0 ? 0 : 5; x.midiPath = "media/strings 현악.mid";
+        s.tracks = { a, g, c, m, x };
         s.click.countInBars = 2;
         s.click.volumeDb = -9.0;
         p.songs.push_back (s);
     }
+    ModuleProfile mod;
+    mod.id = "mod-integra"; mod.deviceName = "INTEGRA-7 현악"; mod.portName = "UM-ONE"; mod.portIdentifier = "\\\\?\\usb#um-one";
+    mod.channel = 3; mod.bankMsb = 87; mod.bankLsb = -1; mod.program = 41; mod.volume = 90; mod.pan = -1;
+    mod.delayOffsetMs = 4.5; mod.sendOrder = "lsb,msb,pc"; mod.gapMs = 30; mod.settleMs = 400; mod.sustainEnabled = false;
+    ModuleProfile plain;
+    plain.id = "mod-plain"; plain.deviceName = "GM"; plain.portName = "Port 2";
+    p.modules = { mod, plain };
+
     SetlistData sl;
     sl.id = newUuid(); sl.name = "Main set"; sl.venue = "홍대";
     sl.songIds = { p.songs[2].id, p.songs[0].id, p.songs[1].id };
@@ -117,13 +128,26 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             const auto &t = x.tracks[k], &u = y.tracks[k];
             if (t.id != u.id || t.name != u.name || t.kind != u.kind || t.busKind != u.busKind || t.volumeDb != u.volumeDb
                 || t.pan != u.pan || t.mute != u.mute || t.solo != u.solo || t.destinationLabel != u.destinationLabel
-                || t.clips.size() != u.clips.size())
+                || t.clips.size() != u.clips.size() || t.moduleProfileId != u.moduleProfileId || t.midiChannel != u.midiChannel
+            || t.midiPath != u.midiPath)
                 return false;
             for (size_t c = 0; c < t.clips.size(); ++c)
                 if (t.clips[c].mediaId != u.clips[c].mediaId || t.clips[c].startSec != u.clips[c].startSec
                     || t.clips[c].offsetSec != u.clips[c].offsetSec)
                     return false;
         }
+    }
+    if (a.modules.size() != b.modules.size())
+        return false;
+    for (size_t i = 0; i < a.modules.size(); ++i)
+    {
+        const auto &m = a.modules[i], &n = b.modules[i];
+        if (m.id != n.id || m.deviceName != n.deviceName || m.portName != n.portName || m.portIdentifier != n.portIdentifier
+            || m.channel != n.channel || m.bankMsb != n.bankMsb || m.bankLsb != n.bankLsb || m.program != n.program
+            || m.volumeCc != n.volumeCc || m.volume != n.volume || m.panCc != n.panCc || m.pan != n.pan
+            || m.sustainEnabled != n.sustainEnabled || m.delayOffsetMs != n.delayOffsetMs || m.sendOrder != n.sendOrder
+            || m.gapMs != n.gapMs || m.settleMs != n.settleMs)
+            return false;
     }
     if (a.setlists[0].songIds != b.setlists[0].songIds || a.setlists[0].venue != b.setlists[0].venue)
         return false;
@@ -148,7 +172,7 @@ TEST_CASE ("Project: UUIDs are v4 and unique")
     CHECK (ids.size() == 10000);
 }
 
-TEST_CASE ("Project: new database gets the full schema, WAL and version 1")
+TEST_CASE ("Project: new database gets the full schema, WAL and the current version")
 {
     TempDir t;
     ProjectDatabase db;
@@ -357,4 +381,40 @@ TEST_CASE ("Project: media paths are stored relative to the package when inside 
     p.media = { { "a", "original", "media/드럼 stem.wav", "", 0, 0, 0 }, { "b", "original", outside, "", 0, 0, 0 } };
     const auto missing = pkg.findMissingMedia (p);
     CHECK (missing.size() == 1 && missing[0]->id == "b");
+}
+
+TEST_CASE ("Project: a schema v1 project is upgraded on open and keeps its data")
+{
+    TempDir t;
+    const auto file = t.sub ("old.db");
+    auto p = sampleProject();
+    {
+        ProjectDatabase db;
+        CHECK (db.open (file, true).ok);
+        p.modules.clear();
+        for (auto& s : p.songs)
+            for (auto& tr : s.tracks)
+                tr.moduleProfileId.clear();
+        CHECK (db.save (p).ok);
+    }
+    // Turn it back into a v1 file (as written by the Phase 3b build).
+    sqlite3* raw = nullptr;
+    sqlite3_open (file.c_str(), &raw);
+    CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; UPDATE schema_version SET version = 1;",
+                         nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close (raw);
+
+    ProjectDatabase db;
+    CHECK (db.open (file, false).ok);
+    CHECK (db.getSchemaVersion() == 2);
+    ProjectData q;
+    CHECK (db.load (q).ok);
+    CHECK (sameProject (p, q));
+
+    // and the new column works after the upgrade
+    auto withModules = sampleProject();
+    CHECK (db.save (withModules).ok);
+    ProjectData r;
+    CHECK (db.load (r).ok);
+    CHECK (sameProject (withModules, r));
 }

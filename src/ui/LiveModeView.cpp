@@ -200,7 +200,29 @@ void LiveModeView::paint (juce::Graphics& g)
         else
             pill ("AUDIO: NOT CONNECTED", theme::textDim);
     }
-    pill ("MIDI: NO PORTS", theme::textDim);
+    {
+        // External modules: a disconnected one must be impossible to miss on stage.
+        const auto ms = state.getMidiSummary();
+        if (ms.modules == 0)
+            pill ("MIDI: NO MODULES", theme::textDim);
+        else if (ms.problems > 0)
+        {
+            juce::String bad;
+            for (int i = 0; i < (int) state.getModules().size(); ++i)
+                if (const auto st2 = state.getModuleStatus (i);
+                    st2 != MidiOutputService::PortStatus::Ready && st2 != MidiOutputService::PortStatus::Preparing)
+                {
+                    bad = juce::String::fromUTF8 (state.getModules()[(size_t) i].deviceName.c_str()).toUpperCase()
+                          + " " + MidiOutputService::statusText (st2);
+                    break;
+                }
+            pill ("MIDI: " + bad, theme::danger);
+        }
+        else if (ms.preparing > 0)
+            pill ("MIDI: PREPARING", theme::warn);
+        else
+            pill ("MIDI: " + juce::String (ms.ready) + " MODULE" + (ms.ready > 1 ? "S" : "") + " READY", theme::ok);
+    }
     pill ("VSTi: NONE", theme::textDim);
     if (state.isEmergencyStopped())
         pill ("EMERGENCY STOPPED", theme::danger);

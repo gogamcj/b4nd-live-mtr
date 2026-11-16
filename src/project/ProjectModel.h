@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "core/Midi.h"
 #include "core/TempoMap.h"
 
 namespace b4nd
@@ -56,6 +57,11 @@ struct TrackData
     bool mute = false, solo = false, mono = false;
     double delayOffsetMs = 0.0;
     std::vector<ClipData> clips;
+
+    // MIDI tracks
+    std::string moduleProfileId;   // external module (midi_external)
+    int midiChannel = 0;           // 1-16 overrides the profile's channel, 0 = use the profile's
+    std::string midiPath;          // .mid file, stored like media paths
 };
 
 struct ClickSettingsData
@@ -115,6 +121,7 @@ struct ProjectData
     std::vector<SongData> songs;
     std::vector<SetlistData> setlists;   // setlists[0] is the active show order
     std::vector<OutputData> outputs;     // empty: use the device default preset
+    std::vector<ModuleProfile> modules;  // external sound modules
 
     const MediaRef* findMedia (const std::string& mediaId) const
     {

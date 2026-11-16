@@ -7,6 +7,7 @@
 #include "core/TempoMap.h"
 #include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
+#include "midi/MidiOutputService.h"
 
 namespace b4nd
 {
@@ -43,6 +44,16 @@ struct TrackInfo
     std::shared_ptr<const AudioData> media;   // decoded at mediaRate
     double mediaRate = 0.0;
     std::shared_ptr<const std::vector<float>> overview;   // peak per bucket over the whole file, for drawing
+
+    // --- external MIDI (MidiExternal tracks) ---
+    juce::String midiPath;             // .mid file; empty: none
+    juce::String moduleId;             // ModuleProfile::id; empty: not assigned
+    int midiChannel = 0;               // 1-16; 0 = the module's channel. Every event is sent on this channel.
+    enum class MidiStatus { None, Ready, Missing, Error };
+    MidiStatus midiStatus = MidiStatus::None;
+    juce::String midiError;
+    int midiNotes = 0;
+    std::shared_ptr<const std::vector<MidiTickEvent>> midiEvents;   // 960 PPQ, song beats
 };
 
 struct CuePoint
@@ -168,6 +179,30 @@ public:
     /** RAM above this is reported as a warning (docs/03 §6). */
     static constexpr std::int64_t ramWarningBytes = (std::int64_t) 4 * 1024 * 1024 * 1024;
 
+    // --- external MIDI sound modules (docs/04) ---
+    const std::vector<ModuleProfile>& getModules() const noexcept { return modules; }
+    int findModule (const juce::String& id) const;
+    /** All return an empty string on success, else the reason. Rejected in Live Mode and while playing. */
+    juce::String addModule (ModuleProfile);
+    juce::String updateModule (int index, const ModuleProfile&);
+    juce::String removeModule (int index);
+    MidiOutputService::PortStatus getModuleStatus (int index) const noexcept { return midi.getStatus (index); }
+    void sendModuleTestNote (int index) { midi.sendTestNote (index); }
+    void recallModulePreset (int index) { midi.recallPreset (index); }
+    std::vector<MidiPortInfo> listMidiOutputs() { return midi.listOutputs(); }
+    MidiOutputService& getMidiOutput() noexcept { return midi; }
+
+    /** Assigns a .mid file to an external MIDI track, or adds a new one (trackIndex < 0). */
+    juce::String addMidiFile (const juce::File&, int trackIndex = -1);
+    juce::String setTrackModule (int trackIndex, const juce::String& moduleId, int channel = 0);
+
+    struct MidiSummary
+    {
+        int modules = 0, ready = 0, preparing = 0, problems = 0;   // problems: disconnected / busy / no port
+        int tracksWithoutModule = 0, missingFiles = 0;
+    };
+    MidiSummary getMidiSummary() const;
+
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
     void setLiveMode (bool shouldBeLive);
@@ -210,6 +245,9 @@ private:
     void applyFinishedMedia();
     void rebuildPlan();
     void pushMixerToEngine();
+    void loadMidiFile (TrackInfo&, const SongInfo&);
+    void sendTrackVolumeToModule (const TrackInfo&);
+    juce::String guardModuleChange() const;
 
     void markDirty();
     ProjectData toProjectData() const;
@@ -250,6 +288,8 @@ private:
     static constexpr double autosaveDelayMs = 5000.0;
     static constexpr double backupIntervalMs = 30.0 * 60.0 * 1000.0;
 
+    std::vector<ModuleProfile> modules;   // module i = MIDI port slot i
+    MidiOutputService midi;
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

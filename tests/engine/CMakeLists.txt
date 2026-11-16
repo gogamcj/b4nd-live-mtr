@@ -5,7 +5,8 @@ add_executable(b4nd_engine_tests
     SpscQueueTests.cpp
     XrunDetectorTests.cpp
     AudioEngineTests.cpp
-    PlaybackTests.cpp)
+    PlaybackTests.cpp
+    MidiEngineTests.cpp)
 
 target_include_directories(b4nd_engine_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../core)
 target_link_libraries(b4nd_engine_tests PRIVATE b4nd_engine)

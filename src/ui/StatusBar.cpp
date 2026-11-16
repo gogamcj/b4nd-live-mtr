@@ -76,6 +76,23 @@ void StatusBar::paint (juce::Graphics& g)
         item ("MEDIA", v, dot, 150);
     }
     {
+        const auto ms = state.getMidiSummary();
+        if (ms.modules > 0 || ms.tracksWithoutModule > 0)
+        {
+            juce::String v;
+            auto dot = theme::ok;
+            if (ms.problems > 0)                { v = juce::String (ms.problems) + " NOT READY"; dot = theme::danger; }
+            else if (ms.preparing > 0)          { v = "PREPARING";                               dot = theme::warn; }
+            else                                  v = juce::String (ms.ready) + "/" + juce::String (ms.modules) + " READY";
+            if (ms.tracksWithoutModule + ms.missingFiles > 0)
+            {
+                v << "  " << (ms.tracksWithoutModule + ms.missingFiles) << " TRACK!";
+                dot = theme::danger;
+            }
+            item ("MIDI", v, dot, 150);
+        }
+    }
+    {
         const auto t = state.getSaveStatusText();
         const auto dot = state.hasSaveError() ? theme::danger : ! state.hasProjectFile() ? theme::warn
                        : state.isDirty() ? theme::warn : theme::ok;

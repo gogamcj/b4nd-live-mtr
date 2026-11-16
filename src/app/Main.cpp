@@ -6,6 +6,7 @@
 #include "app/AppState.h"
 #include "app/MainWindow.h"
 #include "ui/AudioSettingsPanel.h"
+#include "ui/ModulePanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
 
@@ -33,12 +34,16 @@ static void crashHandler (void*)
     --media adds audio tracks (as if dropped on the timeline) and waits until they are decoded.
     --play plays the song for that long first and logs the peak level per output.
     --project <folder> opens a project package first; --save-as <folder> saves into a new one.
+    --module <name> adds a sound module profile (no port), --midi <file.mid> adds an external MIDI
+    track (as if dropped), --modules captures the MIDI module window instead of the main window.
     Without --screenshot, the last opened project is reopened at start-up. */
 struct ScreenshotRequest
 {
     juce::File file;
     bool live = false;
     bool settings = false;   // capture the audio settings window instead
+    bool modulesWindow = false;
+    juce::StringArray midiFiles, moduleNames;
     int width = 1600, height = 960;
     int song = 0;
     double atSeconds = 0.0;
@@ -56,6 +61,7 @@ struct ScreenshotRequest
         r.file = juce::File::getCurrentWorkingDirectory().getChildFile (args[i + 1]);
         r.live = args.contains ("--live");
         r.settings = args.contains ("--audio-settings");
+        r.modulesWindow = args.contains ("--modules");
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -73,8 +79,14 @@ struct ScreenshotRequest
         if (const int s = args.indexOf ("--save-as"); s >= 0 && s + 1 < args.size())
             r.saveAs = cwd.getChildFile (args[s + 1].unquoted());
         for (int k = 0; k + 1 < args.size(); ++k)
+        {
             if (args[k] == "--media")
-                r.media.add (juce::File::getCurrentWorkingDirectory().getChildFile (args[k + 1].unquoted()).getFullPathName());
+                r.media.add (cwd.getChildFile (args[k + 1].unquoted()).getFullPathName());
+            if (args[k] == "--midi")
+                r.midiFiles.add (cwd.getChildFile (args[k + 1].unquoted()).getFullPathName());
+            if (args[k] == "--module")
+                r.moduleNames.add (args[k + 1].unquoted());
+        }
         return r;
     }
 };
@@ -136,6 +148,35 @@ public:
             state->locate (screenshot->atSeconds);
             window->setFullScreen (false);
             window->setSize (screenshot->width, screenshot->height);
+            for (const auto& m : screenshot->media)
+                if (const auto err = state->addAudioFile (juce::File (m)); err.isNotEmpty())
+                    std::printf ("media rejected: %s\n", err.toRawUTF8());
+            for (const auto& spec : screenshot->moduleNames)
+            {
+                // "Name" or "Name@port": the first MIDI output whose name contains `port`.
+                ModuleProfile p;
+                p.deviceName = spec.upToFirstOccurrenceOf ("@", false, false).toStdString();
+                if (const auto want = spec.fromFirstOccurrenceOf ("@", false, false); want.isNotEmpty())
+                {
+                    for (const auto& port : state->listMidiOutputs())
+                        if (port.name.containsIgnoreCase (want))
+                        {
+                            p.portName = port.name.toStdString();
+                            p.portIdentifier = port.identifier.toStdString();
+                            break;
+                        }
+                    std::printf ("module %s: port %s\n", p.deviceName.c_str(), p.portName.empty() ? "NOT FOUND" : p.portName.c_str());
+                }
+                p.channel = (int) state->getModules().size() + 1;
+                p.bankMsb = 87;
+                p.program = 12;
+                if (const auto err = state->addModule (p); err.isNotEmpty())
+                    std::printf ("module rejected: %s\n", err.toRawUTF8());
+            }
+            for (const auto& m : screenshot->midiFiles)
+                if (const auto err = state->addMidiFile (juce::File (m)); err.isNotEmpty())
+                    std::printf ("midi rejected: %s\n", err.toRawUTF8());
+            printMidiSummary();
             if (screenshot->settings)
                 showAudioSettingsWindow (*state);
             if (screenshot->live)
@@ -144,9 +185,8 @@ public:
                 window->getMainComponent().onLiveModeChanged = nullptr;
                 window->getMainComponent().toggleLiveMode();
             }
-            for (const auto& m : screenshot->media)
-                if (const auto err = state->addAudioFile (juce::File (m)); err.isNotEmpty())
-                    std::printf ("media rejected: %s\n", err.toRawUTF8());
+            if (screenshot->modulesWindow)
+                showModuleWindow (*state, 0);
             startTimer (100);
         }
     }
@@ -168,12 +208,32 @@ public:
         }
     }
 
+    void printMidiSummary()
+    {
+        const auto ms = state->getMidiSummary();
+        std::printf ("midi: %d modules (%d ready, %d preparing, %d not ready), %d tracks without module, %d missing files\n",
+                     ms.modules, ms.ready, ms.preparing, ms.problems, ms.tracksWithoutModule, ms.missingFiles);
+        for (int i = 0; i < (int) state->getModules().size(); ++i)
+        {
+            const auto& p = state->getModules()[(size_t) i];
+            std::printf ("  module \"%s\" port \"%s\" ch %d: %s\n", p.deviceName.c_str(), p.portName.c_str(), p.channel,
+                         MidiOutputService::statusText (state->getModuleStatus (i)).toRawUTF8());
+        }
+        if (const auto* s = state->getCurrentSong())
+            for (const auto& t : s->tracks)
+                if (t.kind == TrackKind::MidiExternal)
+                    std::printf ("  ext midi track \"%s\": %s, %d notes, module %s\n", t.name.toRawUTF8(),
+                                 t.midiPath.isEmpty() ? "no file" : juce::File (t.midiPath).getFileName().toRawUTF8(), t.midiNotes,
+                                 state->findModule (t.moduleId) >= 0 ? "assigned" : "NONE");
+    }
+
     void shutdown() override
     {
         juce::Logger::writeToLog ("Shutdown");
         if (state != nullptr)
             state->closeProject();
         closeAudioSettingsWindow();
+        closeModuleWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -245,6 +305,22 @@ private:
                 return;
             if (screenshot->playSeconds > 0.0)
             {
+                // Stop first: the engine releases its MIDI notes, and they must be counted too.
+                state->stop();
+                phase = 3;
+                phaseStart = now;
+                return;
+            }
+            phase = 2;
+            phaseStart = now;
+            startTimer (100);
+            return;
+        }
+        if (phase == 3)   // after stop: let the release messages go out
+        {
+            if (elapsed < 0.5)
+                return;
+            {
                 const auto names = audioDevice->getOutputChannelNames();
                 for (int o = 0; o < juce::jmin ((int) outputPeaks.size(), state->getRouting().getNumOutputs()); ++o)
                     std::printf ("output %d [%s]: peak %.4f\n", o + 1, state->getRouting().getOutput (o).label.c_str(),
@@ -254,6 +330,15 @@ private:
                              (unsigned long long) state->getDropoutCount(),
                              (unsigned long long) engine->getLateCallbackCount(),
                              (unsigned long long) engine->getOverloadCount(), engine->getPeakLoad() * 100.0);
+                auto& mo = state->getMidiOutput();
+                int sounding = 0;
+                for (int p = 0; p < AudioEngine::maxMidiPorts; ++p)
+                    sounding += engine->getActiveMidiNotes (p);
+                std::printf ("midi out: sent %llu, dropped %llu (no open port), late %llu (>2 ms), max lateness %.2f ms, "
+                             "engine queue full %llu, notes still on after stop %d\n",
+                             (unsigned long long) mo.getSentCount(), (unsigned long long) mo.getDroppedCount(),
+                             (unsigned long long) mo.getLateCount(), mo.getMaxLatenessMs(),
+                             (unsigned long long) engine->getMidiDroppedCount(), sounding);
             }
             phase = 2;
             phaseStart = now;
@@ -264,7 +349,11 @@ private:
             return;
 
         stopTimer();
+        if (! screenshot->moduleNames.isEmpty() || ! screenshot->midiFiles.isEmpty())
+            printMidiSummary();
         juce::Component* comp = &window->getMainComponent();
+        if (screenshot->modulesWindow && getModuleWindowContent() != nullptr)
+            comp = getModuleWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))
