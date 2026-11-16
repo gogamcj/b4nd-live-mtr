@@ -13,10 +13,12 @@ set(B4ND_ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK root (folder
 
 # --- Core library: pure logic, no JUCE dependency, unit-tested on every platform ---
 add_subdirectory(src/core)
+add_subdirectory(src/engine)
 
 if(B4ND_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/core)
+    add_subdirectory(tests/engine)
 endif()
 
 if(B4ND_BUILD_APP)

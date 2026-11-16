@@ -5,6 +5,7 @@
 
 #include "app/AppState.h"
 #include "app/MainWindow.h"
+#include "ui/AudioSettingsPanel.h"
 #include "ui/B4ndLookAndFeel.h"
 
 namespace b4nd
@@ -31,6 +32,7 @@ struct ScreenshotRequest
 {
     juce::File file;
     bool live = false;
+    bool settings = false;   // capture the audio settings window instead
     int width = 1600, height = 960;
     int song = 0;
     double atSeconds = 0.0;
@@ -44,6 +46,7 @@ struct ScreenshotRequest
         ScreenshotRequest r;
         r.file = juce::File::getCurrentWorkingDirectory().getChildFile (args[i + 1]);
         r.live = args.contains ("--live");
+        r.settings = args.contains ("--audio-settings");
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -78,16 +81,24 @@ public:
 
         juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
 
-        state = std::make_unique<AppState>();
+        screenshot = ScreenshotRequest::parse (juce::StringArray::fromTokens (commandLine, true));
+
+        engine = std::make_unique<AudioEngine>();
+        audioDevice = std::make_unique<AudioDeviceController> (*engine);
+        state = std::make_unique<AppState> (*engine, *audioDevice);
+        // Screenshot/CI mode never touches the audio hardware.
+        audioDevice->initialise (getLogDirectory().getParentDirectory().getChildFile ("audio-device.xml"),
+                                 ! screenshot.has_value() || commandLine.contains ("--with-audio"));
         window = std::make_unique<MainWindow> (getApplicationName(), *state);
 
-        screenshot = ScreenshotRequest::parse (juce::StringArray::fromTokens (commandLine, true));
         if (screenshot)
         {
             state->selectSong (screenshot->song);
             state->locate (screenshot->atSeconds);
             window->setFullScreen (false);
             window->setSize (screenshot->width, screenshot->height);
+            if (screenshot->settings)
+                showAudioSettingsWindow (*state);
             if (screenshot->live)
             {
                 // Show the live view at the requested size instead of going full screen.
@@ -101,8 +112,13 @@ public:
     void shutdown() override
     {
         juce::Logger::writeToLog ("Shutdown");
+        closeAudioSettingsWindow();
         window = nullptr;
+        if (audioDevice != nullptr)
+            audioDevice->close();
         state = nullptr;
+        audioDevice = nullptr;
+        engine = nullptr;
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
         juce::Logger::setCurrentLogger (nullptr);
         logger = nullptr;
@@ -132,8 +148,13 @@ private:
     void timerCallback() override
     {
         stopTimer();
-        auto& comp = window->getMainComponent();
-        const auto img = comp.createComponentSnapshot (comp.getLocalBounds(), true, 1.0f);
+        juce::Component* comp = &window->getMainComponent();
+        if (screenshot->settings)
+            for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
+                if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))
+                    if (w != window.get() && w->getContentComponent() != nullptr)
+                        comp = w->getContentComponent();
+        const auto img = comp->createComponentSnapshot (comp->getLocalBounds(), true, 1.0f);
         screenshot->file.deleteFile();
         juce::FileOutputStream out (screenshot->file);
         const bool ok = out.openedOk() && juce::PNGImageFormat().writeImageToStream (img, out);
@@ -146,6 +167,8 @@ private:
 
     B4ndLookAndFeel lookAndFeel;
     std::unique_ptr<juce::FileLogger> logger;
+    std::unique_ptr<AudioEngine> engine;
+    std::unique_ptr<AudioDeviceController> audioDevice;
     std::unique_ptr<AppState> state;
     std::unique_ptr<MainWindow> window;
     std::optional<ScreenshotRequest> screenshot;

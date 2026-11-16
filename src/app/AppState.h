@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "audio/AudioDeviceController.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
 
@@ -54,18 +55,19 @@ enum class TransportState
 };
 
 /**
-    Phase 1 UI-side application model.
+    UI-side application model.
 
-    The transport here is *virtual* (advanced by a UI timer) so the layout and
-    controls can be exercised before the audio engine exists. From Phase 2 the
-    same commands are forwarded to the audio engine's command queue and the
-    position comes from engine telemetry instead (docs/01, docs/03).
+    With a running audio device, transport commands go to the AudioEngine's
+    lock-free command queue and the play position comes from engine telemetry
+    (the audio sample clock is the master clock, docs/03). Without a device the
+    transport is *virtual* (UI timer) so the screens can still be rehearsed.
 */
 class AppState : public juce::ChangeBroadcaster,
+                 private juce::ChangeListener,
                  private juce::Timer
 {
 public:
-    AppState();
+    AppState (AudioEngine&, AudioDeviceController&);
     ~AppState() override;
 
     static std::vector<SongInfo> createDemoSetlist();
@@ -110,12 +112,27 @@ public:
 
     const OutputRouting& getRouting() const noexcept { return routing; }
 
-    /** Per physical output peak level (0..1). Zero until the audio engine exists. */
-    float getOutputLevel (int /*output*/) const noexcept { return 0.0f; }
+    /** Per physical output peak level (0..1) from the engine, refreshed at 30 Hz. */
+    float getOutputLevel (int output) const noexcept
+    {
+        return juce::isPositiveAndBelow (output, (int) outputLevels.size()) ? outputLevels[(size_t) output] : 0.0f;
+    }
+    /** Per track level: tracks are rendered from Phase 3. */
     float getTrackLevel (int /*track*/) const noexcept { return 0.0f; }
+
+    // --- audio engine / device ---
+    bool isEngineActive() const noexcept;
+    AudioEngine& getEngine() noexcept { return engine; }
+    AudioDeviceController& getDevice() noexcept { return device; }
+    bool startOutputTest (TestSignal, int output);
+    void stopOutputTest();
+    std::uint64_t getDropoutCount() const noexcept;
 
 private:
     void timerCallback() override;
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void post (EngineCommand::Type, std::int64_t samples = 0);
+    std::int64_t secondsToSamples (double) const noexcept;
     SongInfo* currentSongMutable() noexcept;
     void setTransport (TransportState s);
 
@@ -131,6 +148,12 @@ private:
     bool liveMode = false;
 
     OutputRouting routing = OutputRouting::createDefault (8);
+
+    AudioEngine& engine;
+    AudioDeviceController& device;
+    AudioDeviceController::Status lastDeviceStatus = AudioDeviceController::Status::NoDevice;
+    std::array<float, AudioEngine::maxOutputs> outputLevels {};
+    std::uint64_t dropoutsBeforeRestart = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)
 };

@@ -14,7 +14,7 @@
 
 ## 2. 장치 관리 (ASIO Device Manager)
 
-- `juce::AudioDeviceManager` 사용. Windows 빌드에서 `JUCE_ASIO=1`, `JUCE_WASAPI=1`, `JUCE_DIRECTSOUND=1`.
+- `juce::AudioDeviceManager`는 **사용하지 않는다.** 현재 장치가 사라지면 AudioDeviceManager는 저장된 설정으로 재초기화하면서 기본 장치(노트북 스피커 등)를 자동으로 열어 버리기 때문이다. 대신 `AudioIODeviceType`/`AudioIODevice`를 직접 관리하는 `AudioDeviceController`(src/audio)를 둔다. Windows 빌드에서 `JUCE_ASIO=1`(SDK 필요), `JUCE_WASAPI=1`, `JUCE_DIRECTSOUND=1`.
 - 백엔드 선택 순서: **ASIO → WASAPI(Exclusive) → WASAPI(Shared) → DirectSound**. 사용자가 고정 가능.
 - 샘플레이트(44.1/48/88.2/96k)와 버퍼(64~1024)는 `AudioIODevice::getAvailableSampleRates()/getAvailableBufferSizes()`가 돌려준 값만 UI에 표시한다.
 - 지연 표시: `getInputLatencyInSamples()`, `getOutputLatencyInSamples()` + 버퍼 크기 → ms.
@@ -25,6 +25,7 @@
    ▲                 │                             │
    └────close────────┘◀──── 같은 장치 재연결 성공 ──┘
 ```
+- 구현(Phase 2): 장치 목록 변경 알림, 드라이버 오류, 예기치 않은 정지, 1초 주기 감시로 `Lost`를 판단한다. ASIO 리셋 요청(드라이버 패널에서 버퍼 변경)은 장치를 잠깐 멈췄다 재시작하므로 2회 연속 정지일 때만 `Lost`로 본다.
 - `Lost` 진입 시: 트랜스포트 Stop, MIDI 전 채널 All Notes Off + Sustain Off, 사용자에게 배너. **자동으로 다른 장치를 열지 않는다.** 같은 이름의 장치가 다시 나타나면 "재연결" 버튼 활성화 (Edit/Rehearsal 모드에서는 자동 재연결 옵션 허용).
 - ASIO 드라이버의 `kAsioResetRequest`(버퍼 크기 변경 등)는 재생 정지 상태에서만 적용하고, 재생 중이면 곡 종료 후 적용을 예약한다.
 
