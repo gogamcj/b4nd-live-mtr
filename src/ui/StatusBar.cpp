@@ -65,8 +65,17 @@ void StatusBar::paint (juce::Graphics& g)
 
     const auto drops = state.getDropoutCount();
     item ("DROPOUT", juce::String ((juce::int64) drops), drops == 0 ? theme::ok : theme::danger, 90);
-    item ("MIDI", "Phase 4", theme::textFaint, 100);
-    item ("VSTi", "Phase 5", theme::textFaint, 100);
+    {
+        const auto m = state.getMediaSummary();
+        juce::String v = juce::String (juce::roundToInt ((double) m.ramBytes / (1024.0 * 1024.0))) + " MB";
+        auto dot = theme::ok;
+        if (m.missing + m.errors > 0) { v = juce::String (m.missing + m.errors) + " MISSING  " + v; dot = theme::danger; }
+        else if (m.loading > 0)       { v = "LOADING " + juce::String (m.loading) + "  " + v;        dot = theme::warn; }
+        else if (m.ramBytes > AppState::ramWarningBytes) dot = theme::warn;
+        else if (m.ready == 0)        dot = theme::textFaint;
+        item ("MEDIA", v, dot, 150);
+    }
+    item ("MIDI", "Phase 4", theme::textFaint, 90);
 
     const auto mode = state.isLiveMode() ? juce::String ("LIVE") : juce::String ("EDIT");
     g.setColour (state.isLiveMode() ? theme::danger : theme::accent);

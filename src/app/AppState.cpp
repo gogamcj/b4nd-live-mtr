@@ -30,6 +30,23 @@ juce::String nameForTrackKind (TrackKind k)
     return {};
 }
 
+static std::shared_ptr<const std::vector<float>> makeOverview (const AudioData& d, int buckets = 2048)
+{
+    auto v = std::make_shared<std::vector<float>> ((size_t) buckets, 0.0f);
+    if (d.numFrames <= 0)
+        return v;
+    for (int c = 0; c < d.numChannels; ++c)
+    {
+        const float* x = d.channel (c);
+        for (std::int64_t i = 0; i < d.numFrames; ++i)
+        {
+            auto& p = (*v)[(size_t) (i * buckets / d.numFrames)];
+            p = std::max (p, std::abs (x[i]));
+        }
+    }
+    return v;
+}
+
 static TrackInfo makeTrack (const juce::String& name, TrackKind kind, const juce::String& dest,
                             std::vector<juce::Range<double>> regions, float volDb = 0.0f, bool mute = false)
 {
@@ -40,6 +57,10 @@ static TrackInfo makeTrack (const juce::String& name, TrackKind kind, const juce
     t.regions = std::move (regions);
     t.volumeDb = volDb;
     t.mute = mute;
+    t.bus = dest.startsWithIgnoreCase ("Monitor") ? BusKind::Monitor
+          : dest.startsWithIgnoreCase ("Extra")   ? BusKind::Extra
+          : dest.startsWithIgnoreCase ("Aux")     ? BusKind::Aux
+                                                  : BusKind::Main;
     return t;
 }
 
@@ -123,6 +144,8 @@ AppState::AppState (AudioEngine& e, AudioDeviceController& d)
 {
     engine.setRouting (routing);
     device.addChangeListener (this);
+    requestAllMedia();
+    rebuildPlan();
     startTimerHz (30);
 }
 
@@ -191,7 +214,9 @@ void AppState::selectSong (int index)
     stop();
     currentSong = index;
     position = 0.0;
+    trackLevels.fill (0.0f);
     juce::Logger::writeToLog ("Song selected: " + songs[(size_t) index].title);
+    rebuildPlan();   // the engine swaps it in once the stop fade has finished
     sendChangeMessage();
 }
 
@@ -331,6 +356,7 @@ void AppState::setTrackVolume (int trackIndex, float db)
         if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
         {
             s->tracks[(size_t) trackIndex].volumeDb = db;
+            engine.setTrackGain (trackIndex, juce::Decibels::decibelsToGain (db, -60.0f));
             sendChangeMessage();
         }
 }
@@ -341,6 +367,7 @@ void AppState::setTrackMute (int trackIndex, bool m)
         if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
         {
             s->tracks[(size_t) trackIndex].mute = m;
+            engine.setTrackMute (trackIndex, m);
             sendChangeMessage();
         }
 }
@@ -351,8 +378,277 @@ void AppState::setTrackSolo (int trackIndex, bool so)
         if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
         {
             s->tracks[(size_t) trackIndex].solo = so;
+            engine.setTrackSolo (trackIndex, so);
             sendChangeMessage();
         }
+}
+
+static juce::String formatOutputs (std::vector<int> outs)
+{
+    std::sort (outs.begin(), outs.end());
+    outs.erase (std::unique (outs.begin(), outs.end()), outs.end());
+    juce::StringArray parts;
+    for (size_t i = 0; i < outs.size();)
+    {
+        size_t j = i;
+        while (j + 1 < outs.size() && outs[j + 1] == outs[j] + 1) ++j;
+        parts.add (j > i ? juce::String (outs[i] + 1) + "-" + juce::String (outs[j] + 1) : juce::String (outs[i] + 1));
+        i = j + 1;
+    }
+    return parts.joinIntoString (",");
+}
+
+juce::String AppState::getTrackDestination (int trackIndex) const
+{
+    const auto* s = getCurrentSong();
+    if (s == nullptr || ! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+        return {};
+    const auto& t = s->tracks[(size_t) trackIndex];
+    if (t.kind == TrackKind::MidiVsti || t.kind == TrackKind::MidiExternal)
+        return t.destination;
+
+    // Click and guide are also mixed into the in-ear monitor bus by the engine.
+    const BusKind bus = t.kind == TrackKind::Click ? BusKind::Click : t.kind == TrackKind::Guide ? BusKind::Guide : t.bus;
+    const bool alsoInEar = bus == BusKind::Click || bus == BusKind::Guide;
+    std::vector<int> direct, inEar;
+    for (int o = 0; o < routing.getNumOutputs(); ++o)
+    {
+        const auto& src = routing.getOutput (o).source;
+        if (! src) continue;
+        if (src->kind == bus)                                   direct.push_back (o);
+        else if (alsoInEar && src->kind == BusKind::Monitor)    inEar.push_back (o);
+    }
+    juce::String r;
+    if (! direct.empty())
+        r = "OUT " + formatOutputs (direct);
+    if (! inEar.empty())
+        r += (r.isEmpty() ? "" : " + ") + juce::String ("IN-EAR ") + formatOutputs (inEar);
+    return r.isEmpty() ? juce::String ("NOT ROUTED") : r;
+}
+
+void AppState::setMasterVolume (float db)
+{
+    masterDb = juce::jlimit (-60.0f, 6.0f, db);
+    engine.setMasterGain (juce::Decibels::decibelsToGain (masterDb, -60.0f));
+    sendChangeMessage();
+}
+
+void AppState::setTrackPan (int trackIndex, float pan)
+{
+    if (auto* s = currentSongMutable())
+        if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+        {
+            s->tracks[(size_t) trackIndex].pan = juce::jlimit (-1.0f, 1.0f, pan);
+            engine.setTrackPan (trackIndex, s->tracks[(size_t) trackIndex].pan);
+            sendChangeMessage();
+        }
+}
+
+//==============================================================================
+double AppState::mediaSampleRate() const noexcept
+{
+    // Decode at the running device rate. Without a device, 48 kHz (the usual live rate);
+    // everything is re-decoded if the device later opens at another rate.
+    return isEngineActive() ? engine.getSampleRate() : 48000.0;
+}
+
+void AppState::requestAllMedia()
+{
+    const double sr = mediaSampleRate();
+    for (auto& song : songs)
+        for (auto& t : song.tracks)
+        {
+            if (t.mediaPath.isEmpty())
+                continue;
+            if (t.media != nullptr && std::abs (t.mediaRate - sr) < 0.5)
+                continue;
+            const juce::File f (t.mediaPath);
+            if (auto data = mediaPool.request (f, sr))
+            {
+                t.media = std::move (data);
+                t.mediaRate = sr;
+                t.mediaStatus = TrackInfo::MediaStatus::Ready;
+            }
+            else
+            {
+                t.mediaStatus = f.existsAsFile() ? TrackInfo::MediaStatus::Loading : TrackInfo::MediaStatus::Missing;
+                if (t.mediaStatus == TrackInfo::MediaStatus::Missing)
+                {
+                    t.mediaError = "File not found: " + t.mediaPath;
+                    juce::Logger::writeToLog ("MEDIA MISSING (" + song.title + " / " + t.name + "): " + t.mediaPath);
+                }
+            }
+        }
+}
+
+void AppState::applyFinishedMedia()
+{
+    auto finished = mediaPool.takeFinished();
+    if (finished.empty())
+        return;
+
+    const double sr = mediaSampleRate();
+    bool currentChanged = false;
+    for (auto& f : finished)
+    {
+        if (std::abs (f.sampleRate - sr) >= 0.5)
+            continue;   // decoded for a previous device rate: a new request is already queued
+        for (size_t si = 0; si < songs.size(); ++si)
+            for (auto& t : songs[si].tracks)
+            {
+                if (t.mediaPath != f.path
+                    || (t.mediaStatus == TrackInfo::MediaStatus::Ready && std::abs (t.mediaRate - sr) < 0.5))
+                    continue;
+                if (f.result.data != nullptr)
+                {
+                    t.media = f.result.data;
+                    t.mediaRate = f.sampleRate;
+                    t.mediaStatus = TrackInfo::MediaStatus::Ready;
+                    t.mediaError.clear();
+                    if (t.overview == nullptr)
+                        t.overview = makeOverview (*t.media);
+                    const double len = t.mediaStartSeconds + (double) t.media->numFrames / f.sampleRate;
+                    t.regions = { { t.mediaStartSeconds, len } };
+                    if (len > songs[si].lengthSeconds)
+                        songs[si].lengthSeconds = len;
+                }
+                else
+                {
+                    t.mediaStatus = f.result.missing ? TrackInfo::MediaStatus::Missing : TrackInfo::MediaStatus::Error;
+                    t.mediaError = f.result.error;
+                }
+                if ((int) si == currentSong)
+                    currentChanged = true;
+            }
+    }
+
+    const auto summary = getMediaSummary();
+    if (summary.ramBytes > ramWarningBytes && ! ramWarningLogged)
+    {
+        ramWarningLogged = true;
+        juce::Logger::writeToLog ("WARNING: media uses " + juce::String ((double) summary.ramBytes / (1024.0 * 1024.0 * 1024.0), 2, false)
+                                  + " GB of RAM. Consider fewer stems or a lower sample rate.");
+    }
+
+    if (currentChanged)
+        rebuildPlan();
+    sendChangeMessage();
+}
+
+juce::String AppState::addAudioFile (const juce::File& file, int trackIndex)
+{
+    if (liveMode)
+        return "Live Mode: media cannot be changed during a show";
+    if (! file.existsAsFile())
+        return "File not found: " + file.getFullPathName();
+    if (! mediaPool.canRead (file))
+        return "Unsupported audio format: " + file.getFileName();
+    auto* s = currentSongMutable();
+    if (s == nullptr)
+        return "No song selected";
+
+    TrackInfo* t = nullptr;
+    if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size())
+        && (s->tracks[(size_t) trackIndex].kind == TrackKind::Audio || s->tracks[(size_t) trackIndex].kind == TrackKind::Guide))
+    {
+        t = &s->tracks[(size_t) trackIndex];
+    }
+    else
+    {
+        if ((int) s->tracks.size() >= AudioEngine::maxTracks)
+            return "Too many tracks in this song";
+        TrackInfo nt;
+        nt.name = file.getFileNameWithoutExtension();
+        nt.kind = TrackKind::Audio;
+        nt.destination = "Main L/R";
+        nt.bus = BusKind::Main;
+        s->tracks.push_back (nt);
+        t = &s->tracks.back();
+        pushMixerToEngine();   // new slot starts at its stored volume
+    }
+
+    t->mediaPath = file.getFullPathName();
+    t->media.reset();
+    t->overview.reset();
+    t->mediaRate = 0.0;
+    t->mediaError.clear();
+    t->mediaStatus = TrackInfo::MediaStatus::Loading;
+    juce::Logger::writeToLog ("Media assigned: " + t->name + " <- " + t->mediaPath);
+    requestAllMedia();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+AppState::MediaSummary AppState::getMediaSummary() const
+{
+    MediaSummary m;
+    for (const auto& song : songs)
+        for (const auto& t : song.tracks)
+            switch (t.mediaStatus)
+            {
+                case TrackInfo::MediaStatus::Loading: ++m.loading; break;
+                case TrackInfo::MediaStatus::Missing: ++m.missing; break;
+                case TrackInfo::MediaStatus::Error:   ++m.errors;  break;
+                case TrackInfo::MediaStatus::Ready:   ++m.ready;   break;
+                case TrackInfo::MediaStatus::None:    break;
+            }
+    m.ramBytes = mediaPool.getCachedBytes();
+    return m;
+}
+
+void AppState::pushMixerToEngine()
+{
+    auto* s = getCurrentSong();
+    for (int i = 0; i < AudioEngine::maxTracks; ++i)
+    {
+        const TrackInfo* t = (s != nullptr && i < (int) s->tracks.size()) ? &s->tracks[(size_t) i] : nullptr;
+        engine.setTrackGain (i, t != nullptr ? juce::Decibels::decibelsToGain (t->volumeDb, -60.0f) : 1.0f);
+        engine.setTrackPan (i, t != nullptr ? t->pan : 0.0f);
+        engine.setTrackMute (i, t != nullptr && t->mute);
+        engine.setTrackSolo (i, t != nullptr && t->solo);
+    }
+}
+
+void AppState::rebuildPlan()
+{
+    auto* song = getCurrentSong();
+    if (song == nullptr)
+        return;
+
+    const double sr = mediaSampleRate();
+    auto plan = std::make_unique<PlaybackPlan>();
+    plan->lengthSamples = (std::int64_t) std::llround (song->lengthSeconds * sr);
+    plan->tempo = song->tempo;
+
+    for (int i = 0; i < (int) song->tracks.size() && i < AudioEngine::maxTracks; ++i)
+    {
+        const auto& t = song->tracks[(size_t) i];
+        if (t.kind == TrackKind::Click)
+        {
+            if (! plan->hasClick)
+            {
+                plan->hasClick = true;
+                plan->clickSlot = i;
+                plan->click = PlaybackPlan::makeDefaultClick (sr);
+            }
+            continue;
+        }
+        if ((t.kind != TrackKind::Audio && t.kind != TrackKind::Guide) || t.media == nullptr
+            || std::abs (t.mediaRate - sr) >= 0.5)
+            continue;
+
+        TrackRuntime rt;
+        rt.slot = i;
+        rt.role = t.kind == TrackKind::Guide ? TrackRole::Guide : TrackRole::Audio;
+        rt.bus = t.bus;
+        rt.clips.push_back ({ t.media, (std::int64_t) std::llround (t.mediaStartSeconds * sr) });
+        plan->tracks.push_back (std::move (rt));
+    }
+
+    pushMixerToEngine();
+    engine.collectGarbage();
+    engine.setPlan (std::move (plan), sr);
 }
 
 void AppState::setLiveMode (bool shouldBeLive)
@@ -388,8 +684,28 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
         }
         if (st == AudioDeviceController::Status::Running)
         {
+            const int outs = device.getOutputChannelNames().size();
+            if (outs != lastDeviceOutputs)
+            {
+                // New device layout: 2-3 outputs get the split preset (OUT1 PA mono, OUT2 in-ear).
+                const bool wasLocked = routing.isLocked();
+                routing = OutputRouting::createForDevice (outs);
+                routing.setLocked (wasLocked);
+                lastDeviceOutputs = outs;
+                juce::Logger::writeToLog ("Output routing preset for " + juce::String (outs) + " outputs"
+                                          + (outs < 4 ? " (2-out split: OUT1 Main mono to PA, OUT2 click/guide in-ear)" : ""));
+            }
             engine.setRouting (routing);
             transport = TransportState::Stopped;
+
+            const double sr = engine.getSampleRate();
+            if (std::abs (sr - lastDeviceRate) >= 0.5)
+            {
+                lastDeviceRate = sr;
+                requestAllMedia();   // re-decode at the new rate in the background
+                mediaPool.purgeUnused();
+            }
+            rebuildPlan();
         }
         lastDeviceStatus = st;
     }
@@ -399,10 +715,15 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void AppState::timerCallback()
 {
+    applyFinishedMedia();
+    engine.collectGarbage();
+
     if (isEngineActive())
     {
         for (int i = 0; i < (int) outputLevels.size(); ++i)
             outputLevels[(size_t) i] = engine.takeOutputPeak (i);
+        for (int i = 0; i < (int) trackLevels.size(); ++i)
+            trackLevels[(size_t) i] = engine.takeTrackPeak (i);
 
         EngineEvent ev;
         while (engine.popEvent (ev))

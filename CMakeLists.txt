@@ -31,4 +31,7 @@ if(B4ND_BUILD_APP)
     FetchContent_MakeAvailable(JUCE)
 
     add_subdirectory(src/app)
+    if(B4ND_BUILD_TESTS)
+        add_subdirectory(tests/media)
+    endif()
 endif()

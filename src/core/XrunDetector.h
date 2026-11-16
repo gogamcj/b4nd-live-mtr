@@ -24,8 +24,11 @@ public:
         DspOverload  = 1u << 1
     };
 
+    /** warmupSeconds: callbacks in this window after a (re)start are not counted. Drivers
+        commonly deliver the first few blocks irregularly while the stream starts, and the
+        transport is always stopped then, so nothing audible is lost. */
     void prepare (double sampleRate, double lateFactor = 1.5, double overloadFactor = 0.8,
-                  std::int64_t toleranceNs = 1'000'000) noexcept;
+                  std::int64_t toleranceNs = 1'000'000, double warmupSeconds = 0.0) noexcept;
     void reset() noexcept;
 
     /** Call once per callback with monotonic timestamps (ns) of callback start and end. */
@@ -41,6 +44,7 @@ private:
     double sampleRate = 48000.0;
     double lateFactor = 1.5, overloadFactor = 0.8;
     std::int64_t toleranceNs = 1'000'000;
+    std::int64_t warmupSamples = 0, samplesSeen = 0;
     std::int64_t lastStartNs = -1;
     std::int64_t lastExpectedNs = 0;
     std::uint64_t lateCount = 0, overloadCount = 0;

@@ -156,7 +156,7 @@ void TimelineView::paint (juce::Graphics& g)
         g.drawText (kind, badge, juce::Justification::centred);
         g.setColour (theme::textDim);
         g.setFont (theme::font (10.0f));
-        g.drawFittedText (" > " + t.destination, hr.withHeight (18), juce::Justification::centredLeft, 1);
+        g.drawFittedText (" > " + state.getTrackDestination ((int) i), hr.withHeight (18), juce::Justification::centredLeft, 1);
 
         // M / S indicators
         auto m = msArea.removeFromLeft (20).withSizeKeepingCentre (20, 18);
@@ -177,6 +177,36 @@ void TimelineView::paint (juce::Graphics& g)
         g.setColour (theme::outline.withAlpha (0.5f));
         g.drawHorizontalLine (lane.getBottom() - 1, 0.0f, (float) lane.getRight());
 
+        const bool isMediaTrack = t.kind == TrackKind::Audio || t.kind == TrackKind::Guide;
+        if (isMediaTrack && t.mediaStatus != TrackInfo::MediaStatus::Ready)
+        {
+            // Audio lanes show what is really loaded: no demo regions pretending to be audio.
+            juce::String label;
+            auto c = theme::textFaint;
+            switch (t.mediaStatus)
+            {
+                case TrackInfo::MediaStatus::None:    label = "NO MEDIA  -  drop an audio file here"; break;
+                case TrackInfo::MediaStatus::Loading: label = "LOADING  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
+                case TrackInfo::MediaStatus::Missing: label = "MISSING FILE  " + t.mediaPath; c = theme::danger; break;
+                case TrackInfo::MediaStatus::Error:   label = "LOAD ERROR  " + t.mediaError; c = theme::danger; break;
+                case TrackInfo::MediaStatus::Ready:   break;
+            }
+            auto box = lane.reduced (2, 3).toFloat();
+            g.setColour (c.withAlpha (0.08f));
+            g.fillRoundedRectangle (box, 3.0f);
+            g.setColour (c.withAlpha (0.6f));
+            const float dash[] = { 4.0f, 4.0f };
+            juce::Path p;
+            p.addRoundedRectangle (box, 3.0f);
+            juce::Path dashed;
+            juce::PathStrokeType (1.0f).createDashedStroke (dashed, p, dash, 2);
+            g.fillPath (dashed);
+            g.setColour (c);
+            g.setFont (theme::font (11.0f, true));
+            g.drawFittedText (label, box.toNearestInt().reduced (10, 0), juce::Justification::centredLeft, 1);
+            continue;
+        }
+
         for (const auto& reg : t.regions)
         {
             const float x0 = xForSeconds (reg.getStart());
@@ -187,6 +217,24 @@ void TimelineView::paint (juce::Graphics& g)
             g.fillRoundedRectangle (box, 3.0f);
             g.setColour (colour.withAlpha (t.mute ? 0.35f : 0.8f));
             g.drawRoundedRectangle (box, 3.0f, 1.0f);
+
+            if (isMediaTrack && t.overview != nullptr && ! t.overview->empty() && box.getWidth() > 4.0f)
+            {
+                // Waveform overview (peak per pixel column).
+                const auto& ov = *t.overview;
+                const float mid = box.getCentreY(), half = box.getHeight() * 0.45f;
+                g.setColour (colour.withAlpha (t.mute ? 0.3f : 0.85f));
+                for (int px = 0; px < (int) box.getWidth(); ++px)
+                {
+                    const auto b0 = (size_t) ((double) px / box.getWidth() * (double) ov.size());
+                    const auto b1 = std::max (b0 + 1, (size_t) ((double) (px + 1) / box.getWidth() * (double) ov.size()));
+                    float pk = 0.0f;
+                    for (size_t b = b0; b < b1 && b < ov.size(); ++b)
+                        pk = std::max (pk, ov[b]);
+                    const float h = std::max (0.5f, std::min (1.0f, pk) * half);
+                    g.fillRect (box.getX() + (float) px, mid - h, 1.0f, 2.0f * h);
+                }
+            }
 
             if (t.kind == TrackKind::Click)
             {
@@ -201,6 +249,32 @@ void TimelineView::paint (juce::Graphics& g)
                 }
             }
         }
+    }
+
+    // --- drag-and-drop feedback ---
+    if (dropTrack >= -1)
+    {
+        g.setColour (theme::accent.withAlpha (0.25f));
+        if (dropTrack >= 0)
+            g.fillRect (juce::Rectangle<int> (0, lanes.getY() + dropTrack * th, bounds.getWidth(), th));
+        else
+        {
+            const int y = lanes.getY() + (int) song->tracks.size() * th;
+            auto r = juce::Rectangle<int> (0, y, bounds.getWidth(), juce::jmax (th, bounds.getBottom() - y));
+            g.fillRect (r);
+            g.setColour (theme::text);
+            g.setFont (theme::font (13.0f, true));
+            g.drawText ("+ ADD AUDIO TRACK", r.withHeight (th), juce::Justification::centred);
+        }
+    }
+    if (notice.isNotEmpty() && juce::Time::getMillisecondCounter() - noticeTime < 6000)
+    {
+        auto r = bounds.withTrimmedLeft (headerWidth).removeFromBottom (28).reduced (8, 3);
+        g.setColour ((noticeIsError ? theme::danger : theme::panelRaised).withAlpha (0.92f));
+        g.fillRoundedRectangle (r.toFloat(), 4.0f);
+        g.setColour (juce::Colours::white);
+        g.setFont (theme::font (12.0f, true));
+        g.drawFittedText (notice, r.reduced (8, 0), juce::Justification::centredLeft, 1);
     }
 
     // --- play head ---
@@ -254,6 +328,83 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         else if (e.x >= msLeft + 24 && e.x < msLeft + 44)
             state.setTrackSolo (track, ! song->tracks[(size_t) track].solo);
     }
+}
+
+int TimelineView::trackAtY (int y) const
+{
+    const auto* song = state.getCurrentSong();
+    const int top = rulerHeight + cueHeight;
+    if (song == nullptr || y < top)
+        return -1;
+    const int t = (y - top) / trackHeight();
+    return t < (int) song->tracks.size() ? t : -1;
+}
+
+void TimelineView::showNotice (const juce::String& text, bool isError)
+{
+    notice = text;
+    noticeIsError = isError;
+    noticeTime = juce::Time::getMillisecondCounter();
+    repaint();
+    juce::Component::SafePointer<TimelineView> safe (this);
+    juce::Timer::callAfterDelay (6100, [safe] { if (safe != nullptr) safe->repaint(); });
+}
+
+bool TimelineView::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& f : files)
+        if (state.canReadAudioFile (juce::File (f)))
+            return true;
+    return false;
+}
+
+void TimelineView::fileDragMove (const juce::StringArray&, int, int y)
+{
+    int t = trackAtY (y);
+    if (t >= 0)
+    {
+        const auto kind = state.getCurrentSong()->tracks[(size_t) t].kind;
+        if (kind != TrackKind::Audio && kind != TrackKind::Guide)
+            t = -1;   // dropping on a MIDI/click lane adds a new audio track instead
+    }
+    if (t != dropTrack)
+    {
+        dropTrack = t;
+        repaint();
+    }
+}
+
+void TimelineView::fileDragExit (const juce::StringArray&)
+{
+    dropTrack = -2;
+    repaint();
+}
+
+void TimelineView::filesDropped (const juce::StringArray& files, int x, int y)
+{
+    fileDragMove (files, x, y);
+    const int target = dropTrack;
+    dropTrack = -2;
+
+    int added = 0;
+    juce::String lastError;
+    bool first = true;
+    for (const auto& path : files)
+    {
+        const juce::File f (path);
+        if (! state.canReadAudioFile (f))
+            continue;
+        // The first file goes to the lane under the cursor; any others become new tracks.
+        const auto err = state.addAudioFile (f, first ? target : -1);
+        first = false;
+        if (err.isEmpty()) ++added;
+        else               lastError = err;
+    }
+    if (lastError.isNotEmpty())
+        showNotice (lastError, true);
+    else if (added > 0)
+        showNotice ("Loading " + juce::String (added) + " file(s) into memory...", false);
+    repaint();
 }
 
 void TimelineView::mouseDrag (const juce::MouseEvent& e)
