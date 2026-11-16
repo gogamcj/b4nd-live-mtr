@@ -1,0 +1,35 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows x64 (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "windows-msvc-asio",
+      "displayName": "Windows x64 + ASIO (set B4ND_ASIO_SDK_DIR)",
+      "inherits": "windows-msvc",
+      "binaryDir": "${sourceDir}/build/windows-asio",
+      "cacheVariables": {
+        "B4ND_ENABLE_ASIO": "ON",
+        "B4ND_ASIO_SDK_DIR": "$env{B4ND_ASIO_SDK_DIR}"
+      }
+    },
+    {
+      "name": "linux-ninja",
+      "displayName": "Linux (Ninja, development check)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" },
+    { "name": "windows-msvc-asio", "configurePreset": "windows-msvc-asio", "configuration": "Release" },
+    { "name": "linux-ninja", "configurePreset": "linux-ninja" }
+  ]
+}
