@@ -1,5 +1,6 @@
 #include "ui/SidePanel.h"
 #include "core/TimeFormat.h"
+#include "ui/ModulePanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
 
@@ -30,7 +31,9 @@ SidePanel::SidePanel (AppState& s) : state (s)
     newButton.setTooltip ("New project (Ctrl+N)");
     openButton.setTooltip ("Open project (Ctrl+O)");
     saveButton.setTooltip ("Save (Ctrl+S). Changes are also saved automatically 5 s after each edit.");
-    for (auto* b : { &newButton, &openButton, &saveButton })
+    modulesButton.onClick = [this] { showModuleWindow (state); };
+    modulesButton.setTooltip ("External MIDI sound modules: ports, channels, presets, status (Ctrl+M)");
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -59,6 +62,16 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);
     saveButton.setButtonText (state.isDirty() ? "SAVE *" : "SAVE");
+    {
+        const auto ms = state.getMidiSummary();
+        modulesButton.setButtonText (ms.modules == 0    ? juce::String ("MIDI MODULES")
+                                     : ms.problems > 0  ? "MIDI MODULES - " + juce::String (ms.problems) + " NOT READY"
+                                                        : "MIDI MODULES - " + juce::String (ms.ready) + "/" + juce::String (ms.modules) + " READY");
+        if (ms.problems > 0)
+            modulesButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
+        else
+            modulesButton.removeColour (juce::TextButton::buttonColourId);
+    }
 
     if (songList.getSelectedRow() != state.getCurrentSongIndex())
         songList.selectRow (state.getCurrentSongIndex(), true, true);
@@ -153,6 +166,7 @@ void SidePanel::resized()
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
     totalArea = r.removeFromBottom (26);
+    modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     songList.setBounds (r.reduced (0, 4));
 
     aiHeader = ai.removeFromTop (30);

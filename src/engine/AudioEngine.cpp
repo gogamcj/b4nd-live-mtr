@@ -24,6 +24,11 @@ void atomicMax (std::atomic<float>& a, float v) noexcept
 }
 } // namespace
 
+std::int64_t AudioEngine::clockNs() noexcept
+{
+    return nowNs();
+}
+
 void AudioEngine::prepare (double sr, int maxBlockSize, int numOutputs, int numInputs)
 {
     prepared.store (false, std::memory_order_release);
@@ -140,7 +145,10 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
 
         case EngineCommand::Type::Pause:
             if (t == EngineTransport::Playing)
+            {
                 transport.store ((int) EngineTransport::Paused, std::memory_order_release);
+                releaseMidiNotes();
+            }
             break;
 
         case EngineCommand::Type::Stop:
@@ -157,11 +165,14 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             position.store (target, std::memory_order_relaxed);
             if (playAfterStop)
                 playAfterStopPosition = target;
+            releaseMidiNotes();      // a jump never leaves notes hanging
+            midiExpectedPos = -1;
         }
             break;
 
         case EngineCommand::Type::EmergencyStop:
             playAfterStop = false;
+            releaseMidiNotes();      // modules go silent immediately, before the audio fade
             fadeAction = FadeAction::Emergency;
             emergencyLatched.store (true, std::memory_order_release);
             break;
@@ -332,10 +343,7 @@ void AudioEngine::renderTracks (int n) noexcept
     const auto& plan = *currentPlan;
     const std::int64_t pos = position.load (std::memory_order_relaxed);
 
-    bool anySolo = false;
-    for (const auto& t : plan.tracks)
-        if (t.role == TrackRole::Audio && trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed))
-            anySolo = true;
+    const bool anySolo = anySoloActive();
 
     const float invN = 1.0f / (float) n;
 
@@ -409,6 +417,98 @@ void AudioEngine::renderTracks (int n) noexcept
 
         atomicMax (p.peak, peak);
     }
+}
+
+bool AudioEngine::anySoloActive() const noexcept
+{
+    const auto& plan = *currentPlan;
+    for (const auto& t : plan.tracks)
+        if (t.role == TrackRole::Audio && t.slot >= 0 && t.slot < maxTracks && trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed))
+            return true;
+    for (const auto& t : plan.midiTracks)
+        if (t.slot >= 0 && t.slot < maxTracks && trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed))
+            return true;
+    return false;
+}
+
+void AudioEngine::pushMidi (std::int64_t dueNs, int port, const MidiBytes& m) noexcept
+{
+    if (port < 0 || port >= maxMidiPorts)
+        return;
+    MidiOutEvent e;
+    e.dueNs = dueNs;
+    e.port = (std::uint8_t) port;
+    e.msg = m;
+    if (midiOut.push (e))
+        midiNotes[(size_t) port].observe (m);
+    else
+        midiDropped.fetch_add (1, std::memory_order_relaxed);   // MIDI thread stalled: never block audio
+}
+
+void AudioEngine::releaseMidiNotes() noexcept
+{
+    const auto now = nowNs();
+    for (int port = 0; port < maxMidiPorts; ++port)
+    {
+        auto& tr = midiNotes[(size_t) port];
+        // Copy first: releaseAll() resets the tracker, and pushMidi() would re-observe into it.
+        auto copy = tr;
+        tr.reset();
+        copy.releaseAll ([&] (const MidiBytes& m)
+        {
+            MidiOutEvent e;
+            e.dueNs = now;
+            e.port = (std::uint8_t) port;
+            e.msg = m;
+            if (! midiOut.push (e))
+                midiDropped.fetch_add (1, std::memory_order_relaxed);
+        });
+        activeNotesTelemetry[(size_t) port].store (0, std::memory_order_relaxed);
+    }
+}
+
+void AudioEngine::renderMidi (int n) noexcept
+{
+    const auto& plan = *currentPlan;
+    if (plan.midiTracks.empty())
+        return;
+
+    const std::int64_t pos = position.load (std::memory_order_relaxed);
+    const bool reseek = pos != midiExpectedPos;
+    const bool anySolo = anySoloActive();
+    const auto latency = outputLatencyNs.load (std::memory_order_relaxed);
+    const double nsPerSample = 1.0e9 / sampleRate;
+
+    for (size_t ti = 0; ti < plan.midiTracks.size() && ti < (size_t) maxTracks; ++ti)
+    {
+        const auto& t = plan.midiTracks[ti];
+        auto& cursor = midiCursor[ti];
+        if (reseek)
+            cursor = (size_t) (std::lower_bound (t.events.begin(), t.events.end(), pos,
+                                                 [] (const MidiSampleEvent& e, std::int64_t p) { return e.sample < p; })
+                               - t.events.begin());
+
+        const bool silenced = t.slot >= 0 && t.slot < maxTracks
+                              && (trackParams[(size_t) t.slot].mute.load (std::memory_order_relaxed)
+                                  || (anySolo && ! trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed)));
+        const auto early = (std::int64_t) (t.sendEarlyMs * 1.0e6);
+
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        {
+            const auto& e = t.events[cursor++];
+            if (silenced && e.msg.isNoteOn())
+                continue;   // muted: no new notes, but note-offs and controllers still go out
+            if (e.msg.isNoteOff() && ! midiNotes[(size_t) t.port].isNoteOn (e.msg.channel(), e.msg.data[1]))
+                continue;   // its note-on was skipped (muted) or already released
+            auto due = chunkStartNs + (std::int64_t) ((double) (e.sample - pos) * nsPerSample) + latency - early;
+            pushMidi (std::max (due, chunkStartNs), t.port, e.msg);
+        }
+    }
+    midiExpectedPos = pos + n;
+
+    for (const auto& t : plan.midiTracks)
+        if (t.port >= 0 && t.port < maxMidiPorts)
+            activeNotesTelemetry[(size_t) t.port].store (midiNotes[(size_t) t.port].activeCount(), std::memory_order_relaxed);
 }
 
 void AudioEngine::renderClick (int n) noexcept
@@ -492,6 +592,7 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
             clickVoicePos = -1;   // after a locate, never continue a click from somewhere else
         renderTracks (n);
         renderClick (n);
+        renderMidi (n);
         lastRenderEnd = pos + n;
     }
 
@@ -575,6 +676,8 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
             }
             else
             {
+                releaseMidiNotes();
+                midiExpectedPos = -1;
                 currentPlan = next;
                 currentPlanRate = pendingPlanRate.load (std::memory_order_relaxed);
                 currentPlanValid = std::abs (currentPlanRate - sampleRate) < 0.5;
@@ -609,6 +712,7 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
         for (int ch = 0; ch < numOutputs; ++ch)
             chunkPtrs[ch] = outputs[ch] != nullptr ? outputs[ch] + offset : nullptr;
 
+        chunkStartNs = startNs + (std::int64_t) ((double) offset * 1.0e9 / sampleRate);
         renderChunk (chunkPtrs, numOutputs, n);
 
         // Transport advances per chunk so tracks and click stay sample-aligned.
@@ -619,6 +723,7 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
             {
                 pos = songLength;
                 transport.store ((int) EngineTransport::Stopped, std::memory_order_release);
+                releaseMidiNotes();
                 pushEvent (EngineEvent::Type::SongEnded);
             }
             position.store (pos, std::memory_order_release);
@@ -646,6 +751,7 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
             testOutput.store (-1, std::memory_order_release);
             transport.store ((int) EngineTransport::Stopped, std::memory_order_release);
             clickVoicePos = -1;
+            releaseMidiNotes();
             if (wasEmergency)
                 pushEvent (EngineEvent::Type::EmergencyComplete);
             else

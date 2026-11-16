@@ -28,6 +28,7 @@ private:
     juce::ListBox songList { "songs", this };
     juce::OwnedArray<juce::TextButton> aiButtons;
     juce::TextButton newButton { "NEW" }, openButton { "OPEN" }, saveButton { "SAVE" };
+    juce::TextButton modulesButton { "MIDI MODULES" };
     juce::Rectangle<int> songHeader, aiHeader, totalArea;
     bool lastLive = false;
     juce::String builtFor;

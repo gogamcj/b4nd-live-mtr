@@ -1,6 +1,7 @@
 #include "app/AppState.h"
 
 #include <map>
+#include "midi/MidiFileImport.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -145,9 +146,11 @@ std::vector<SongInfo> AppState::createDemoSetlist()
 }
 
 AppState::AppState (AudioEngine& e, AudioDeviceController& d)
-    : songs (createDemoSetlist()), engine (e), device (d)
+    : songs (createDemoSetlist()), engine (e), device (d), midi (&e, createJuceMidiBackend())
 {
     engine.setRouting (routing);
+    midi.onStatusChanged = [this] { sendChangeMessage(); };
+    midi.start();
     device.addChangeListener (this);
     requestAllMedia();
     rebuildPlan();
@@ -158,6 +161,8 @@ AppState::~AppState()
 {
     stopTimer();
     closeProject();
+    midi.onStatusChanged = nullptr;
+    midi.shutdown();   // releases every sounding note first
     device.removeChangeListener (this);
 }
 
@@ -296,6 +301,7 @@ void AppState::emergencyStop()
     // Always sent, even if the transport looks stopped: it also kills output tests.
     if (isEngineActive())
         post (EngineCommand::Type::EmergencyStop);
+    midi.panic();   // external modules: Note Off + pedal up + All Notes Off, now
     emergency = true;
     transport = TransportState::Stopped;
     sendChangeMessage();
@@ -363,6 +369,8 @@ void AppState::setTrackVolume (int trackIndex, float db)
         {
             s->tracks[(size_t) trackIndex].volumeDb = db;
             engine.setTrackGain (trackIndex, juce::Decibels::decibelsToGain (db, -60.0f));
+            if (s->tracks[(size_t) trackIndex].kind == TrackKind::MidiExternal)
+                sendTrackVolumeToModule (s->tracks[(size_t) trackIndex]);
             markDirty();
             sendChangeMessage();
         }
@@ -413,7 +421,17 @@ juce::String AppState::getTrackDestination (int trackIndex) const
     if (s == nullptr || ! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
         return {};
     const auto& t = s->tracks[(size_t) trackIndex];
-    if (t.kind == TrackKind::MidiVsti || t.kind == TrackKind::MidiExternal)
+    if (t.kind == TrackKind::MidiExternal)
+    {
+        const int m = findModule (t.moduleId);
+        if (m < 0)
+            return "NO MODULE";
+        const auto& mp = modules[(size_t) m];
+        const int ch = t.midiChannel > 0 ? t.midiChannel : mp.channel;
+        return juce::String::fromUTF8 (mp.deviceName.c_str()) + " ch" + juce::String (ch) + "  ["
+               + MidiOutputService::statusText (midi.getStatus (m)) + "]";
+    }
+    if (t.kind == TrackKind::MidiVsti)
         return t.destination;
 
     // Click and guide are also mixed into the in-ear monitor bus by the engine.
@@ -609,6 +627,231 @@ AppState::MediaSummary AppState::getMediaSummary() const
     return m;
 }
 
+//==============================================================================
+// External MIDI modules
+int AppState::findModule (const juce::String& id) const
+{
+    if (id.isEmpty())
+        return -1;
+    for (size_t i = 0; i < modules.size(); ++i)
+        if (juce::String::fromUTF8 (modules[i].id.c_str()) == id)
+            return (int) i;
+    return -1;
+}
+
+juce::String AppState::guardModuleChange() const
+{
+    if (liveMode)
+        return "Live Mode: modules cannot be changed during a show";
+    if (transport == TransportState::Playing)
+        return "Stop playback first";
+    return {};
+}
+
+static ModuleProfile sanitise (ModuleProfile p)
+{
+    p.channel = juce::jlimit (1, 16, p.channel);
+    auto opt = [] (int v) { return v < 0 ? -1 : juce::jlimit (0, 127, v); };
+    p.bankMsb = opt (p.bankMsb);
+    p.bankLsb = opt (p.bankLsb);
+    p.program = opt (p.program);
+    p.volume = opt (p.volume);
+    p.pan = opt (p.pan);
+    p.volumeCc = juce::jlimit (0, 127, p.volumeCc);
+    p.panCc = juce::jlimit (0, 127, p.panCc);
+    p.delayOffsetMs = juce::jlimit (0.0, 200.0, p.delayOffsetMs);
+    p.gapMs = juce::jlimit (0, 500, p.gapMs);
+    p.settleMs = juce::jlimit (0, 5000, p.settleMs);
+    if (p.deviceName.empty())
+        p.deviceName = p.portName.empty() ? "Module" : p.portName;
+    return p;
+}
+
+juce::String AppState::addModule (ModuleProfile p)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    if ((int) modules.size() >= MidiOutputService::maxSlots)
+        return "At most " + juce::String (MidiOutputService::maxSlots) + " modules";
+    if (p.id.empty())
+        p.id = newUuid();
+    modules.push_back (sanitise (std::move (p)));
+    midi.setModules (modules);
+    juce::Logger::writeToLog ("MIDI module added: " + juce::String::fromUTF8 (modules.back().deviceName.c_str()));
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::updateModule (int index, const ModuleProfile& p)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    if (! juce::isPositiveAndBelow (index, (int) modules.size()))
+        return "No such module";
+    auto np = sanitise (p);
+    np.id = modules[(size_t) index].id;
+    modules[(size_t) index] = np;
+    midi.setModules (modules);   // reopens on a port change, sends the preset again on a preset change
+    markDirty();
+    rebuildPlan();               // channel or delay may have changed
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::removeModule (int index)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    if (! juce::isPositiveAndBelow (index, (int) modules.size()))
+        return "No such module";
+    const auto id = juce::String::fromUTF8 (modules[(size_t) index].id.c_str());
+    midi.panic();
+    modules.erase (modules.begin() + index);
+    for (auto& song : songs)
+        for (auto& t : song.tracks)
+            if (t.moduleId == id)
+                t.moduleId.clear();
+    midi.setModules (modules);
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+void AppState::sendTrackVolumeToModule (const TrackInfo& t)
+{
+    // GM volume curve: dB = 40 log10 (cc / 127), relative to the module's stored volume.
+    const int m = findModule (t.moduleId);
+    if (m < 0 || modules[(size_t) m].volume < 0)
+        return;
+    const auto& mp = modules[(size_t) m];
+    const int ch = juce::jlimit (1, 16, t.midiChannel > 0 ? t.midiChannel : mp.channel) - 1;
+    const double scale = t.volumeDb <= -59.9f ? 0.0 : std::pow (10.0, (double) t.volumeDb / 40.0);
+    const int value = juce::jlimit (0, 127, juce::roundToInt (mp.volume * scale));
+    midi.sendLater (m, MidiBytes::make ((std::uint8_t) (0xb0 | ch), (std::uint8_t) mp.volumeCc, (std::uint8_t) value), 0.0);
+}
+
+juce::String AppState::setTrackModule (int trackIndex, const juce::String& moduleId, int channel)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    auto* s = currentSongMutable();
+    if (s == nullptr || ! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+        return "No such track";
+    auto& t = s->tracks[(size_t) trackIndex];
+    if (t.kind != TrackKind::MidiExternal)
+        return "Not an external MIDI track";
+    if (moduleId.isNotEmpty() && findModule (moduleId) < 0)
+        return "No such module";
+    midi.panic();   // notes started on the old module must not hang
+    t.moduleId = moduleId;
+    t.midiChannel = juce::jlimit (0, 16, channel);
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+void AppState::loadMidiFile (TrackInfo& t, const SongInfo& song)
+{
+    t.midiEvents.reset();
+    t.midiNotes = 0;
+    t.midiError.clear();
+    if (t.midiPath.isEmpty())
+    {
+        t.midiStatus = TrackInfo::MidiStatus::None;
+        return;
+    }
+    const juce::File f (t.midiPath);
+    if (! f.existsAsFile())
+    {
+        t.midiStatus = TrackInfo::MidiStatus::Missing;
+        juce::Logger::writeToLog ("MIDI FILE MISSING: " + t.midiPath);
+        return;
+    }
+    auto r = importMidiFile (f);
+    if (! r.ok)
+    {
+        t.midiStatus = TrackInfo::MidiStatus::Error;
+        t.midiError = r.error;
+        juce::Logger::writeToLog ("MIDI file error (" + t.midiPath + "): " + r.error);
+        return;
+    }
+    t.midiNotes = r.noteCount;
+    const double first = song.tempo.secondsAtBeat ((double) r.events.front().tick / midiPpq);
+    const double last = song.tempo.secondsAtBeat ((double) r.lastTick / midiPpq);
+    t.regions = { { first, juce::jmax (first + 0.1, last) } };
+    t.midiEvents = std::make_shared<const std::vector<MidiTickEvent>> (std::move (r.events));
+    t.midiStatus = TrackInfo::MidiStatus::Ready;
+    if (r.fileBpm > 0.0 && std::abs (r.fileBpm - song.tempo.bpmAtBeat (0.0)) > 0.5)
+        juce::Logger::writeToLog ("Note: " + f.getFileName() + " was written at " + juce::String (r.fileBpm, 1)
+                                  + " BPM; it plays on the song's tempo map (" + juce::String (song.tempo.bpmAtBeat (0.0), 1) + " BPM)");
+}
+
+juce::String AppState::addMidiFile (const juce::File& file, int trackIndex)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    if (! file.existsAsFile())
+        return "File not found: " + file.getFullPathName();
+    auto* s = currentSongMutable();
+    if (s == nullptr)
+        return "No song selected";
+    const auto check = importMidiFile (file);
+    if (! check.ok)
+        return file.getFileName() + ": " + check.error;
+
+    TrackInfo* t = nullptr;
+    if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()) && s->tracks[(size_t) trackIndex].kind == TrackKind::MidiExternal)
+    {
+        t = &s->tracks[(size_t) trackIndex];
+    }
+    else
+    {
+        if ((int) s->tracks.size() >= AudioEngine::maxTracks)
+            return "Too many tracks in this song";
+        TrackInfo nt;
+        nt.id = newUuid();
+        nt.name = file.getFileNameWithoutExtension();
+        nt.kind = TrackKind::MidiExternal;
+        if (! modules.empty())
+            nt.moduleId = juce::String::fromUTF8 (modules.front().id.c_str());
+        s->tracks.push_back (nt);
+        t = &s->tracks.back();
+        pushMixerToEngine();
+    }
+    t->midiPath = file.getFullPathName();
+    loadMidiFile (*t, *s);
+    juce::Logger::writeToLog ("MIDI file assigned: " + t->name + " <- " + t->midiPath + " (" + juce::String (t->midiNotes) + " notes)");
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+AppState::MidiSummary AppState::getMidiSummary() const
+{
+    MidiSummary m;
+    m.modules = (int) modules.size();
+    for (int i = 0; i < m.modules; ++i)
+    {
+        const auto st = midi.getStatus (i);
+        if (st == MidiOutputService::PortStatus::Ready)          ++m.ready;
+        else if (st == MidiOutputService::PortStatus::Preparing) ++m.preparing;
+        else                                                     ++m.problems;   // no port / disconnected / busy
+    }
+    if (const auto* s = getCurrentSong())
+        for (const auto& t : s->tracks)
+            if (t.kind == TrackKind::MidiExternal)
+            {
+                if (t.midiEvents != nullptr && findModule (t.moduleId) < 0) ++m.tracksWithoutModule;
+                if (t.midiStatus == TrackInfo::MidiStatus::Missing) ++m.missingFiles;
+            }
+    return m;
+}
+
 void AppState::pushMixerToEngine()
 {
     auto* s = getCurrentSong();
@@ -644,6 +887,25 @@ void AppState::rebuildPlan()
                 plan->clickSlot = i;
                 plan->click = PlaybackPlan::makeDefaultClick (sr);
             }
+            continue;
+        }
+        if (t.kind == TrackKind::MidiExternal)
+        {
+            const int m = findModule (t.moduleId);
+            if (t.midiEvents == nullptr || m < 0 || m >= AudioEngine::maxMidiPorts)
+                continue;
+            const auto& mp = modules[(size_t) m];
+            MidiTrackRuntime mt;
+            mt.slot = i;
+            mt.port = m;
+            mt.sendEarlyMs = mp.delayOffsetMs;
+            const int ch = juce::jlimit (1, 16, t.midiChannel > 0 ? t.midiChannel : mp.channel) - 1;
+            mt.events = toSampleEvents (*t.midiEvents, song->tempo, sr, ch);
+            if (! mp.sustainEnabled)   // some modules hang notes on CC64: the profile can strip it
+                mt.events.erase (std::remove_if (mt.events.begin(), mt.events.end(),
+                                                 [] (const MidiSampleEvent& e) { return e.msg.isController (64); }),
+                                 mt.events.end());
+            plan->midiTracks.push_back (std::move (mt));
             continue;
         }
         if ((t.kind != TrackKind::Audio && t.kind != TrackKind::Guide) || t.media == nullptr
@@ -692,6 +954,8 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
             dropoutsBeforeRestart += engine.getLateCallbackCount() + engine.getOverloadCount();
             if (transport != TransportState::Stopped)
                 juce::Logger::writeToLog ("Transport stopped: audio device not running");
+            // The engine can no longer release its notes: the MIDI thread does it from what it sent.
+            midi.panic();
             transport = TransportState::Stopped;
         }
         if (st == AudioDeviceController::Status::Running)
@@ -708,6 +972,8 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
                                           + (outs < 4 ? " (2-out split: OUT1 Main mono to PA, OUT2 click/guide in-ear)" : ""));
             }
             engine.setRouting (routing);
+            engine.setOutputLatencyMs (device.getOutputLatencyMs());
+            juce::Logger::writeToLog ("MIDI timing: output latency " + juce::String (device.getOutputLatencyMs(), 1) + " ms");
             transport = TransportState::Stopped;
 
             const double sr = engine.getSampleRate();
@@ -975,6 +1241,13 @@ ProjectData AppState::toProjectData() const
             td.pan = t.pan;
             td.mute = t.mute;
             td.solo = t.solo;
+            if (t.kind == TrackKind::MidiExternal)
+            {
+                td.moduleProfileId = u8 (t.moduleId);
+                td.midiChannel = t.midiChannel;
+                if (t.midiPath.isNotEmpty())
+                    td.midiPath = session.isOpen() ? pkg.toStoredPath (u8 (t.midiPath)) : u8 (t.midiPath);
+            }
             if (t.mediaPath.isNotEmpty())
             {
                 auto it = mediaIds.find (t.mediaPath);
@@ -1006,6 +1279,7 @@ ProjectData AppState::toProjectData() const
         p.songs.push_back (std::move (sd));
     }
     p.setlists.push_back (setlist);
+    p.modules = modules;
     return p;
 }
 
@@ -1056,6 +1330,14 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
             t.solo = td.solo;
             if (t.kind == TrackKind::Click)
                 t.regions = { { 0.0, s.lengthSeconds } };
+            if (t.kind == TrackKind::MidiExternal)
+            {
+                t.moduleId = fromU8 (td.moduleProfileId);
+                t.midiChannel = juce::jlimit (0, 16, td.midiChannel);
+                if (! td.midiPath.empty())
+                    t.midiPath = fromU8 (pkg.toAbsolutePath (td.midiPath));
+                loadMidiFile (t, s);
+            }
             if (! td.clips.empty())
                 if (const auto* m = p.findMedia (td.clips.front().mediaId))
                 {
@@ -1070,6 +1352,12 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
 
     // Swap the model in. The engine keeps playing nothing: we are stopped (guardProjectChange).
     stop();
+    midi.panic();
+    modules.clear();
+    for (const auto& mp : p.modules)
+        if ((int) modules.size() < MidiOutputService::maxSlots)
+            modules.push_back (sanitise (mp));
+    midi.setModules (modules);
     songs = std::move (loaded);
     currentSong = 0;
     position = 0.0;
@@ -1078,6 +1366,10 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
     projectCreatedAt = fromU8 (p.createdAt);
     projectName = fromU8 (p.name).isNotEmpty() ? fromU8 (p.name) : folder.getFileNameWithoutExtension();
     dirty = false;
+    for (const auto& song : songs)
+        for (const auto& t : song.tracks)
+            if (t.midiStatus == TrackInfo::MidiStatus::Missing && ! missingOnOpen.contains (t.midiPath))
+                missingOnOpen.add (t.midiPath);
     mediaPool.purgeUnused();
     requestAllMedia();
     rebuildPlan();

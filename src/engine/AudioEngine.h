@@ -52,6 +52,14 @@ struct EngineCommand
     float value = 0.0f;
 };
 
+/** One MIDI message for the MIDI output thread, with the wall-clock time it should leave. */
+struct MidiOutEvent
+{
+    std::int64_t dueNs = 0;   // steady_clock nanoseconds (see AudioEngine::clockNs)
+    std::uint8_t port = 0;
+    MidiBytes msg;
+};
+
 struct EngineEvent
 {
     enum class Type : std::uint8_t
@@ -83,6 +91,11 @@ public:
     static constexpr int maxOutputs = 64;
     static constexpr int maxTracks = 128;
     static constexpr int numBusKinds = 6;   // BusKind values
+    static constexpr int maxMidiPorts = 16;
+    static constexpr int midiQueueSize = 16384;
+
+    /** The clock used for MidiOutEvent::dueNs (std::chrono::steady_clock). */
+    static std::int64_t clockNs() noexcept;
 
     AudioEngine() = default;
     ~AudioEngine();
@@ -119,6 +132,15 @@ public:
     float takeTrackPeak (int slot) noexcept;
 
     void setMasterGain (float linear) noexcept       { masterGain.store (linear, std::memory_order_relaxed); }
+
+    // --- external MIDI (docs/04) ---
+    /** MIDI output thread (single consumer). */
+    bool popMidi (MidiOutEvent& e) noexcept { return midiOut.pop (e); }
+    /** Device output latency, so MIDI notes leave when their audio would reach the speakers. */
+    void setOutputLatencyMs (double ms) noexcept { outputLatencyNs.store ((std::int64_t) (std::max (0.0, ms) * 1.0e6), std::memory_order_relaxed); }
+    std::uint64_t getMidiDroppedCount() const noexcept { return midiDropped.load (std::memory_order_relaxed); }
+    /** Notes currently sounding on a port (as sent by the engine). */
+    int getActiveMidiNotes (int port) const noexcept { return port >= 0 && port < maxMidiPorts ? activeNotesTelemetry[(size_t) port].load (std::memory_order_relaxed) : 0; }
     /** In-ear monitor mix: how much click, guide and MR (Main) go into the Monitor bus. */
     void setMonitorMix (float click, float guide, float main) noexcept;
 
@@ -144,6 +166,11 @@ private:
     void renderChunk (float* const* outputs, int numOutputs, int numSamples) noexcept;
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
+    void renderMidi (int numSamples) noexcept;
+    /** Note Off for every sounding note, CC64 0 and CC123 on used channels, all ports, sent now. */
+    void releaseMidiNotes() noexcept;
+    void pushMidi (std::int64_t dueNs, int port, const MidiBytes&) noexcept;
+    bool anySoloActive() const noexcept;
     void handleCommand (const EngineCommand&) noexcept;
     void pushEvent (EngineEvent::Type, float load = 0.0f) noexcept;
     void renderTest (float* const* outputs, int numOutputs, int start, int numSamples) noexcept;
@@ -218,6 +245,16 @@ private:
     std::int64_t testClock = 0;     // samples since test start
     std::uint32_t noiseState = 0x12345678u;
     float pinkB0 = 0.0f, pinkB1 = 0.0f, pinkB2 = 0.0f;
+
+    // external MIDI (audio thread only, except the queue and telemetry)
+    SpscQueue<MidiOutEvent, midiQueueSize> midiOut;
+    std::array<ActiveNoteTracker, maxMidiPorts> midiNotes;
+    std::array<std::size_t, maxTracks> midiCursor {};
+    std::int64_t midiExpectedPos = -1;
+    std::int64_t chunkStartNs = 0;
+    std::atomic<std::int64_t> outputLatencyNs { 0 };
+    std::atomic<std::uint64_t> midiDropped { 0 };
+    std::array<std::atomic<int>, maxMidiPorts> activeNotesTelemetry {};
 
     XrunDetector xruns;
     std::atomic<float> loadTelemetry { 0.0f }, peakLoadTelemetry { 0.0f };

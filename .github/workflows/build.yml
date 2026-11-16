@@ -55,7 +55,10 @@ jobs:
         run: |
           $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
           python tools/make-test-wav.py "$PWD/test-backing.wav" --rate 44100 --seconds 20
+          python tools/make-test-mid.py "$PWD/pads.mid" --bars 16
           foreach ($a in @(
+              @('--screenshot','screenshot-midi.png','--size','1600x960','--module','GS@Wavetable','--midi',"$PWD/pads.mid"),
+              @('--screenshot','screenshot-modules.png','--modules','--module','GS@Wavetable','--module','Spare','--midi',"$PWD/pads.mid"),
               @('--screenshot','screenshot-media.png','--size','1600x960','--media',"$PWD/test-backing.wav"),
               @('--screenshot','screenshot-edit.png','--size','1600x960','--at','75'),
               @('--screenshot','screenshot-live.png','--live','--size','1600x960','--at','75'),
@@ -74,6 +77,20 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "reopen run failed" }
           Get-ChildItem win-test.b4nd/backups
           Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          # External MIDI: Windows' built-in GS synth is a real MIDI output port (WinMM). If the runner has it,
+          # the module must find it by name and report its state.
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          if ($logs | Select-String -SimpleMatch "Microsoft GS Wavetable Synth" -Quiet) {
+            # The port must be found by name and its state reported. The GS synth needs an audio endpoint, which
+            # CI runners lack, so CANNOT OPEN is the expected honest answer there; READY where it can open.
+            if ($logs | Select-String -Pattern "MIDI module 1 \(GS @ .*GS Wavetable.*\): READY" -Quiet) {
+              Write-Output "GS Wavetable opened: module READY"
+            } elseif ($logs | Select-String -Pattern "MIDI module 1 \(GS @ .*GS Wavetable.*\): CANNOT OPEN" -Quiet) {
+              Write-Output "::warning::GS Wavetable found but cannot be opened on this runner (no audio endpoint): sending not checked on Windows"
+            } else { throw "GS Wavetable port present but the module reported no state" }
+          } else {
+            Write-Output "::warning::No Microsoft GS Wavetable Synth on this runner: real MIDI port open not checked on Windows"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -82,6 +99,7 @@ jobs:
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe
             screenshot-*.png
             tools/make-test-wav.py
+            tools/make-test-mid.py
 
   linux:
     name: Linux (GCC, dev check)
@@ -94,7 +112,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libasound2-dev libfreetype-dev libfontconfig1-dev \
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
-            libxrender-dev libgl1-mesa-dev libjack-jackd2-dev jackd2 xvfb
+            libxrender-dev libgl1-mesa-dev libjack-jackd2-dev jackd2 xvfb alsa-utils
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -171,9 +189,10 @@ jobs:
           set -o pipefail
           APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
           python3 tools/make-test-wav.py test-backing.wav --rate 44100 --seconds 5
-          # 1. demo setlist + an audio file, saved as a new project package (Korean name on purpose)
+          python3 tools/make-test-mid.py pads.mid --bars 16
+          # 1. demo setlist + an audio file + a sound module and a .mid track, saved as a new package (Korean name on purpose)
           xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot shot-save.png --media test-backing.wav \
-            --save-as "$PWD/공연 테스트.b4nd" | tee save.txt
+            --module "INTEGRA-7" --midi pads.mid --save-as "$PWD/공연 테스트.b4nd" | tee save.txt
           grep -q "project save-as: ok" save.txt
           test -f "공연 테스트.b4nd/project.db"
           test ! -e "공연 테스트.b4nd/session.lock"
@@ -183,6 +202,8 @@ jobs:
           grep -q 'track "Original Mix" AUDIO 0.0 dB MUTE' open.txt
           grep -q 'track "test-backing" AUDIO 0.0 dB media=test-backing.wav' open.txt
           grep -q "media: 1 ready" open.txt
+          grep -q 'module "INTEGRA-7" port "" ch 1' open.txt
+          grep -q 'ext midi track "pads": pads.mid, 48 notes, module assigned' open.txt
           # 3. normal start reopens the last project; kill -9 leaves session.lock -> detected on next open
           Xvfb :98 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           XVFB=$!
@@ -197,3 +218,62 @@ jobs:
           ls "공연 테스트.b4nd/backups"
           kill $XVFB || true
 
+      - name: External MIDI test (engine -> MIDI thread -> ALSA virtual MIDI port)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          python3 tools/make-test-mid.py pads.mid --bars 16
+          # A virtual MIDI port in the kernel, so the real ALSA output path is used (best effort: runner kernels vary).
+          PORT=""
+          if sudo modprobe snd-virmidi midi_devs=1 2>/dev/null \
+             || (sudo apt-get install -y "linux-modules-extra-$(uname -r)" > /dev/null 2>&1 && sudo modprobe snd-virmidi midi_devs=1); then
+            sleep 1
+            sudo chmod a+rw /dev/snd/* || true
+            amidi -l || true
+            PORT=$(amidi -l | awk '/Vir/ { print $2; exit }')
+          fi
+          export JACK_DEFAULT_SERVER=b4ndmidi
+          jackd -n b4ndmidi -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          MOD="Pads"
+          if [ -n "$PORT" ]; then
+            amidi -p "$PORT" -r midi-in.bin -t 8 &
+            DUMP=$!
+            MOD="Pads@Vir"
+          else
+            echo "::warning::snd-virmidi not available on this runner: MIDI bytes on the wire not checked (engine path only)"
+          fi
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi.png --size 1600x960 \
+            --with-audio --module "$MOD" --midi pads.mid --at 3.5 --play 4 | tee midi.txt
+          pkill -f "jackd -n b4ndmidi" || true
+          grep -q 'ext midi track "pads": pads.mid, 48 notes, module assigned' midi.txt
+          grep -q "play: engine active" midi.txt
+          grep -q "engine queue full 0, notes still on after stop 0" midi.txt
+          if [ -n "$PORT" ]; then
+            wait $DUMP || true
+            grep -qE 'module "Pads" port ".*Vir.*" ch 1: READY' midi.txt
+            grep -q "late 0 (>2 ms)" midi.txt
+            python3 - midi-in.bin <<'PY'
+          import sys
+          data = open(sys.argv[1], "rb").read()
+          msgs, status, i = [], 0, 0
+          while i < len(data):
+              b = data[i]
+              if b >= 0x80:
+                  status, i = b, i + 1
+              n = 1 if (status & 0xF0) in (0xC0, 0xD0) else 2
+              msgs.append((status, *data[i:i + n])); i += n
+          on = {}
+          ons = 0
+          for m in msgs:
+              if m[0] & 0xF0 == 0x90 and m[2] > 0:
+                  on[(m[0] & 15, m[1])] = True; ons += 1
+              elif m[0] & 0xF0 == 0x80 or (m[0] & 0xF0 == 0x90 and m[2] == 0):
+                  on.pop((m[0] & 15, m[1]), None)
+          print(f"{len(msgs)} messages, {ons} note-ons, still sounding: {sorted(on)}")
+          assert (0xC0, 12) in msgs, "program change of the module preset missing"
+          assert ons >= 6, "too few notes reached the port"
+          assert not on, "hanging notes after stop"
+          assert any(m[0] == 0xB0 and m[1] == 123 for m in msgs), "All Notes Off missing after stop"
+          PY
+          fi

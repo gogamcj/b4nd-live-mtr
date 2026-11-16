@@ -87,7 +87,8 @@ private:
     int rc = SQLITE_ERROR;
 };
 
-// Schema v1 = docs/08 plus `clip` (audio regions) and track.destination_label.
+// Schema v2 = docs/08 plus `clip` (audio regions), track.destination_label (v1)
+// and module_profile.midi_port_id (v2).
 const char* const schemaV1 = R"SQL(
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 
@@ -177,7 +178,8 @@ CREATE TABLE module_profile (
   pan_cc INTEGER DEFAULT 10, pan_value INTEGER DEFAULT 64,
   sustain_enabled INTEGER DEFAULT 1, delay_offset_ms REAL DEFAULT 0,
   send_order TEXT DEFAULT 'msb,lsb,pc', gap_ms INTEGER DEFAULT 20, settle_ms INTEGER DEFAULT 200,
-  audio_input_channel INTEGER
+  audio_input_channel INTEGER,
+  midi_port_id TEXT
 );
 
 CREATE TABLE track (
@@ -244,7 +246,7 @@ INSERT INTO bus (id, kind, name, channels) VALUES
   ('bus-main', 'main', 'Main', 2), ('bus-click', 'click', 'Click', 1), ('bus-guide', 'guide', 'Guide', 1),
   ('bus-extra', 'extra', 'Extra', 2), ('bus-monitor', 'monitor', 'Monitor', 2), ('bus-aux', 'aux', 'Aux', 2);
 
-INSERT INTO schema_version (version) VALUES (1);
+INSERT INTO schema_version (version) VALUES (2);
 )SQL";
 
 std::string busId (const std::string& kind) { return "bus-" + kind; }
@@ -368,7 +370,26 @@ DbResult ProjectDatabase::migrate()
                                   + std::to_string (v) + "). Update the app to open it.");
     if (v < 1)
         return DbResult::failure ("Unknown project schema version " + std::to_string (v));
-    // Future: step-by-step migrations v -> v+1, each in its own transaction, with a backup first.
+
+    // Step-by-step migrations v -> v+1, each in its own transaction.
+    struct Step { int from; const char* sql; };
+    const Step steps[] = {
+        { 1, "ALTER TABLE module_profile ADD COLUMN midi_port_id TEXT; UPDATE schema_version SET version = 2;" },
+    };
+    for (const auto& st : steps)
+    {
+        if (getSchemaVersion() != st.from)
+            continue;
+        if (auto r = exec ("BEGIN IMMEDIATE;"); ! r)
+            return r;
+        if (auto r = exec (st.sql); ! r)
+        {
+            exec ("ROLLBACK;");
+            return DbResult::failure ("Project upgrade from schema " + std::to_string (st.from) + " failed: " + r.error);
+        }
+        if (auto r = exec ("COMMIT;"); ! r)
+            return r;
+    }
     return {};
 }
 
@@ -430,7 +451,7 @@ DbResult ProjectDatabase::save (const ProjectData& p)
 
     // Replace everything (cascades remove songs' children). Buses are fixed rows.
     if (! exec ("DELETE FROM setlist; DELETE FROM output_assignment; DELETE FROM song; DELETE FROM project;"
-                " DELETE FROM media_file;"))
+                " DELETE FROM media_file; DELETE FROM module_profile;"))
         return fail ("Clearing project");
 
     {
@@ -450,13 +471,35 @@ DbResult ProjectDatabase::save (const ProjectData& p)
                 return fail ("Saving media " + m.path);
     }
 
+    {
+        Stmt m (db, "INSERT INTO module_profile (id, device_name, midi_port, midi_port_id, midi_channel, bank_msb, bank_lsb, program,"
+                    " volume_cc, volume_value, pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        auto optional = [&m] (int i, int v) { if (v < 0) m.bindNull (i); else m.bind (i, v); };
+        for (const auto& mp : p.modules)
+        {
+            m.bind (1, mp.id).bind (2, mp.deviceName).bind (3, mp.portName).bindOrNull (4, mp.portIdentifier).bind (5, mp.channel);
+            optional (6, mp.bankMsb);
+            optional (7, mp.bankLsb);
+            optional (8, mp.program);
+            m.bind (9, mp.volumeCc);
+            optional (10, mp.volume);
+            m.bind (11, mp.panCc);
+            optional (12, mp.pan);
+            if (! m.bind (13, mp.sustainEnabled).bind (14, mp.delayOffsetMs).bind (15, mp.sendOrder)
+                     .bind (16, mp.gapMs).bind (17, mp.settleMs).run())
+                return fail ("Saving module " + mp.deviceName);
+        }
+    }
+
     Stmt song (db, "INSERT INTO song (id, project_id, title, artist, base_bpm, song_key, time_sig_num, time_sig_den,"
                    " length_sec, last_position_sec, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
     Stmt tempo (db, "INSERT INTO tempo_point (song_id, beat, bpm) VALUES (?,?,?)");
     Stmt sig (db, "INSERT INTO time_sig_point (song_id, bar, numerator, denominator) VALUES (?,?,?,?)");
     Stmt cue (db, "INSERT INTO cue_point (id, song_id, name, section, position_sec, color, sort_order, source) VALUES (?,?,?,?,?,?,?,?)");
     Stmt track (db, "INSERT INTO track (id, song_id, name, sort_order, kind, media_id, volume_db, pan, gain_db, mute, solo, mono,"
-                    " output_bus_id, delay_offset_ms, destination_label) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    " output_bus_id, delay_offset_ms, destination_label, module_profile_id, midi_channel, midi_rel_path)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     Stmt clip (db, "INSERT INTO clip (id, track_id, media_id, start_sec, offset_sec, length_sec) VALUES (?,?,?,?,?,?)");
     Stmt click (db, "INSERT INTO click_settings (song_id, enabled, count_in_bars, accent_first, sound, volume_db, subdivision)"
                     " VALUES (?,?,?,?,?,?,?)");
@@ -492,7 +535,8 @@ DbResult ProjectDatabase::save (const ProjectData& p)
             if (! track.bind (1, t.id).bind (2, sd.id).bind (3, t.name).bind (4, order++).bind (5, t.kind)
                        .bindOrNull (6, firstMedia).bind (7, t.volumeDb).bind (8, t.pan).bind (9, t.gainDb)
                        .bind (10, t.mute).bind (11, t.solo).bind (12, t.mono).bind (13, busId (t.busKind))
-                       .bind (14, t.delayOffsetMs).bindOrNull (15, t.destinationLabel).run())
+                       .bind (14, t.delayOffsetMs).bindOrNull (15, t.destinationLabel).bindOrNull (16, t.moduleProfileId)
+                       .bind (17, t.midiChannel).bindOrNull (18, t.midiPath).run())
                 return fail ("Saving track " + t.name);
             for (const auto& c : t.clips)
                 if (! clip.bind (1, c.id).bind (2, t.id).bind (3, c.mediaId).bind (4, c.startSec)
@@ -569,12 +613,28 @@ DbResult ProjectDatabase::load (ProjectData& out)
         }
     }
 
+    {
+        Stmt m (db, "SELECT id, device_name, midi_port, midi_port_id, midi_channel, bank_msb, bank_lsb, program, volume_cc, volume_value,"
+                    " pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms FROM module_profile ORDER BY rowid");
+        auto optional = [&m] (int c) { return m.isNull (c) ? -1 : m.integer (c); };
+        while (m.next())
+        {
+            ModuleProfile mp;
+            mp.id = m.text (0); mp.deviceName = m.text (1); mp.portName = m.text (2); mp.portIdentifier = m.text (3);
+            mp.channel = m.integer (4); mp.bankMsb = optional (5); mp.bankLsb = optional (6); mp.program = optional (7);
+            mp.volumeCc = m.integer (8); mp.volume = optional (9); mp.panCc = m.integer (10); mp.pan = optional (11);
+            mp.sustainEnabled = m.integer (12) != 0; mp.delayOffsetMs = m.real (13); mp.sendOrder = m.text (14);
+            mp.gapMs = m.integer (15); mp.settleMs = m.integer (16);
+            p.modules.push_back (std::move (mp));
+        }
+    }
+
     Stmt songs (db, "SELECT id, title, artist, base_bpm, song_key, length_sec, last_position_sec, notes FROM song ORDER BY rowid");
     Stmt tempo (db, "SELECT beat, bpm FROM tempo_point WHERE song_id = ? ORDER BY beat");
     Stmt sig (db, "SELECT bar, numerator, denominator FROM time_sig_point WHERE song_id = ? ORDER BY bar");
     Stmt cue (db, "SELECT id, name, section, position_sec, color, source FROM cue_point WHERE song_id = ? ORDER BY sort_order, position_sec");
-    Stmt track (db, "SELECT id, name, kind, volume_db, pan, gain_db, mute, solo, mono, output_bus_id, delay_offset_ms, destination_label"
-                    " FROM track WHERE song_id = ? ORDER BY sort_order");
+    Stmt track (db, "SELECT id, name, kind, volume_db, pan, gain_db, mute, solo, mono, output_bus_id, delay_offset_ms, destination_label,"
+                    " module_profile_id, midi_channel, midi_rel_path FROM track WHERE song_id = ? ORDER BY sort_order");
     Stmt clip (db, "SELECT id, media_id, start_sec, offset_sec, length_sec FROM clip WHERE track_id = ? ORDER BY start_sec, rowid");
     Stmt click (db, "SELECT enabled, count_in_bars, accent_first, sound, volume_db, subdivision FROM click_settings WHERE song_id = ?");
     if (! songs.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid())
@@ -612,6 +672,7 @@ DbResult ProjectDatabase::load (ProjectData& out)
             t.volumeDb = track.real (3); t.pan = track.real (4); t.gainDb = track.real (5);
             t.mute = track.integer (6) != 0; t.solo = track.integer (7) != 0; t.mono = track.integer (8) != 0;
             t.busKind = busKindFromId (track.text (9)); t.delayOffsetMs = track.real (10); t.destinationLabel = track.text (11);
+            t.moduleProfileId = track.text (12); t.midiChannel = track.integer (13); t.midiPath = track.text (14);
             sd.tracks.push_back (std::move (t));
         }
         track.reset();
