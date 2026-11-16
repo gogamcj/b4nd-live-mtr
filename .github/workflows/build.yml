@@ -57,8 +57,8 @@ jobs:
           python tools/make-test-wav.py "$PWD/test-backing.wav" --rate 44100 --seconds 20
           python tools/make-test-mid.py "$PWD/pads.mid" --bars 16
           foreach ($a in @(
-              @('--screenshot','screenshot-midi.png','--size','1600x960','--module','GS Synth@GS Wavetable','--midi',"$PWD/pads.mid"),
-              @('--screenshot','screenshot-modules.png','--modules','--module','GS Synth@GS Wavetable','--module','Spare','--midi',"$PWD/pads.mid"),
+              @('--screenshot','screenshot-midi.png','--size','1600x960','--module','GS@Wavetable','--midi',"$PWD/pads.mid"),
+              @('--screenshot','screenshot-modules.png','--modules','--module','GS@Wavetable','--module','Spare','--midi',"$PWD/pads.mid"),
               @('--screenshot','screenshot-media.png','--size','1600x960','--media',"$PWD/test-backing.wav"),
               @('--screenshot','screenshot-edit.png','--size','1600x960','--at','75'),
               @('--screenshot','screenshot-live.png','--live','--size','1600x960','--at','75'),
@@ -81,7 +81,7 @@ jobs:
           # the module must open it, send its preset and reach READY.
           $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
           if ($logs | Select-String -SimpleMatch "Microsoft GS Wavetable Synth" -Quiet) {
-            if (-not ($logs | Select-String -Pattern "MIDI module 1 \(GS Synth @ .*GS Wavetable.*\): READY" -Quiet)) { throw "GS Wavetable port present but the module never became READY" }
+            if (-not ($logs | Select-String -Pattern "MIDI module 1 \(GS @ .*GS Wavetable.*\): READY" -Quiet)) { throw "GS Wavetable port present but the module never became READY" }
           } else {
             Write-Output "::warning::No Microsoft GS Wavetable Synth on this runner: real MIDI port open not checked on Windows"
           }
