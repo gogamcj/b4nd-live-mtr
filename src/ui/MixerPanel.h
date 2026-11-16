@@ -48,6 +48,8 @@ private:
     juce::OwnedArray<ChannelStrip> strips;
     std::unique_ptr<ChannelStrip> master;
     juce::OwnedArray<LevelMeter> outputMeters;
+    int outputMeterWidth = 46;
+    void rebuildOutputMeters();
     juce::Viewport stripViewport;
     juce::Component stripHolder;
     juce::Rectangle<int> outputsArea;

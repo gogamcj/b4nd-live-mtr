@@ -4,9 +4,13 @@
 #include <atomic>
 #include <cstdint>
 
+#include <memory>
+#include <vector>
+
 #include "core/OutputRouting.h"
 #include "core/SpscQueue.h"
 #include "core/XrunDetector.h"
+#include "engine/PlaybackPlan.h"
 
 namespace b4nd
 {
@@ -77,8 +81,11 @@ class AudioEngine
 {
 public:
     static constexpr int maxOutputs = 64;
+    static constexpr int maxTracks = 128;
+    static constexpr int numBusKinds = 6;   // BusKind values
 
     AudioEngine() = default;
+    ~AudioEngine();
 
     void prepare (double sampleRate, int maxBlockSize, int numOutputs, int numInputs);
     void release();
@@ -95,6 +102,26 @@ public:
     void process (const float* const* inputs, int numInputs,
                   float* const* outputs, int numOutputs, int numSamples) noexcept;
 
+    // --- song playback (message thread) ---
+
+    /** Hands a prepared song to the engine. It is picked up by the audio thread at the
+        next block where the transport is not playing; until then the old plan keeps
+        playing. A plan built for another sample rate is ignored (silent). */
+    void setPlan (std::unique_ptr<PlaybackPlan> plan, double planSampleRate);
+    /** Frees plans the audio thread has finished with. Call regularly on the message thread. */
+    void collectGarbage();
+    bool hasPendingPlan() const noexcept { return pendingPlan.load (std::memory_order_acquire) != nullptr; }
+
+    void setTrackGain (int slot, float linearGain) noexcept;
+    void setTrackPan (int slot, float pan) noexcept;            // -1 .. +1
+    void setTrackMute (int slot, bool) noexcept;
+    void setTrackSolo (int slot, bool) noexcept;
+    float takeTrackPeak (int slot) noexcept;
+
+    void setMasterGain (float linear) noexcept       { masterGain.store (linear, std::memory_order_relaxed); }
+    /** In-ear monitor mix: how much click, guide and MR (Main) go into the Monitor bus. */
+    void setMonitorMix (float click, float guide, float main) noexcept;
+
     // --- telemetry (lock-free reads) ---
     EngineTransport getTransport() const noexcept { return (EngineTransport) transport.load (std::memory_order_acquire); }
     std::int64_t getPosition() const noexcept      { return position.load (std::memory_order_acquire); }
@@ -104,6 +131,8 @@ public:
     double getSampleRate() const noexcept          { return sampleRate; }
     int getNumOutputs() const noexcept             { return numOuts; }
     float getLoad() const noexcept                 { return loadTelemetry.load (std::memory_order_relaxed); }
+    /** Worst single-callback processing time / block time since the device started. */
+    float getPeakLoad() const noexcept             { return peakLoadTelemetry.load (std::memory_order_relaxed); }
     std::uint64_t getLateCallbackCount() const noexcept { return lateTelemetry.load (std::memory_order_relaxed); }
     std::uint64_t getOverloadCount() const noexcept     { return overloadTelemetry.load (std::memory_order_relaxed); }
     std::uint64_t getCallbackCount() const noexcept     { return callbacks.load (std::memory_order_relaxed); }
@@ -112,6 +141,9 @@ public:
     float takeOutputPeak (int output) noexcept;
 
 private:
+    void renderChunk (float* const* outputs, int numOutputs, int numSamples) noexcept;
+    void renderTracks (int numSamples) noexcept;
+    void renderClick (int numSamples) noexcept;
     void handleCommand (const EngineCommand&) noexcept;
     void pushEvent (EngineEvent::Type, float load = 0.0f) noexcept;
     void renderTest (float* const* outputs, int numOutputs, int start, int numSamples) noexcept;
@@ -129,8 +161,38 @@ private:
     struct RouteSlot
     {
         std::atomic<int> bus { -1 };      // BusKind as int, -1 = none
+        std::atomic<int> channel { 0 };   // 0/1, or BusChannel::monoSum
         std::atomic<bool> isPA { false };
     };
+
+    struct TrackParams
+    {
+        std::atomic<float> gain { 1.0f };
+        std::atomic<float> pan { 0.0f };
+        std::atomic<bool> mute { false };
+        std::atomic<bool> solo { false };
+        std::atomic<float> peak { 0.0f };
+    };
+    std::array<TrackParams, maxTracks> trackParams;
+    std::array<float, maxTracks> smoothL {}, smoothR {};   // audio thread only
+
+    // Plans: message thread -> pendingPlan -> audio thread (currentPlan) -> retired -> message thread deletes.
+    std::atomic<PlaybackPlan*> pendingPlan { nullptr };
+    std::atomic<double> pendingPlanRate { 0.0 };
+    PlaybackPlan* currentPlan = nullptr;
+    double currentPlanRate = 0.0;
+    bool currentPlanValid = false;
+    SpscQueue<PlaybackPlan*, 16> retiredPlans;
+
+    // Bus buffers [kind][channel], sized in prepare().
+    std::array<std::array<std::vector<float>, 2>, numBusKinds> busBuffers;
+    std::atomic<float> masterGain { 1.0f };
+    std::atomic<float> monitorClick { 1.0f }, monitorGuide { 1.0f }, monitorMain { 0.0f };
+
+    // Click voice (audio thread only)
+    int clickVoicePos = -1;
+    bool clickVoiceAccent = false;
+    std::int64_t lastRenderEnd = -1;
     std::array<RouteSlot, maxOutputs> routes;
     std::array<std::atomic<float>, maxOutputs> peaks {};
 
@@ -140,9 +202,12 @@ private:
     std::int64_t songLength = 0;
 
     // fades: stop/emergency ramp the master gain to zero over ~5 ms before stopping
-    float masterGain = 1.0f;
+    float fadeGain = 1.0f;
     float fadeStep = 0.0f;
     enum class FadeAction { None, Stop, Emergency } fadeAction = FadeAction::None;
+    // PLAY received during a stop fade: finish the fade, swap in a waiting plan, then play.
+    bool playAfterStop = false;
+    std::int64_t playAfterStopPosition = 0;
     std::atomic<bool> emergencyLatched { false };
 
     // test signals
@@ -155,7 +220,7 @@ private:
     float pinkB0 = 0.0f, pinkB1 = 0.0f, pinkB2 = 0.0f;
 
     XrunDetector xruns;
-    std::atomic<float> loadTelemetry { 0.0f };
+    std::atomic<float> loadTelemetry { 0.0f }, peakLoadTelemetry { 0.0f };
     std::atomic<std::uint64_t> lateTelemetry { 0 }, overloadTelemetry { 0 }, callbacks { 0 };
 };
 

@@ -5,7 +5,8 @@ namespace b4nd
 {
 
 static constexpr int stripWidth = 78;
-static constexpr int outputMeterWidth = 46;
+static constexpr int outputMeterWidthNormal = 46;
+static constexpr int outputMeterWidthWide = 96;   // 2-3 output devices: room for "MAIN MONO" / "IN-EAR"
 
 //==============================================================================
 ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (trackIndex)
@@ -40,9 +41,12 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
         fader.onValueChange = [this] { state.setTrackVolume (track, (float) fader.getValue()); };
         muteButton.onClick = [this] { state.setTrackMute (track, ! muteButton.getToggleState()); };
         soloButton.onClick = [this] { state.setTrackSolo (track, ! soloButton.getToggleState()); };
+        pan.onValueChange = [this] { state.setTrackPan (track, (float) pan.getValue()); };
     }
     else
     {
+        // Master: Main bus (PA) only. Click, guide and in-ear monitor are never affected.
+        fader.onValueChange = [this] { state.setMasterVolume ((float) fader.getValue()); };
         soloButton.setVisible (false);
         muteButton.setVisible (false);
         pan.setVisible (false);
@@ -53,8 +57,13 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
 
 void ChannelStrip::syncFromState()
 {
+    if (track < 0)
+    {
+        fader.setValue (state.getMasterVolumeDb(), juce::dontSendNotification);
+        return;
+    }
     const auto* song = state.getCurrentSong();
-    if (track < 0 || song == nullptr || ! juce::isPositiveAndBelow (track, (int) song->tracks.size()))
+    if (song == nullptr || ! juce::isPositiveAndBelow (track, (int) song->tracks.size()))
         return;
     const auto& t = song->tracks[(size_t) track];
     fader.setValue (t.volumeDb, juce::dontSendNotification);
@@ -79,7 +88,7 @@ void ChannelStrip::paint (juce::Graphics& g)
     {
         const auto& t = song->tracks[(size_t) track];
         name = t.name;
-        route = t.destination;
+        route = state.getTrackDestination (track);
         c = colourForTrackKind (t.kind);
     }
 
@@ -128,13 +137,7 @@ MixerPanel::MixerPanel (AppState& s) : state (s)
     master = std::make_unique<ChannelStrip> (state, -1);
     addAndMakeVisible (*master);
 
-    const auto& routing = state.getRouting();
-    for (int i = 0; i < routing.getNumOutputs(); ++i)
-    {
-        auto* m = outputMeters.add (new LevelMeter ([this, i] { return state.getOutputLevel (i); }));
-        addAndMakeVisible (m);
-    }
-
+    rebuildOutputMeters();
     state.addChangeListener (this);
     rebuildStrips();
     startTimerHz (30);
@@ -155,9 +158,24 @@ void MixerPanel::rebuildStrips()
     resized();
 }
 
+void MixerPanel::rebuildOutputMeters()
+{
+    outputMeters.clear();
+    const int n = state.getRouting().getNumOutputs();
+    outputMeterWidth = n < 4 ? outputMeterWidthWide : outputMeterWidthNormal;
+    for (int i = 0; i < n; ++i)
+        addAndMakeVisible (outputMeters.add (new LevelMeter ([this, i] { return state.getOutputLevel (i); })));
+    resized();
+    repaint();
+}
+
 void MixerPanel::changeListenerCallback (juce::ChangeBroadcaster*)
 {
-    if (builtForSong != state.getCurrentSongIndex())
+    if (outputMeters.size() != state.getRouting().getNumOutputs())
+        rebuildOutputMeters();
+
+    const auto* song = state.getCurrentSong();
+    if (builtForSong != state.getCurrentSongIndex() || (song != nullptr && (int) song->tracks.size() != strips.size()))
     {
         rebuildStrips();
         repaint();
@@ -193,7 +211,7 @@ void MixerPanel::paint (juce::Graphics& g)
     {
         const auto meterBounds = outputMeters[i]->getBounds();
         const auto& out = routing.getOutput (i);
-        auto col = juce::Rectangle<int> (meterBounds.getX() - 14, meterBounds.getBottom() + 2, outputMeterWidth, 42);
+        auto col = juce::Rectangle<int> (meterBounds.getCentreX() + 4 - outputMeterWidth / 2, meterBounds.getBottom() + 2, outputMeterWidth, 42);
 
         g.setColour (theme::text);
         g.setFont (theme::mono (11.0f, true));

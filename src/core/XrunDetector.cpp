@@ -3,12 +3,13 @@
 namespace b4nd
 {
 
-void XrunDetector::prepare (double sr, double late, double overload, std::int64_t tolNs) noexcept
+void XrunDetector::prepare (double sr, double late, double overload, std::int64_t tolNs, double warmupSeconds) noexcept
 {
     sampleRate = sr > 0.0 ? sr : 48000.0;
     lateFactor = late;
     overloadFactor = overload;
     toleranceNs = tolNs;
+    warmupSamples = (std::int64_t) (warmupSeconds > 0.0 ? warmupSeconds * sampleRate : 0.0);
     reset();
 }
 
@@ -17,6 +18,7 @@ void XrunDetector::reset() noexcept
     lastStartNs = -1;
     lastExpectedNs = 0;
     lateCount = overloadCount = 0;
+    samplesSeen = 0;
     load = peakLoad = 0.0;
 }
 
@@ -27,8 +29,10 @@ std::uint32_t XrunDetector::onCallback (std::int64_t startNs, std::int64_t endNs
         return result;
 
     const auto blockNs = static_cast<std::int64_t> (numSamples * 1.0e9 / sampleRate);
+    const bool warmingUp = samplesSeen < warmupSamples;
+    samplesSeen += numSamples;
 
-    if (lastStartNs >= 0)
+    if (lastStartNs >= 0 && ! warmingUp)
     {
         // Compare against the previous block's length: that is how long the driver
         // had to wait before it needed us again.
@@ -41,7 +45,7 @@ std::uint32_t XrunDetector::onCallback (std::int64_t startNs, std::int64_t endNs
     }
 
     const double thisLoad = blockNs > 0 ? (double) (endNs - startNs) / (double) blockNs : 0.0;
-    if (thisLoad > overloadFactor)
+    if (thisLoad > overloadFactor && ! warmingUp)
     {
         ++overloadCount;
         result |= DspOverload;

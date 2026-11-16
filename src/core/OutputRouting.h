@@ -27,8 +27,10 @@ constexpr bool isInEarOnlyBus (BusKind k) noexcept
 
 struct BusChannel
 {
+    static constexpr int monoSum = 2;   // (L + R) / 2 of a stereo bus, e.g. MR to a mono PA feed
+
     BusKind kind = BusKind::Main;
-    int channel = 0;   // 0 = left / mono, 1 = right
+    int channel = 0;   // 0 = left / mono, 1 = right, 2 = mono sum (stereo buses only)
 
     bool operator== (const BusChannel& o) const noexcept { return kind == o.kind && channel == o.channel; }
 };
@@ -66,6 +68,16 @@ public:
 
     /** OUT1/2 Main L/R (PA), OUT3 Click, OUT4 Guide, OUT5/6 Extra, OUT7/8 Monitor. */
     static OutputRouting createDefault (int numPhysicalOutputs = 8);
+
+    /** For 2-output interfaces (e.g. UR22C): OUT1 = Main mono sum to the PA,
+        OUT2 = Monitor mono sum (click + guide + optional MR) to the in-ears. */
+    static OutputRouting createTwoOutputSplit();
+
+    /** Default layout for a device: split preset for 2-3 outputs, standard map otherwise. */
+    static OutputRouting createForDevice (int numPhysicalOutputs);
+
+    /** Valid channel indices for a bus, including monoSum for stereo buses. */
+    static bool isValidChannel (BusKind k, int channel) noexcept;
 
     static int channelsForBus (BusKind k) noexcept;
 

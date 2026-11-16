@@ -5,6 +5,7 @@
 #include "audio/AudioDeviceController.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
+#include "media/MediaLoader.h"
 
 namespace b4nd
 {
@@ -28,6 +29,18 @@ struct TrackInfo
     bool mute = false;
     bool solo = false;
     std::vector<juce::Range<double>> regions;   // seconds
+
+    // --- audio media (Audio / Guide tracks) ---
+    BusKind bus = BusKind::Main;       // Audio tracks: Main / Extra / Monitor / Aux
+    juce::String mediaPath;            // empty: no media assigned
+    double mediaStartSeconds = 0.0;
+
+    enum class MediaStatus { None, Loading, Ready, Missing, Error };
+    MediaStatus mediaStatus = MediaStatus::None;
+    juce::String mediaError;
+    std::shared_ptr<const AudioData> media;   // decoded at mediaRate
+    double mediaRate = 0.0;
+    std::shared_ptr<const std::vector<float>> overview;   // peak per bucket over the whole file, for drawing
 };
 
 struct CuePoint
@@ -101,10 +114,30 @@ public:
     void jumpToCue (int cueIndex);
     void jumpToNextCue();
 
-    // --- mixer (UI model only in Phase 1) ---
+    // --- mixer (pushed to the engine in real time) ---
     void setTrackVolume (int trackIndex, float db);
+    void setTrackPan (int trackIndex, float pan);
     void setTrackMute (int trackIndex, bool m);
     void setTrackSolo (int trackIndex, bool s);
+    /** Master fader: Main (PA) bus only. */
+    void setMasterVolume (float db);
+    float getMasterVolumeDb() const noexcept { return masterDb; }
+
+    // --- media ---
+    /** Assigns an audio file to an Audio/Guide track, or adds a new Audio track (trackIndex < 0).
+        Rejected in Live Mode. Returns an empty string on success, else the reason. */
+    juce::String addAudioFile (const juce::File& file, int trackIndex = -1);
+    bool canReadAudioFile (const juce::File& f) const { return mediaPool.canRead (f); }
+
+    struct MediaSummary
+    {
+        int loading = 0, missing = 0, errors = 0, ready = 0;
+        std::int64_t ramBytes = 0;
+    };
+    MediaSummary getMediaSummary() const;
+
+    /** RAM above this is reported as a warning (docs/03 §6). */
+    static constexpr std::int64_t ramWarningBytes = (std::int64_t) 4 * 1024 * 1024 * 1024;
 
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
@@ -112,13 +145,20 @@ public:
 
     const OutputRouting& getRouting() const noexcept { return routing; }
 
+    /** Where a track is actually heard, from the current routing (e.g. "OUT 3 + IN-EAR 7-8").
+        MIDI tracks return their configured destination text. */
+    juce::String getTrackDestination (int trackIndex) const;
+
     /** Per physical output peak level (0..1) from the engine, refreshed at 30 Hz. */
     float getOutputLevel (int output) const noexcept
     {
         return juce::isPositiveAndBelow (output, (int) outputLevels.size()) ? outputLevels[(size_t) output] : 0.0f;
     }
-    /** Per track level: tracks are rendered from Phase 3. */
-    float getTrackLevel (int /*track*/) const noexcept { return 0.0f; }
+    /** Per track peak level (0..1) of the current song, refreshed at 30 Hz. */
+    float getTrackLevel (int track) const noexcept
+    {
+        return juce::isPositiveAndBelow (track, (int) trackLevels.size()) ? trackLevels[(size_t) track] : 0.0f;
+    }
 
     // --- audio engine / device ---
     bool isEngineActive() const noexcept;
@@ -136,6 +176,12 @@ private:
     SongInfo* currentSongMutable() noexcept;
     void setTransport (TransportState s);
 
+    double mediaSampleRate() const noexcept;
+    void requestAllMedia();
+    void applyFinishedMedia();
+    void rebuildPlan();
+    void pushMixerToEngine();
+
     juce::String projectName { "B4ND Demo Project" };
     std::vector<SongInfo> songs;
     int currentSong = 0;
@@ -146,6 +192,7 @@ private:
     bool looping = false;
     bool emergency = false;
     bool liveMode = false;
+    float masterDb = 0.0f;
 
     OutputRouting routing = OutputRouting::createDefault (8);
 
@@ -154,6 +201,11 @@ private:
     AudioDeviceController::Status lastDeviceStatus = AudioDeviceController::Status::NoDevice;
     std::array<float, AudioEngine::maxOutputs> outputLevels {};
     std::uint64_t dropoutsBeforeRestart = 0;
+    std::array<float, AudioEngine::maxTracks> trackLevels {};
+    double lastDeviceRate = 0.0;
+    int lastDeviceOutputs = -1;
+    bool ramWarningLogged = false;
+    MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)
 };

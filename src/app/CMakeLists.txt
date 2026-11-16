@@ -17,7 +17,8 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../ui/LevelMeter.cpp
     ../ui/LiveModeView.cpp
     ../ui/AudioSettingsPanel.cpp
-    ../audio/AudioDeviceController.cpp)
+    ../audio/AudioDeviceController.cpp
+    ../media/MediaLoader.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -27,7 +28,8 @@ target_compile_definitions(B4ND_LIVE_MTR PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:B4ND_LIVE_MTR,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:B4ND_LIVE_MTR,JUCE_VERSION>"
     JUCE_WASAPI=1
-    JUCE_DIRECTSOUND=1)
+    JUCE_DIRECTSOUND=1
+    JUCE_USE_MP3AUDIOFORMAT=1)
 
 if(UNIX AND NOT APPLE)
     # Linux is a development target only; JACK makes headless engine testing possible (jackd -d dummy).

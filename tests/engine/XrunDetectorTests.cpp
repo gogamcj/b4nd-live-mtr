@@ -57,3 +57,22 @@ TEST_CASE ("XrunDetector: small jitter tolerated (WASAPI-style timing)")
     }
     CHECK (d.getLateCount() == 0);
 }
+
+TEST_CASE ("XrunDetector: start-up warm-up window is ignored, later stalls are not")
+{
+    XrunDetector d;
+    d.prepare (48000.0, 1.5, 0.8, ms, 0.25);
+    std::int64_t t = 0;
+    d.onCallback (t, t + ms, 256);
+    t += 40 * ms;   // irregular first blocks while the driver starts
+    CHECK (d.onCallback (t, t + 6 * ms, 256) == XrunDetector::None);
+    for (int i = 0; i < 60; ++i)   // 60 * 256 = 15360 samples = 0.32 s
+    {
+        t += 5'333'333;
+        d.onCallback (t, t + ms, 256);
+    }
+    CHECK (d.getLateCount() == 0);
+    t += 20 * ms;
+    CHECK ((d.onCallback (t, t + ms, 256) & XrunDetector::LateCallback) != 0);
+    CHECK (d.getLateCount() == 1);
+}

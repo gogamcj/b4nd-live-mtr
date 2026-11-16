@@ -69,11 +69,55 @@ OutputRouting OutputRouting::createDefault (int numPhysicalOutputs)
     return r;
 }
 
+bool OutputRouting::isValidChannel (BusKind k, int channel) noexcept
+{
+    const int n = channelsForBus (k);
+    return (channel >= 0 && channel < n) || (n == 2 && channel == BusChannel::monoSum);
+}
+
+OutputRouting OutputRouting::createTwoOutputSplit()
+{
+    OutputRouting r (2);
+    r.outputs[0].source = BusChannel { BusKind::Main, BusChannel::monoSum };
+    r.outputs[0].isPA = true;
+    r.outputs[0].label = "MAIN MONO";
+    r.outputs[1].source = BusChannel { BusKind::Monitor, BusChannel::monoSum };
+    r.outputs[1].isPA = false;
+    r.outputs[1].label = "IN-EAR (CLICK+GUIDE)";
+    return r;
+}
+
+OutputRouting OutputRouting::createForDevice (int numPhysicalOutputs)
+{
+    if (numPhysicalOutputs <= 0)
+        return createDefault (8);
+    if (numPhysicalOutputs < 4)
+    {
+        auto r = createTwoOutputSplit();
+        if (numPhysicalOutputs == 1)
+        {
+            OutputRouting mono (1);
+            mono.outputs[0] = r.outputs[0];
+            return mono;
+        }
+        if (numPhysicalOutputs == 3)
+        {
+            OutputRouting three (3);
+            three.outputs[0] = r.outputs[0];
+            three.outputs[1] = r.outputs[1];
+            three.outputs[2].label = "OUT 3";
+            return three;
+        }
+        return r;
+    }
+    return createDefault (numPhysicalOutputs);
+}
+
 RoutingResult OutputRouting::assign (int output, BusChannel source)
 {
     if (locked)                    return RoutingResult::RejectedLocked;
     if (! validOutput (output))    return RoutingResult::InvalidOutput;
-    if (source.channel < 0 || source.channel >= channelsForBus (source.kind))
+    if (! isValidChannel (source.kind, source.channel))
         return RoutingResult::InvalidBusChannel;
 
     auto& o = outputs[static_cast<std::size_t> (output)];
@@ -118,7 +162,7 @@ int OutputRouting::sanitize()
     int cleared = 0;
     for (auto& o : outputs)
     {
-        if (o.source && (o.source->channel < 0 || o.source->channel >= channelsForBus (o.source->kind)))
+        if (o.source && ! isValidChannel (o.source->kind, o.source->channel))
         {
             o.source.reset();
             ++cleared;

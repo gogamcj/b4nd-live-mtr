@@ -54,7 +54,9 @@ jobs:
         shell: pwsh
         run: |
           $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          python tools/make-test-wav.py "$PWD/test-backing.wav" --rate 44100 --seconds 20
           foreach ($a in @(
+              @('--screenshot','screenshot-media.png','--size','1600x960','--media',"$PWD/test-backing.wav"),
               @('--screenshot','screenshot-edit.png','--size','1600x960','--at','75'),
               @('--screenshot','screenshot-live.png','--live','--size','1600x960','--at','75'),
               @('--screenshot','screenshot-audio-settings.png','--audio-settings'),
@@ -71,6 +73,7 @@ jobs:
           path: |
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe
             screenshot-*.png
+            tools/make-test-wav.py
 
   linux:
     name: Linux (GCC, dev check)
@@ -121,3 +124,36 @@ jobs:
           grep -q "Audio: running JACK / system @ 48000 Hz, 256 samples, 8 outs" "$LOG"
           grep -q "Audio: DEVICE LOST" "$LOG"
           test "$(grep -c 'Audio: running JACK / system' "$LOG")" -ge 2
+
+      - name: Playback test (JACK dummy, 8 outputs and 2 outputs)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndplay
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          python3 tools/make-test-wav.py test-backing.wav --rate 44100 --seconds 20
+          for OUTS in 8 2; do
+            jackd -n b4ndplay -d dummy -r 48000 -p 256 -P $OUTS -C 2 &
+            sleep 3
+            xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-play$OUTS.png --size 1600x960 \
+              --with-audio --media test-backing.wav --play 4 | tee play$OUTS.txt
+            pkill -f "jackd -n b4ndplay" || true
+            sleep 2
+          done
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          grep -q "media: 1 ready" play8.txt
+          grep -q "play: engine active" play8.txt
+          # 8 outputs: MR (-6/-12 dBFS sines) on OUT1/2, click on OUT3 and in-ear 7/8, nothing else.
+          gt "$(peak play8.txt 1)" 0.45 && lt "$(peak play8.txt 1)" 0.55
+          gt "$(peak play8.txt 2)" 0.20 && lt "$(peak play8.txt 2)" 0.30
+          gt "$(peak play8.txt 3)" 0.05
+          test "$(peak play8.txt 4)" = "0.0000"
+          test "$(peak play8.txt 5)" = "0.0000"
+          gt "$(peak play8.txt 7)" 0.05
+          # 2 outputs (UR22C split): OUT1 = MR mono sum to the PA, OUT2 = click in-ear.
+          grep -q "output 1 \[MAIN MONO\]" play2.txt
+          gt "$(peak play2.txt 1)" 0.30 && lt "$(peak play2.txt 1)" 0.40
+          gt "$(peak play2.txt 2)" 0.05
+          grep -q "DSP overloads 0" play8.txt
+          grep -q "DSP overloads 0" play2.txt

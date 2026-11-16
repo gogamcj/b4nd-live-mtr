@@ -64,7 +64,9 @@ TEST_CASE ("OutputRouting: invalid outputs and bus channels")
     CHECK (r.assign (8, { BusKind::Main, 0 }) == RoutingResult::InvalidOutput);
     CHECK (r.assign (-1, { BusKind::Main, 0 }) == RoutingResult::InvalidOutput);
     CHECK (r.assign (4, { BusKind::Click, 1 }) == RoutingResult::InvalidBusChannel);   // click is mono
-    CHECK (r.assign (4, { BusKind::Main, 2 }) == RoutingResult::InvalidBusChannel);
+    CHECK (r.assign (4, { BusKind::Main, 3 }) == RoutingResult::InvalidBusChannel);
+    CHECK (r.assign (4, { BusKind::Click, BusChannel::monoSum }) == RoutingResult::InvalidBusChannel);   // mono bus
+    CHECK (r.assign (4, { BusKind::Main, BusChannel::monoSum }) == RoutingResult::Ok);
 }
 
 TEST_CASE ("OutputRouting: devices with fewer than 8 outputs")
@@ -97,4 +99,20 @@ TEST_CASE ("OutputRouting: exhaustive invariant over all single edits")
                     r.setPA (out, pa == 0);
                     CHECK (r.isSafe());
                 }
+}
+
+TEST_CASE ("OutputRouting: 2-output split preset (UR22C) keeps click off the PA")
+{
+    auto r = OutputRouting::createForDevice (2);
+    CHECK (r.getNumOutputs() == 2);
+    CHECK (r.getOutput (0).isPA);
+    CHECK (r.getOutput (0).source->kind == BusKind::Main);
+    CHECK (r.getOutput (0).source->channel == BusChannel::monoSum);
+    CHECK (! r.getOutput (1).isPA);
+    CHECK (r.getOutput (1).source->kind == BusKind::Monitor);
+    CHECK (r.isSafe());
+    CHECK (r.assign (0, { BusKind::Monitor, BusChannel::monoSum }) == RoutingResult::RejectedInEarBusToPA);
+    CHECK (OutputRouting::createForDevice (8).getOutput (2).source->kind == BusKind::Click);
+    CHECK (OutputRouting::createForDevice (1).getNumOutputs() == 1);
+    CHECK (OutputRouting::createForDevice (1).isSafe());
 }
