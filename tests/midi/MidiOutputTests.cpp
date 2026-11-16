@@ -4,6 +4,7 @@
 #include "midi/MidiFileImport.h"
 #include "midi/MidiOutputService.h"
 
+#include <memory>
 #include <algorithm>
 #include <mutex>
 #include <thread>
@@ -300,7 +301,9 @@ TEST_CASE ("MIDI out: engine events played in real time arrive on time, module d
 {
     constexpr double sr = 48000.0;
     constexpr int block = 128;
-    AudioEngine engine;
+    // On the heap: the engine is ~600 kB and Windows threads have a 1 MB stack.
+    std::unique_ptr<AudioEngine> enginePtr = std::make_unique<AudioEngine>();
+    AudioEngine& engine = *enginePtr;
     engine.prepare (sr, block, 2, 0);
     engine.setRouting (OutputRouting::createForDevice (2));
     engine.setOutputLatencyMs (5.0);
