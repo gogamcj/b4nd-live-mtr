@@ -435,7 +435,7 @@ void ModulePanel::paint (juce::Graphics& g)
         {
             case MidiOutputService::PortStatus::NoPort:       help = "Choose the MIDI port the module is connected to."; break;
             case MidiOutputService::PortStatus::Disconnected: help = "The port is not present. Check the USB/MIDI cable; it reconnects by itself and the preset is sent again."; break;
-            case MidiOutputService::PortStatus::OpenFailed:   help = "The port exists but cannot be opened. Close other programs that use it (Windows allows one program per port)."; break;
+            case MidiOutputService::PortStatus::OpenFailed:   help = "The port exists but cannot be opened. Close other programs that use it (Windows allows one program per port). Retried every second."; break;
             case MidiOutputService::PortStatus::Preparing:    help = "Preset sent, waiting for the settle time."; break;
             case MidiOutputService::PortStatus::Ready:        help = "Ready. Use TEST NOTE to hear it."; break;
         }

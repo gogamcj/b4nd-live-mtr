@@ -152,7 +152,7 @@ juce::String MidiOutputService::statusText (PortStatus s)
     {
         case PortStatus::NoPort:       return "NO PORT";
         case PortStatus::Disconnected: return "DISCONNECTED";
-        case PortStatus::OpenFailed:   return "PORT BUSY";
+        case PortStatus::OpenFailed:   return "CANNOT OPEN";
         case PortStatus::Preparing:    return "PREPARING";
         case PortStatus::Ready:        return "READY";
     }

@@ -86,7 +86,7 @@ Phase 1~3이 "오디오가 나오는 MTR"의 최소 단위이며, 이 시점에�
 
 ## Phase 4 구현 결과 (2026-11-16)
 
-- 외부 MIDI 음원 모듈: 모듈 프로필(포트, 채널, Bank MSB/LSB, Program, 볼륨/팬 CC, 지연 보정, 전송 순서, 간격, 안정화 시간), 상태 표시(NO PORT / DISCONNECTED / PORT BUSY / PREPARING / READY), TEST NOTE, SEND PRESET
+- 외부 MIDI 음원 모듈: 모듈 프로필(포트, 채널, Bank MSB/LSB, Program, 볼륨/팬 CC, 지연 보정, 전송 순서, 간격, 안정화 시간), 상태 표시(NO PORT / DISCONNECTED / CANNOT OPEN / PREPARING / READY), TEST NOTE, SEND PRESET
 - MIDI Out 전용 스레드: 엔진이 보낸 이벤트를 정해진 시각에 전송. 오디오 출력 지연과 모듈 지연을 보정
 - 포트 관리: 1초마다 확인, 분리 감지, 같은 포트가 돌아오면 다시 열고 프리셋 재전송
 - Note 복구: 정지·이동·비상 정지·곡 끝·곡 교체 때 Note Off + CC64 0 + CC123. 오디오 장치가 끊기면 MIDI 스레드가 직접 해제
@@ -106,5 +106,5 @@ Phase 1~3이 "오디오가 나오는 MTR"의 최소 단위이며, 이 시점에�
   - 실제 앱 (Linux, JACK 가상 장치): 재생 중 엔진 → MIDI 스레드 경로, 정지 후 남은 음 0, 모듈과 .mid가 있는 프로젝트 저장 → 다시 열기, .mid 누락 경고
   - CI
     - Linux 러너에 `snd-virmidi`가 있으면 ALSA 가상 MIDI 포트로 실제 전송 바이트를 받아 Program Change, Note On/Off 짝, CC123을 확인한다. 없으면 경고만 남긴다
-    - Windows 러너에 Microsoft GS Wavetable Synth가 있으면 그 포트로 모듈이 READY가 되는지 확인한다
+    - Windows: Microsoft GS Wavetable Synth 포트를 이름으로 찾아 상태를 보고하는지 확인한다. CI 러너에는 오디오 출력이 없어 이 포트가 열리지 않으므로 CANNOT OPEN이 정상이고, 실제 전송은 Windows에서 확인하지 못했다
 - 남은 실기 검증(🪟): 실제 모듈(USB-MIDI 인터페이스)로 소리, 프리셋 전환, USB 분리 후 재연결, 공연 중 Note 걸림 여부. 클라우드에는 MIDI 장치가 없어 확인하지 못했다
