@@ -1,0 +1,70 @@
+# 06. Audio Routing 설계도
+
+## 1. 신호 흐름
+
+```
+ SOURCES                       CHANNEL STRIPS              BUSES                 OUTPUT MATRIX        PHYSICAL OUT
+ ───────                       ──────────────              ─────                 ─────────────        ────────────
+ Audio Track (원곡/스템) ──┐
+ VSTi: Piano            ──┤   Gain → Insert FX →
+ VSTi: Strings          ──┼─▶ Volume/Pan → Mute/Solo ─▶  MAIN BUS (L/R)  ───┐
+ VSTi: Synth            ──┤   → Meter                                       ├─▶ [Main L ] ─▶ OUT 1 ─▶ PA L
+ Ext Module (LINE IN)   ──┘                                                 ├─▶ [Main R ] ─▶ OUT 2 ─▶ PA R
+                                                                            │
+ Click Generator ─────────────────────────────────▶  CLICK BUS (mono) ─────┼─▶ [Click  ] ─▶ OUT 3 ─▶ 드러머 인이어
+ Guide Track (큐 보이스) ──▶ strip ────────────────▶  GUIDE BUS (mono) ─────┼─▶ [Guide  ] ─▶ OUT 4 ─▶ 인이어 믹서
+                                                                            │
+ (트랙별 선택) ──────────────────────────────────▶  EXTRA BUS (L/R) ──────┼─▶ OUT 5/6
+ (Main + Click + Guide 의 Monitor 믹스) ──────────▶  MONITOR BUS (L/R) ────┴─▶ OUT 7/8
+                                                       │
+                                                       └ Master Volume · Limiter · Clip 경고 (Main 전용)
+```
+
+## 2. 기본 출력 매핑 (8채널)
+
+| 물리 출력 | 기본 소스 | 역할 플래그 |
+|-----------|-----------|-------------|
+| OUT 1 | Main L | `PA` |
+| OUT 2 | Main R | `PA` |
+| OUT 3 | Click | `InEarOnly` |
+| OUT 4 | Guide | `InEarOnly` |
+| OUT 5 | Extra L | — |
+| OUT 6 | Extra R | — |
+| OUT 7 | Monitor L | `InEarOnly` |
+| OUT 8 | Monitor R | `InEarOnly` |
+
+- 출력 매핑은 **물리 출력 → 하나의 버스 채널** 1:1 할당 (매트릭스 셀 하나). 하나의 버스를 여러 출력에 보낼 수는 있다 (예: Main을 OUT 1/2와 9/10에 동시).
+- 장치가 8채널 미만이면 존재하는 채널까지만 활성, 나머지는 "Unavailable"로 표시.
+
+## 3. 클릭 보호 규칙 (OutputRouting 핵심 규칙)
+
+1. Click/Guide 버스는 Main 버스에 합쳐지지 않는다 (구조적으로 경로 없음).
+2. `PA` 플래그가 붙은 물리 출력에 Click 또는 Guide 버스를 할당하려 하면 **거부**된다.
+3. 의도적으로 허용하려면 해당 출력의 `PA` 플래그를 먼저 해제해야 하며, 이 작업은 Live Mode에서 불가능하고 확인 대화상자를 거친다.
+4. Monitor 버스는 Click을 포함할 수 있으므로 `PA` 출력에 할당 불가 (규칙 2와 동일 취급).
+5. 프로젝트 로드 시 위 규칙을 위반하는 매핑이 있으면 해당 셀을 비우고 경고한다.
+
+이 규칙은 `src/core/OutputRouting.*`에 순수 로직으로 구현되어 있으며 단위 테스트로 검증한다 (Phase 1에서 구현).
+
+## 4. 실시간 적용
+
+- 매핑 편집은 Message 스레드에서 `RoutingMatrix` 새 사본을 만들어 검증 → atomic 포인터 교체. RT는 블록 시작 시 한 번 읽는다.
+- 채널 볼륨/뮤트 변경은 개별 atomic 파라미터로 처리 (매트릭스 교체 없음) → "볼륨 조절이 다른 채널의 라우팅을 바꾸지 않는다" 요구사항을 구조적으로 보장.
+- 파라미터 변화는 블록 내 선형 램프(스무딩)로 지퍼 노이즈 방지.
+
+## 5. 출력 테스트 (공연 전 점검)
+
+| 테스트 | 신호 |
+|--------|------|
+| 채널 식별 | 선택 출력에만 음성 안내/톤 (OUT 1: 1kHz, OUT 2: 1kHz+펄스 등) |
+| 클릭 확인 | Click 버스에 클릭 패턴 (높은 음 악센트) |
+| 가이드 확인 | Guide 버스에 핑크 노이즈 + 다른 패턴 |
+| 전체 순회 | OUT 1 → 8 순서로 2초씩 |
+
+테스트 신호는 -20dBFS에서 시작, 재생 중에는 실행 불가.
+
+## 6. 미터
+
+- 각 채널 스트립, 각 버스, 각 물리 출력에 Peak(홀드 1.5s)와 RMS(300ms) 미터.
+- 마스터 클립: 0dBFS 이상 샘플 발생 시 래치 표시 (클릭으로 해제).
+- 리미터(옵션): Main 버스 전용, -0.3dBFS 천장, 룩어헤드 1ms.
