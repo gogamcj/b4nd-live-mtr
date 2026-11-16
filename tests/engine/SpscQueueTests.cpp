@@ -25,7 +25,7 @@ TEST_CASE ("SpscQueue: FIFO order, full and empty")
 TEST_CASE ("SpscQueue: two-thread stress keeps order and loses nothing")
 {
     static SpscQueue<std::uint64_t, 1024> q;
-    constexpr std::uint64_t total = 2'000'000;
+    static constexpr std::uint64_t total = 2'000'000;
 
     std::thread producer ([] {
         for (std::uint64_t i = 1; i <= total; )
