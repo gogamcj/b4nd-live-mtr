@@ -6,6 +6,7 @@
 #include "app/AppState.h"
 #include "app/MainWindow.h"
 #include "ui/AudioSettingsPanel.h"
+#include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
 
 namespace b4nd
@@ -30,7 +31,9 @@ static void crashHandler (void*)
                    [--media <audio file>]... [--with-audio] [--play SECONDS]
     Renders the UI to a PNG and exits. No audio device is opened unless --with-audio.
     --media adds audio tracks (as if dropped on the timeline) and waits until they are decoded.
-    --play plays the song for that long first and logs the peak level per output. */
+    --play plays the song for that long first and logs the peak level per output.
+    --project <folder> opens a project package first; --save-as <folder> saves into a new one.
+    Without --screenshot, the last opened project is reopened at start-up. */
 struct ScreenshotRequest
 {
     juce::File file;
@@ -41,6 +44,7 @@ struct ScreenshotRequest
     double atSeconds = 0.0;
     juce::StringArray media;
     double playSeconds = 0.0;
+    juce::File project, saveAs;
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
     {
@@ -63,6 +67,11 @@ struct ScreenshotRequest
             r.atSeconds = args[s + 1].getDoubleValue();
         if (const int s = args.indexOf ("--play"); s >= 0 && s + 1 < args.size())
             r.playSeconds = args[s + 1].getDoubleValue();
+        const auto cwd = juce::File::getCurrentWorkingDirectory();
+        if (const int s = args.indexOf ("--project"); s >= 0 && s + 1 < args.size())
+            r.project = cwd.getChildFile (args[s + 1].unquoted());
+        if (const int s = args.indexOf ("--save-as"); s >= 0 && s + 1 < args.size())
+            r.saveAs = cwd.getChildFile (args[s + 1].unquoted());
         for (int k = 0; k + 1 < args.size(); ++k)
             if (args[k] == "--media")
                 r.media.add (juce::File::getCurrentWorkingDirectory().getChildFile (args[k + 1].unquoted()).getFullPathName());
@@ -101,6 +110,26 @@ public:
                                  ! screenshot.has_value() || commandLine.contains ("--with-audio"));
         window = std::make_unique<MainWindow> (getApplicationName(), *state);
 
+        if (screenshot && screenshot->project != juce::File())
+        {
+            const auto err = state->openProject (screenshot->project);
+            std::printf ("project open: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+            printProjectSummary();
+        }
+        else if (! screenshot)
+        {
+            // Reopen the last project so a restart (crash, power cut) comes back where it was.
+            const auto last = AppState::getLastProjectRecordFile().loadFileAsString().trim();
+            if (last.isNotEmpty())
+            {
+                if (const auto err = state->openProject (juce::File (last)); err.isEmpty())
+                    juce::MessageManager::callAsync ([this] { if (state) projectCommands::reviewOpenedProject (*state); });
+                else
+                    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Last project not opened",
+                                                            err + "\n\nThe demo setlist is shown instead.");
+            }
+        }
+
         if (screenshot)
         {
             state->selectSong (screenshot->song);
@@ -122,9 +151,28 @@ public:
         }
     }
 
+    void printProjectSummary()
+    {
+        std::printf ("project: \"%s\" (%d songs), previous session closed cleanly: %s, backups: %d, missing media: %d\n",
+                     state->getProjectName().toRawUTF8(), (int) state->getSongs().size(),
+                     state->lastOpenHadStaleLock() ? "NO" : "yes", state->getLastOpenBackups().size(),
+                     state->getMissingMediaOnOpen().size());
+        for (const auto& s : state->getSongs())
+        {
+            std::printf ("  song \"%s\" %.1f BPM %.1f s, %d tracks\n", s.title.toRawUTF8(), s.tempo.bpmAtBeat (0.0),
+                         s.lengthSeconds, (int) s.tracks.size());
+            for (const auto& t : s.tracks)
+                std::printf ("    track \"%s\" %s %.1f dB%s%s%s\n", t.name.toRawUTF8(), nameForTrackKind (t.kind).toRawUTF8(),
+                             (double) t.volumeDb, t.mute ? " MUTE" : "", t.solo ? " SOLO" : "",
+                             t.mediaPath.isNotEmpty() ? (" media=" + juce::File (t.mediaPath).getFileName()).toRawUTF8() : "");
+        }
+    }
+
     void shutdown() override
     {
         juce::Logger::writeToLog ("Shutdown");
+        if (state != nullptr)
+            state->closeProject();
         closeAudioSettingsWindow();
         window = nullptr;
         if (audioDevice != nullptr)
@@ -173,6 +221,11 @@ private:
             const auto m = state->getMediaSummary();
             std::printf ("media: %d ready, %d loading, %d missing, %d errors, %.1f MB\n", m.ready, m.loading, m.missing,
                          m.errors, (double) m.ramBytes / (1024.0 * 1024.0));
+            if (screenshot->saveAs != juce::File())
+            {
+                const auto err = state->saveProjectAs (screenshot->saveAs);
+                std::printf ("project save-as: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+            }
             if (screenshot->playSeconds > 0.0)
             {
                 state->locate (screenshot->atSeconds);

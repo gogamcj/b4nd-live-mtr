@@ -12,13 +12,16 @@ option(B4ND_ENABLE_ASIO "Enable the ASIO backend (Windows, requires the Steinber
 set(B4ND_ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK root (folder containing common/iasiodrv.h)")
 
 # --- Core library: pure logic, no JUCE dependency, unit-tested on every platform ---
+add_subdirectory(third_party/sqlite)
 add_subdirectory(src/core)
 add_subdirectory(src/engine)
+add_subdirectory(src/project)
 
 if(B4ND_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/core)
     add_subdirectory(tests/engine)
+    add_subdirectory(tests/project)
 endif()
 
 if(B4ND_BUILD_APP)

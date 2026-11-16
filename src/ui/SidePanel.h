@@ -27,8 +27,10 @@ private:
     AppState& state;
     juce::ListBox songList { "songs", this };
     juce::OwnedArray<juce::TextButton> aiButtons;
+    juce::TextButton newButton { "NEW" }, openButton { "OPEN" }, saveButton { "SAVE" };
     juce::Rectangle<int> songHeader, aiHeader, totalArea;
     bool lastLive = false;
+    juce::String builtFor;
 };
 
 } // namespace b4nd

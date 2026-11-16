@@ -5,6 +5,7 @@
 #include "audio/AudioDeviceController.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
+#include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
 
 namespace b4nd
@@ -21,6 +22,7 @@ enum class TrackKind
 
 struct TrackInfo
 {
+    juce::String id;                   // UUID, kept across saves
     juce::String name;
     TrackKind kind = TrackKind::Audio;
     juce::String destination;          // "Main L/R", "OUT 3", plugin or module name
@@ -51,6 +53,7 @@ struct CuePoint
 
 struct SongInfo
 {
+    juce::String id;                   // UUID, kept across saves
     juce::String title;
     juce::String artist;
     juce::String key;
@@ -87,6 +90,32 @@ public:
 
     // --- project / setlist ---
     const juce::String& getProjectName() const noexcept { return projectName; }
+
+    // --- project file (SQLite package, docs/08) ---
+    /** True when the project lives in a package folder (otherwise: unsaved demo / new). */
+    bool hasProjectFile() const { return session.isOpen(); }
+    juce::File getProjectFolder() const { return session.getFolder(); }
+    bool isDirty() const noexcept { return dirty; }
+    /** "Saved 14:02", "Saving...", "NOT SAVED: <error>", "Unsaved" for the status bar. */
+    juce::String getSaveStatusText() const;
+    bool hasSaveError() const { return session.getLastError().isNotEmpty(); }
+
+    /** Empty string on success, else the reason. All are rejected in Live Mode and while playing. */
+    juce::String newProject (const juce::File& folder, const juce::String& name);
+    juce::String openProject (const juce::File& folderOrDb);
+    juce::String saveProject();                          // requires hasProjectFile()
+    juce::String saveProjectAs (const juce::File& folder);
+    juce::String restoreBackup (const juce::String& backupPath);
+    /** Flushes pending changes and closes the project (quit). */
+    void closeProject();
+
+    /** Set after openProject() when the previous session crashed: newest backups first. */
+    bool lastOpenHadStaleLock() const noexcept { return staleLockOnOpen; }
+    const juce::StringArray& getLastOpenBackups() const noexcept { return backupsOnOpen; }
+    const juce::StringArray& getMissingMediaOnOpen() const noexcept { return missingOnOpen; }
+
+    static juce::File getLastProjectRecordFile();
+    static juce::File getDefaultProjectsFolder();
     const std::vector<SongInfo>& getSongs() const noexcept { return songs; }
     int getCurrentSongIndex() const noexcept { return currentSong; }
     const SongInfo* getCurrentSong() const noexcept;
@@ -182,6 +211,12 @@ private:
     void rebuildPlan();
     void pushMixerToEngine();
 
+    void markDirty();
+    ProjectData toProjectData() const;
+    void applyProjectData (const ProjectData&, const juce::File& folder);
+    juce::String guardProjectChange() const;
+    void rememberLastProject() const;
+
     juce::String projectName { "B4ND Demo Project" };
     std::vector<SongInfo> songs;
     int currentSong = 0;
@@ -205,6 +240,16 @@ private:
     double lastDeviceRate = 0.0;
     int lastDeviceOutputs = -1;
     bool ramWarningLogged = false;
+    // project file state
+    ProjectSession session;
+    juce::String projectId, projectCreatedAt;
+    bool dirty = false;
+    double lastChangeMs = 0.0, lastBackupMs = 0.0;
+    bool staleLockOnOpen = false;
+    juce::StringArray backupsOnOpen, missingOnOpen;
+    static constexpr double autosaveDelayMs = 5000.0;
+    static constexpr double backupIntervalMs = 30.0 * 60.0 * 1000.0;
+
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)
