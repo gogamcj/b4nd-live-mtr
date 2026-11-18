@@ -2,6 +2,7 @@
 
 #include "TestHarness.h"
 #include "midi/MidiFileImport.h"
+#include "core/MidiNoteEdit.h"
 #include "midi/MidiOutputService.h"
 
 #include <memory>
@@ -142,6 +143,46 @@ TEST_CASE ("SMF import: ticks rescaled to 960 PPQ, only channel messages kept, t
     smpte[12] = 0xe7; smpte[13] = 0x28;   // -25 fps, 40 ticks per frame
     const auto s = importMidiData (smpte.data(), smpte.size());
     CHECK (! s.ok && s.error.containsIgnoreCase ("SMPTE"));
+}
+
+TEST_CASE ("SMF export: edited notes are written and read back exactly, without a half-written file")
+{
+    // An edit of an imported part: move, quantize, transpose; controllers stay.
+    std::vector<MidiTickEvent> ev = {
+        { 0, MidiBytes::make (0xc1, 33) },
+        { 10, MidiBytes::make (0x91, 40, 100) }, { 470, MidiBytes::make (0x81, 40, 0) },
+        { 480, MidiBytes::make (0xb1, 64, 127) },
+        { 500, MidiBytes::make (0x91, 43, 90) }, { 950, MidiBytes::make (0x81, 43, 0) },
+    };
+    auto seq = NoteSequence::fromEvents (ev);
+    seq.quantize (seq.all(), 240);
+    seq.move (seq.all(), 0, 12);
+    const auto edited = seq.toEvents();
+
+    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("b4nd-smf-export-test");
+    dir.deleteRecursively();
+    const auto f = dir.getChildFile ("song").getChildFile ("bass.mid");
+    f.getParentDirectory().createDirectory();
+    f.getSiblingFile ("bass.mid.tmp").replaceWithText ("left over from a crash");
+    CHECK (writeMidiFile (f, edited, 128.0, "B4ND edit bass").isEmpty());
+    CHECK (! f.getSiblingFile ("bass.mid.tmp").exists());
+    const auto r = importMidiFile (f);
+    CHECK (r.ok);
+    CHECK (std::abs (r.fileBpm - 128.0) < 0.01);
+    CHECK (r.noteCount == 2);
+    CHECK (r.events.size() == edited.size());
+    CHECK (NoteSequence::fromEvents (r.events) == seq);
+    if (r.events.size() == edited.size())
+        for (size_t i = 0; i < edited.size(); ++i)
+            CHECK (r.events[i].tick == edited[i].tick && r.events[i].msg.data[0] == edited[i].msg.data[0]
+                   && r.events[i].msg.data[1] == edited[i].msg.data[1]);
+
+    // Cannot write (a folder is in the way): an error, and the old file stays.
+    const auto blocked = dir.getChildFile ("song").getChildFile ("blocked.mid");
+    blocked.createDirectory();
+    CHECK (writeMidiFile (blocked, edited, 120.0, {}).isNotEmpty());
+    CHECK (blocked.isDirectory());
+    dir.deleteRecursively();
 }
 
 TEST_CASE ("MIDI out: messages leave at their due time, never early, in order")

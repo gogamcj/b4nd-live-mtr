@@ -30,7 +30,9 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../plugins/PluginInstrument.cpp
     ../plugins/PluginHost.cpp
     ../ui/PluginPanel.cpp
-    ../ui/AnalysisPanel.cpp)
+    ../ui/AnalysisPanel.cpp
+    AppStateMidiEdit.cpp
+    ../ui/MidiEditorPanel.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

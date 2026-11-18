@@ -9,6 +9,7 @@
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/AnalysisPanel.h"
+#include "ui/MidiEditorPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
@@ -65,6 +66,8 @@ struct ScreenshotRequest
     bool applyAnalysis = false;    // --apply-analysis: then apply everything and save
     bool undoAnalysis = false;     // --undo-analysis: then undo the apply (before the save)
     juce::String analyzer;         // --analyzer <program or python>
+    juce::String midiEditTrack;    // --midi-edit <track name>: open the MIDI editor on it (and capture it)
+    juce::StringArray midiOps;     // --midi-ops all,quantize,transpose:2,vel:+10,delete,undo,play,stop,live,try-save,save ...
     juce::StringArray analyzeTasks;   // --analyze-tasks tempo,key,chords,structure,stems (default: all but stems)
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
@@ -87,6 +90,10 @@ struct ScreenshotRequest
             r.analyzer = args[s + 1].unquoted();
         if (const int s = args.indexOf ("--analyze-tasks"); s >= 0 && s + 1 < args.size())
             r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
+        if (const int s = args.indexOf ("--midi-edit"); s >= 0 && s + 1 < args.size())
+            r.midiEditTrack = args[s + 1].unquoted();
+        if (const int s = args.indexOf ("--midi-ops"); s >= 0 && s + 1 < args.size())
+            r.midiOps = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -312,6 +319,90 @@ public:
                 std::printf ("vsti midi rejected: %s\n", err.toRawUTF8());
     }
 
+    /** --midi-edit / --midi-ops: the editor's own functions on a track, then a save (CI round trip). */
+    void runMidiEdit()
+    {
+        const auto* s = state->getCurrentSong();
+        int index = -1;
+        for (int i = 0; s != nullptr && i < (int) s->tracks.size(); ++i)
+            if (s->tracks[(size_t) i].name == screenshot->midiEditTrack)
+                index = i;
+        if (index < 0)
+        {
+            std::printf ("midi edit: no track \"%s\"\n", screenshot->midiEditTrack.toRawUTF8());
+            setApplicationReturnValue (1);
+            return;
+        }
+        showMidiEditor (*state, index);
+        auto* ed = getMidiEditorContent();
+        if (ed == nullptr || ed->getTrackId() != s->tracks[(size_t) index].id)
+        {
+            std::printf ("midi edit: the editor did not open\n");
+            setApplicationReturnValue (1);
+            return;
+        }
+        auto describe = [ed] {
+            const auto& n = ed->getSequence().getNotes();
+            juce::String first;
+            for (size_t i = 0; i < n.size() && i < 3; ++i)
+                first << n[i].start << ":" << n[i].pitch << ":" << n[i].velocity << ":" << n[i].length << " ";
+            return juce::String (ed->getSequence().size()) + " notes, " + juce::String ((int) ed->getSelection().size()) + " selected, first "
+                   + first.trim() + (ed->hasUnsavedEdits() ? ", unsaved" : "");
+        };
+        std::printf ("midi edit: opened \"%s\": %s\n", ed->getTrackName().toRawUTF8(), describe().toRawUTF8());
+        for (const auto& op : screenshot->midiOps)
+        {
+            const auto name = op.upToFirstOccurrenceOf (":", false, false);
+            const auto arg = op.fromFirstOccurrenceOf (":", false, false);
+            juce::String result = "ok";
+            if (name == "all") ed->selectAll();
+            else if (name == "none") ed->selectNone();
+            else if (name == "first") { ed->selectNone(); if (ed->getSequence().size() > 0) ed->commit (ed->getSequence(), { ed->getSequence().getNotes().front().id }); }
+            else if (name == "grid") ed->setGridTicks (arg.getLargeIntValue());
+            else if (name == "quantize") ed->quantizeSelection();
+            else if (name == "transpose") ed->transposeSelection (arg.getIntValue());
+            else if (name == "move") ed->moveSelection (arg.getLargeIntValue());
+            else if (name == "vel") ed->changeVelocity (arg.getIntValue());
+            else if (name == "delete") result = juce::String (ed->deleteSelection()) + " deleted";
+            else if (name == "add")
+            {
+                const auto parts = juce::StringArray::fromTokens (arg, ":", "");
+                auto seq = ed->getSequence();
+                EditNote n;
+                n.start = parts[0].getLargeIntValue();
+                n.pitch = parts[1].getIntValue();
+                n.length = parts.size() > 2 ? parts[2].getLargeIntValue() : ed->getGridTicks();
+                n.velocity = parts.size() > 3 ? parts[3].getIntValue() : 100;
+                n.channel = seq.size() > 0 ? seq.getNotes().front().channel : 0;
+                const auto id = seq.add (n);
+                ed->commit (seq, { id });
+            }
+            else if (name == "undo") ed->undo();
+            else if (name == "redo") ed->redo();
+            else if (name == "play") state->play();
+            else if (name == "stop") state->stop();
+            else if (name == "live")
+            {
+                window->getMainComponent().onLiveModeChanged = nullptr;   // no full screen in a test
+                window->getMainComponent().toggleLiveMode();
+                result = state->isLiveMode() ? "Live Mode on" : "Live Mode off";
+            }
+            else if (name == "try-save") { const auto err = ed->save(); result = err.isEmpty() ? "saved" : "refused: " + err; }
+            else if (name == "save") { const auto err = ed->save(); result = err.isEmpty() ? "ok" : err; if (err.isNotEmpty()) setApplicationReturnValue (1); }
+            else { result = "UNKNOWN OP"; setApplicationReturnValue (1); }
+            std::printf ("midi edit: %s -> %s; %s\n", op.toRawUTF8(), result.toRawUTF8(), describe().toRawUTF8());
+        }
+        if (const auto* t = s != nullptr && juce::isPositiveAndBelow (index, (int) state->getCurrentSong()->tracks.size())
+                                ? &state->getCurrentSong()->tracks[(size_t) index] : nullptr)
+            std::printf ("midi edit: track \"%s\" plays %s (%d notes)\n", t->name.toRawUTF8(),
+                         juce::File (t->midiPath).getParentDirectory().getFileName().toRawUTF8(), t->midiNotes);
+        if (! screenshot->midiOps.isEmpty() && state->hasProjectFile())
+        {
+            const auto err = state->saveProject();
+            std::printf ("project save: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+        }
+    }
+
     void printPluginSummary()
     {
         const auto ps = state->getPluginSummary();
@@ -354,6 +445,7 @@ public:
         closeModuleWindow();
         closePluginWindow();
         closeAnalysisWindow();
+        closeMidiEditor();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -499,6 +591,8 @@ private:
         }
         if (phase == 6)
         {
+            if (screenshot->midiEditTrack.isNotEmpty())
+                runMidiEdit();
             if (screenshot->countIn >= 0 || screenshot->clickSub > 0)
             {
                 auto c = state->getClickSettings();
@@ -605,6 +699,8 @@ private:
             comp = getPluginWindowContent();
         if (screenshot->analysisWindow && getAnalysisWindowContent() != nullptr)
             comp = getAnalysisWindowContent();
+        if (screenshot->midiEditTrack.isNotEmpty() && getMidiEditorContent() != nullptr)
+            comp = getMidiEditorContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))

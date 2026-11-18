@@ -1,5 +1,6 @@
 #include "ui/TimelineView.h"
 #include "midi/MidiFileImport.h"
+#include "ui/MidiEditorPanel.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -426,6 +427,23 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         else if (e.x >= msLeft + 24 && e.x < msLeft + 44)
             state.setTrackSolo (track, ! song->tracks[(size_t) track].solo);
     }
+}
+
+void TimelineView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const auto* song = state.getCurrentSong();
+    const int track = trackAtY (e.y);
+    if (song == nullptr || track < 0 || state.isLiveMode())
+        return;
+    const auto& t = song->tracks[(size_t) track];
+    if (t.kind != TrackKind::MidiVsti && t.kind != TrackKind::MidiExternal)
+        return;
+    if (t.midiEvents == nullptr)
+    {
+        showNotice (t.name + ": no MIDI yet. Drop a .mid file on it, or convert a stem with Audio to MIDI.", false);
+        return;
+    }
+    showMidiEditor (state, track);
 }
 
 int TimelineView::trackAtY (int y) const

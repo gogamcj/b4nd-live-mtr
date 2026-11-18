@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 10 (AI 스템 분리, Audio to MIDI)
+## 현재 상태: Phase 11 (MIDI 에디터)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -60,6 +60,12 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - Audio to MIDI: 좌측 Audio to MIDI를 누르거나 분석 창에서 "Audio to MIDI"를 켭니다. 곡의 스템 트랙을 MIDI로 바꿉니다.
   - 베이스·보컬은 한 번에 한 음, 피아노·기타는 화음, 드럼은 킥/스네어/하이햇으로 변환합니다 (Basic Pitch, 모델 포함).
   - APPLY TO SONG을 누르면 음소거된 MIDI 트랙(악기 없음)으로 추가됩니다. VSTi를 고르면 연주합니다.
+- MIDI 에디터: 타임라인에서 MIDI 트랙을 더블클릭하거나 Ctrl+E. 피아노롤 뒤에 원래 스템(또는 MR) 파형이 깔립니다.
+  - 클릭/드래그로 선택, 끌어서 이동, 오른쪽 끝을 끌어 길이 조절, 더블클릭으로 추가/삭제, 아래 줄에서 벨로시티를 끌어 바꿉니다 (Alt: 그리드 무시).
+  - Q 퀀타이즈, ↑/↓ 이조(Shift: 옥타브), ←/→ 그리드만큼 이동, Delete 삭제, Ctrl+Z / Ctrl+Y 실행 취소/다시 실행.
+  - SAVE를 눌러야 트랙에 들어갑니다. 새 MIDI 파일로 저장하고 이전 파일은 남겨 둡니다. 재생 중에는 저장할 수 없고, 공연 모드에서는 에디터가 닫힙니다.
+
+![MIDI 에디터](docs/images/phase11-midi-editor.png)
 
 ![MIDI로 변환한 트랙](docs/images/phase10-midi.png)
 
@@ -105,6 +111,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | Ctrl+M | MIDI 음원 모듈 |
 | Ctrl+P | VST3 플러그인 |
 | Ctrl+Shift+A | AI 분석 |
+| Ctrl+E | MIDI 에디터 (또는 MIDI 트랙 더블클릭) |
 | Ctrl+S / Ctrl+Shift+S | 저장 / 다른 이름으로 저장 |
 | Ctrl+O / Ctrl+N | 프로젝트 열기 / 새 프로젝트 |
 

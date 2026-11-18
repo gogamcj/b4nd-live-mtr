@@ -18,6 +18,8 @@ public:
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
+    /** Double-click a MIDI lane: opens the MIDI editor on it. */
+    void mouseDoubleClick (const juce::MouseEvent&) override;
 
     // Drop audio files on a lane to assign them, or below the lanes to add tracks.
     bool isInterestedInFileDrag (const juce::StringArray&) override;

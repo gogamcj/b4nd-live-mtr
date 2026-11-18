@@ -140,6 +140,22 @@ jobs:
           $mids | ForEach-Object { "$($_.FullName) $($_.Length)" }
           if ($mids.Count -lt 3) { throw "MIDI files missing" }
 
+      - name: MIDI editor end to end (edit the AI bass part, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-midi-editor.png','--size','1600x960',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--midi-edit', '"Bass (MIDI)"',
+                 '--midi-ops', 'grid:240,all,quantize,transpose:12,add:0:40:480:90,save')
+          if ($p.ExitCode -ne 0) { throw "MIDI edit run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "MIDI edit" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "MIDI edit saved: Bass \(MIDI\) \([1-9]" -Quiet)) { throw "edit not saved" }
+          $edits = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter bass.mid | Where-Object { $_.DirectoryName -match "edit-" }
+          if ($edits.Count -lt 1) { throw "edited bass.mid missing" }
+
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
         run: |
@@ -322,6 +338,67 @@ jobs:
           grep -Eq 'track "Bass \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI bass notes=[1-9][0-9]* ai=[0-9]+%' midi-reopen.txt
           grep -Eq 'track "Drums \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI drums notes=[1-9][0-9]*' midi-reopen.txt
           grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' midi-reopen.txt
+
+      - name: MIDI editor end to end (edit the AI bass part, save, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          before=$(grep -oE 'track "Bass \(MIDI\)" .* notes=[0-9]+' midi-reopen.txt | grep -oE '[0-9]+$')
+          # Quantize to 1/16, transpose up an octave, delete the first note and undo that,
+          # add one note at bar 1, save. The editor's own functions, as the buttons use them.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" \
+            --midi-ops "grid:240,all,quantize,transpose:12,first,delete,undo,add:0:40:480:90,save" | tee edit.txt
+          grep -q 'midi edit: opened "Bass (MIDI)"' edit.txt
+          grep -q "midi edit: delete -> 1 deleted" edit.txt
+          grep -q "midi edit: save -> ok" edit.txt
+          grep -q "project save: ok" edit.txt
+          ls -la ai-test.b4nd/midi/*/edit-*/bass.mid
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" | tee edit-reopen.txt
+          # Reopened: one note more, the added note first, still the AI bass part, played from the edit.
+          grep -Eq "track \"Bass \(MIDI\)\" VSTi 0.0 dB MUTE AI MIDI bass notes=$((before + 1)) " edit-reopen.txt
+          grep -Eq "midi edit: opened \"Bass \(MIDI\)\": $((before + 1)) notes, 0 selected, first 0:40:90:480 " edit-reopen.txt
+          grep -Eq 'midi edit: track "Bass \(MIDI\)" plays edit-[0-9]{8}-[0-9]{6}' edit-reopen.txt
+          # Every other note start is on the 1/16 grid (240 ticks) after the quantize.
+          python3 - <<'PY'
+          import struct, glob
+          f = sorted(glob.glob("ai-test.b4nd/midi/*/edit-*/bass.mid"))[-1]
+          d = open(f, "rb").read()
+          assert d[:4] == b"MThd" and struct.unpack(">H", d[12:14])[0] == 960
+          pos, starts = 14, []
+          while pos < len(d):
+              n = struct.unpack(">I", d[pos + 4:pos + 8])[0]
+              trk, i, t, run = d[pos + 8:pos + 8 + n], 0, 0, 0
+              while i < len(trk):
+                  v = 0
+                  while True:
+                      b = trk[i]; i += 1; v = (v << 7) | (b & 0x7F)
+                      if b < 0x80: break
+                  t += v
+                  st = trk[i]
+                  if st == 0xFF:
+                      l = trk[i + 2]; i += 3 + l; continue
+                  if st >= 0x80: run = st; i += 1
+                  ln = 1 if (run & 0xF0) in (0xC0, 0xD0) else 2
+                  if (run & 0xF0) == 0x90 and trk[i + 1] > 0: starts.append(t)
+                  i += ln
+              pos += 8 + n
+          off = [s for s in starts if s % 240]
+          print(f, len(starts), "note starts,", len(off), "off the grid")
+          assert len(starts) > 10 and not off
+          PY
+          # Locks: no save while playing; in Live Mode no edit and no save; the draft survives both.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor-locks.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" \
+            --midi-ops "all,transpose:1,play,try-save,stop,live,transpose:1,try-save,live,try-save" | tee locks.txt
+          grep -q "midi edit: try-save -> refused: Stop playback to save MIDI edits" locks.txt
+          grep -q "midi edit: live -> Live Mode on" locks.txt
+          grep -q "midi edit: try-save -> refused: Live Mode: MIDI cannot be edited during a show" locks.txt
+          grep -q "midi edit: try-save -> saved" locks.txt
+          # The transpose in Live Mode did nothing: the first notes moved up 1 semitone, not 2.
+          first=$(grep -oE "opened .*first [0-9]+:[0-9]+" locks.txt | grep -oE "[0-9]+$")
+          grep -Eq "try-save -> saved; .* first 0:$((first + 1)):" locks.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |

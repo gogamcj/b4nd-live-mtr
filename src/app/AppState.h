@@ -250,6 +250,18 @@ public:
     juce::String addMidiFile (const juce::File&, int trackIndex = -1);
     juce::String setTrackModule (int trackIndex, const juce::String& moduleId, int channel = 0);
 
+    // --- MIDI editor (Phase 11) ---
+    /** A song by id (any song in the setlist, not only the current one). */
+    const SongInfo* findSong (const juce::String& songId) const noexcept;
+    /** Why a MIDI track cannot be saved now (Live Mode, playing), or empty. Editing the draft
+        in the editor is always possible outside Live Mode; only saving is locked. */
+    juce::String midiEditLockReason() const;
+    /** Saves edited events of a MIDI track: writes a new .mid file (the old one stays on disk,
+        so an edit can always be traced back) and points the track at it. The file is read back
+        before the track uses it. Empty string on success, else the reason. */
+    juce::String saveMidiEdit (const juce::String& songId, const juce::String& trackId,
+                               const std::vector<MidiTickEvent>& events);
+
     struct MidiSummary
     {
         int modules = 0, ready = 0, preparing = 0, problems = 0;   // problems: disconnected / busy / no port

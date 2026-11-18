@@ -2,6 +2,7 @@
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/AnalysisPanel.h"
+#include "ui/MidiEditorPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
@@ -84,6 +85,18 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { showModuleWindow (state); return true; }
     if (key == juce::KeyPress ('p', juce::ModifierKeys::commandModifier, 0)) { showPluginWindow (state); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { if (! state.isLiveMode()) showAnalysisWindow (state); return true; }
+    if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier, 0))
+    {
+        // MIDI editor on the first MIDI track that has notes (or double-click a MIDI lane)
+        if (const auto* s = state.getCurrentSong(); s != nullptr && ! state.isLiveMode())
+            for (int i = 0; i < (int) s->tracks.size(); ++i)
+                if (s->tracks[(size_t) i].midiEvents != nullptr)
+                {
+                    showMidiEditor (state, i);
+                    break;
+                }
+        return true;
+    }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { projectCommands::save (state); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { projectCommands::saveAs (state); return true; }
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) projectCommands::openProject (state); return true; }
