@@ -140,6 +140,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             }
             emergencyLatched.store (false, std::memory_order_release);
             testSignal.store ((int) TestSignal::None, std::memory_order_release);
+            probe.cancel();   // a measurement never plays into a song
             if (songLength > 0 && position.load (std::memory_order_relaxed) >= songLength)
                 position.store (0, std::memory_order_relaxed);
             fadeAction = FadeAction::None;
@@ -170,6 +171,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             if (playAfterStop)
                 playAfterStopPosition = target;
             releaseMidiNotes();      // a jump never leaves notes hanging
+            probe.cancel();
             midiExpectedPos = -1;
             instExpectedPos = -1;
         }
@@ -178,6 +180,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
         case EngineCommand::Type::EmergencyStop:
             playAfterStop = false;
             releaseMidiNotes();      // modules go silent immediately, before the audio fade
+            probe.cancel();
             fadeAction = FadeAction::Emergency;
             emergencyLatched.store (true, std::memory_order_release);
             break;
@@ -192,6 +195,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
                 pushEvent (EngineEvent::Type::CommandRejected);
                 break;
             }
+            probe.cancel();
             testGain = std::pow (10.0f, std::clamp (c.value, -60.0f, -6.0f) / 20.0f);   // never louder than -6 dBFS
             emergencyLatched.store (false, std::memory_order_release);
             testOutput.store (c.output, std::memory_order_release);
@@ -205,7 +209,109 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             testSignal.store ((int) TestSignal::None, std::memory_order_release);
             testOutput.store (-1, std::memory_order_release);
             break;
+
+        case EngineCommand::Type::StartProbe:
+            startProbe (c);
+            break;
+
+        case EngineCommand::Type::StopProbe:
+            probe.cancel();
+            publishProbe();
+            break;
     }
+}
+
+EngineCommand AudioEngine::makeProbeCommand (bool midi, int output, int input, int port, int channel, int note, int pings)
+{
+    EngineCommand c;
+    c.type = EngineCommand::Type::StartProbe;
+    c.output = output;
+    c.samples = input;
+    c.intValue = (midi ? 1 : 0) | ((port & 0xff) << 8) | ((channel & 0x1f) << 16) | ((note & 0x7f) << 24);
+    c.value = (float) pings;
+    return c;
+}
+
+void AudioEngine::startProbe (const EngineCommand& c) noexcept
+{
+    probeMidi = (c.intValue & 1) != 0;
+    probePort = (c.intValue >> 8) & 0xff;
+    probeChannel = std::clamp ((c.intValue >> 16) & 0x1f, 1, 16);
+    probeNote = (c.intValue >> 24) & 0x7f;
+    probeIn = (int) c.samples;
+    probeOut = c.output;
+
+    LatencyProbe::Settings s;
+    s.sampleRate = sampleRate;
+    s.pings = (int) c.value;
+    s.writeBurst = ! probeMidi;
+    s.level = 0.25f;                          // -12 dBFS, a short tick
+    s.maxSpreadSec = probeMidi ? 0.003 : 0.001;   // modules jitter; a cable does not
+    probe.start (s);
+    probeRun.fetch_add (1, std::memory_order_relaxed);
+
+    const auto t = (EngineTransport) transport.load (std::memory_order_relaxed);
+    const bool busy = t == EngineTransport::Playing || fadeAction != FadeAction::None
+                      || testSignal.load (std::memory_order_relaxed) != (int) TestSignal::None
+                      || emergencyLatched.load (std::memory_order_relaxed);
+    const bool badInput = probeIn < 0 || probeIn >= numIns;
+    const bool badOutput = ! probeMidi
+                           && (probeOut < 0 || probeOut >= std::min (numOuts, maxOutputs)
+                               || routes[(size_t) probeOut].isPA.load (std::memory_order_relaxed));   // never tick the PA
+    const bool badPort = probeMidi && (probePort < 0 || probePort >= maxMidiPorts);
+    if (busy || badInput || badOutput || badPort)
+    {
+        probe.abort (LatencyProbe::Failure::BadSetup);
+        publishProbe();
+        pushEvent (EngineEvent::Type::CommandRejected);
+        return;
+    }
+    publishProbe();
+}
+
+void AudioEngine::runProbe (const float* const* inputs, int numInputs, float* const* chunk, int numOutputs,
+                            int offset, int n) noexcept
+{
+    if (probe.getState() != LatencyProbe::State::Running)
+        return;
+    const float* in = inputs != nullptr && probeIn >= 0 && probeIn < numInputs && inputs[probeIn] != nullptr
+                          ? inputs[probeIn] + offset : nullptr;
+    float* out = ! probeMidi && probeOut >= 0 && probeOut < numOutputs ? chunk[probeOut] : nullptr;
+    const int at = probe.process (in, out, n);
+    if (probeMidi && at >= 0)
+    {
+        // Leaves when sample `at` reaches the speakers, like any module note with 0 ms offset.
+        const double nsPerSample = 1.0e9 / sampleRate;
+        const auto due = chunkStartNs + (std::int64_t) (at * nsPerSample) + outputLatencyNs.load (std::memory_order_relaxed);
+        const auto ch = (std::uint8_t) (probeChannel - 1);
+        pushMidi (due, probePort, MidiBytes::make ((std::uint8_t) (0x90 | ch), (std::uint8_t) probeNote, 110));
+        pushMidi (due + 150'000'000, probePort, MidiBytes::make ((std::uint8_t) (0x80 | ch), (std::uint8_t) probeNote, 0));
+    }
+}
+
+void AudioEngine::publishProbe() noexcept
+{
+    probeState.store ((int) probe.getState(), std::memory_order_relaxed);
+    probeFailure.store ((int) probe.getFailure(), std::memory_order_relaxed);
+    probeDelay.store (probe.getDelaySamples(), std::memory_order_relaxed);
+    probeSpread.store (probe.getSpreadSamples(), std::memory_order_relaxed);
+    probeValid.store (probe.getValidPings(), std::memory_order_relaxed);
+    probePings.store (probe.getPingsDone(), std::memory_order_relaxed);
+    probeIsMidi.store (probeMidi, std::memory_order_relaxed);
+}
+
+ProbeStatus AudioEngine::getProbeStatus() const noexcept
+{
+    ProbeStatus s;
+    s.state = (LatencyProbe::State) probeState.load (std::memory_order_relaxed);
+    s.failure = (LatencyProbe::Failure) probeFailure.load (std::memory_order_relaxed);
+    s.delaySamples = probeDelay.load (std::memory_order_relaxed);
+    s.spreadSamples = probeSpread.load (std::memory_order_relaxed);
+    s.validPings = probeValid.load (std::memory_order_relaxed);
+    s.pingsDone = probePings.load (std::memory_order_relaxed);
+    s.midi = probeIsMidi.load (std::memory_order_relaxed);
+    s.runId = probeRun.load (std::memory_order_relaxed);
+    return s;
 }
 
 float AudioEngine::nextNoise() noexcept
@@ -873,7 +979,7 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
     renderTest (outputs, numOutputs, 0, n);
 }
 
-void AudioEngine::process (const float* const*, int, float* const* outputs, int numOutputs, int numSamples) noexcept
+void AudioEngine::process (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples) noexcept
 {
     const auto startNs = timeSource != nullptr ? timeSource() : nowNs();
     callbacks.fetch_add (1, std::memory_order_relaxed);
@@ -953,6 +1059,7 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
 
         chunkStartNs = blockNs + (std::int64_t) ((double) offset * blockNsPerSample);
         renderChunk (chunkPtrs, numOutputs, n);
+        runProbe (inputs, numInputs, chunkPtrs, numOutputs, offset, n);
 
         // Transport advances per chunk so tracks and click stay sample-aligned.
         if ((EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing)
@@ -969,6 +1076,9 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
         }
         offset += n;
     }
+
+    if (probe.getState() != LatencyProbe::State::Idle)
+        publishProbe();
 
     // 4. Fades (stop / emergency) applied to every output.
     if (fadeAction != FadeAction::None)

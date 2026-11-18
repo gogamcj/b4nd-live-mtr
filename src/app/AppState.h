@@ -217,6 +217,28 @@ public:
     };
     MidiSummary getMidiSummary() const;
 
+    // --- latency measurement (docs/04 §4) ---
+    struct Measurement
+    {
+        bool running = false, finished = false, ok = false, midi = false;
+        int moduleIndex = -1, input = -1, output = -1;
+        int pingsDone = 0, pings = 5;
+        double resultMs = 0.0;     // round trip, or the module's MIDI-to-sound delay
+        juce::String message;      // what happened, for the UI and the log
+    };
+    /** Interface round trip: a short tick on `output` (default: the first in-ear output; never
+        a PA output) must be cabled back into `input`. Stopped, outside Live Mode only. */
+    juce::String startLoopbackMeasurement (int input, int output = -1);
+    /** Sends test notes to module `index` and listens for its sound on `input`. The delay
+        (minus the round trip) is written into the module's MIDI delay offset. */
+    juce::String startModuleMeasurement (int moduleIndex, int input);
+    void cancelMeasurement();
+    const Measurement& getMeasurement() const noexcept { return measurement; }
+    /** Measured round trip for the current device settings, or < 0 if not measured. */
+    double getRoundTripMs() const;
+    /** The output a loopback test uses by default, or -1. */
+    int defaultLoopbackOutput() const;
+
     // --- VST3 instruments (docs/05) ---
     PluginHost& getPluginHost() noexcept { return plugins; }
     /** Puts a plugin from the catalog on a VSTi track, or adds a new VSTi track (trackIndex < 0).
@@ -288,6 +310,10 @@ private:
     double pluginSampleRate() const;
     int pluginBlockSize() const;
 
+    void pollMeasurement();
+    juce::String guardMeasurement() const;
+    juce::String deviceKey() const;
+
     void markDirty();
     ProjectData toProjectData() const;
     void applyProjectData (const ProjectData&, const juce::File& folder);
@@ -326,6 +352,11 @@ private:
     juce::StringArray backupsOnOpen, missingOnOpen;
     static constexpr double autosaveDelayMs = 5000.0;
     static constexpr double backupIntervalMs = 30.0 * 60.0 * 1000.0;
+
+    Measurement measurement;
+    std::uint32_t measurementRun = 0;
+    double roundTripMs = -1.0;
+    juce::String roundTripKey;   // device / rate / buffer it was measured with
 
     std::vector<ModuleProfile> modules;   // module i = MIDI port slot i
     MidiOutputService midi;

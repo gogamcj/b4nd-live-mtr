@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/LatencyProbe.h"
 #include "core/SampleClock.h"
 #include "core/OutputRouting.h"
 #include "core/SpscQueue.h"
@@ -43,7 +44,9 @@ struct EngineCommand
         EmergencyStop,
         SetSongLength,   // samples (0 = unlimited)
         StartTest,       // intValue = TestSignal, output = target output, value = level dB
-        StopTest
+        StopTest,
+        StartProbe,      // latency measurement, see AudioEngine::makeProbeCommand
+        StopProbe
     };
 
     Type type = Type::Stop;
@@ -75,6 +78,16 @@ struct EngineEvent
     Type type = Type::LateCallback;
     std::int64_t samplePosition = 0;
     float load = 0.0f;
+};
+
+/** Latency measurement progress and result (docs/04 §4). */
+struct ProbeStatus
+{
+    LatencyProbe::State state = LatencyProbe::State::Idle;
+    LatencyProbe::Failure failure = LatencyProbe::Failure::None;
+    int delaySamples = -1, spreadSamples = 0, validPings = 0, pingsDone = 0;
+    bool midi = false;
+    std::uint32_t runId = 0;   // increments with every start
 };
 
 /**
@@ -157,6 +170,13 @@ public:
     /** In-ear monitor mix: how much click, guide and MR (Main) go into the Monitor bus. */
     void setMonitorMix (float click, float guide, float main) noexcept;
 
+    // --- latency measurement (docs/04 §4) ---
+    /** Audio loopback: a burst on `output` (never a PA output), its onset found on `input`.
+        Module: a MIDI note on port/channel (1-16)/note; its sound found on `input`.
+        Only starts while stopped with no test signal; PLAY, LOCATE and EMERGENCY cancel it. */
+    static EngineCommand makeProbeCommand (bool midi, int output, int input, int port = 0, int channel = 1, int note = 60, int pings = 5);
+    ProbeStatus getProbeStatus() const noexcept;
+
     // --- telemetry (lock-free reads) ---
     EngineTransport getTransport() const noexcept { return (EngineTransport) transport.load (std::memory_order_acquire); }
     std::int64_t getPosition() const noexcept      { return position.load (std::memory_order_acquire); }
@@ -192,6 +212,9 @@ private:
     void handleCommand (const EngineCommand&) noexcept;
     void pushEvent (EngineEvent::Type, float load = 0.0f) noexcept;
     void renderTest (float* const* outputs, int numOutputs, int start, int numSamples) noexcept;
+    void startProbe (const EngineCommand&) noexcept;
+    void runProbe (const float* const* inputs, int numInputs, float* const* chunk, int numOutputs, int offset, int n) noexcept;
+    void publishProbe() noexcept;
     float nextNoise() noexcept;
 
     // configuration (written in prepare only)
@@ -293,6 +316,15 @@ private:
     std::vector<float> instL, instR;
     std::atomic<std::uint64_t> instrumentEventsDropped { 0 };
     std::array<std::atomic<int>, maxTracks> instActiveTelemetry {};
+
+    // latency measurement (audio thread only, mirrored to atomics)
+    LatencyProbe probe;
+    bool probeMidi = false;
+    int probeIn = -1, probeOut = -1, probePort = 0, probeChannel = 1, probeNote = 60;
+    std::atomic<int> probeState { 0 }, probeFailure { 0 }, probeDelay { -1 }, probeSpread { 0 },
+                     probeValid { 0 }, probePings { 0 };
+    std::atomic<bool> probeIsMidi { false };
+    std::atomic<std::uint32_t> probeRun { 0 };
 
     XrunDetector xruns;
     std::atomic<float> loadTelemetry { 0.0f }, peakLoadTelemetry { 0.0f };

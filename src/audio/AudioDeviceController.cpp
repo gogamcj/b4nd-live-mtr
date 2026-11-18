@@ -132,9 +132,9 @@ bool AudioDeviceController::open (const juce::String& typeName, const juce::Stri
         return false;
     }
 
-    // ASIO devices are full duplex by name; other backends open output only for now
-    // (line inputs for external modules are added in Phase 4/7).
-    const bool isAsio = typeName.containsIgnoreCase ("ASIO");
+    // ASIO (and JACK) devices are full duplex by name: their inputs are opened too, for the
+    // latency measurement and module returns. Other backends open output only.
+    const bool isAsio = typeName.containsIgnoreCase ("ASIO") || typeName.containsIgnoreCase ("JACK");
     std::unique_ptr<juce::AudioIODevice> d (type->createDevice (deviceName, isAsio ? deviceName : juce::String()));
     if (d == nullptr)
     {
@@ -284,6 +284,11 @@ int AudioDeviceController::getBufferSize() const    { return device != nullptr ?
 int AudioDeviceController::getNumOutputs() const    { return device != nullptr ? device->getActiveOutputChannels().countNumberOfSetBits() : 0; }
 int AudioDeviceController::getNumInputs() const     { return device != nullptr ? device->getActiveInputChannels().countNumberOfSetBits() : 0; }
 int AudioDeviceController::getDriverXrunCount() const { return device != nullptr ? device->getXRunCount() : -1; }
+
+juce::StringArray AudioDeviceController::getInputChannelNames() const
+{
+    return device != nullptr ? device->getInputChannelNames() : juce::StringArray();
+}
 
 juce::StringArray AudioDeviceController::getOutputChannelNames() const
 {

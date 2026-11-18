@@ -39,6 +39,8 @@ static void crashHandler (void*)
     track (as if dropped), --modules captures the MIDI module window instead of the main window.
     --vsti <plugin.vst3> scans the plugin (scanner process) and adds a VSTi track with it,
     --vsti-midi <file.mid> gives that track its notes, --plugins captures the plugin window.
+    --measure-latency <input> measures the loopback round trip (in-ear output cabled into
+    that 1-based input) and exits with 1 if it fails.
     Without --screenshot, the last opened project is reopened at start-up. */
 struct ScreenshotRequest
 {
@@ -52,6 +54,7 @@ struct ScreenshotRequest
     double atSeconds = 0.0;
     juce::StringArray media;
     double playSeconds = 0.0;
+    int measureInput = 0;   // --measure-latency <input, 1-based>: loopback round trip, then capture
     juce::File project, saveAs;
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
@@ -77,6 +80,8 @@ struct ScreenshotRequest
             r.atSeconds = args[s + 1].getDoubleValue();
         if (const int s = args.indexOf ("--play"); s >= 0 && s + 1 < args.size())
             r.playSeconds = args[s + 1].getDoubleValue();
+        if (const int s = args.indexOf ("--measure-latency"); s >= 0 && s + 1 < args.size())
+            r.measureInput = args[s + 1].getIntValue();
         const auto cwd = juce::File::getCurrentWorkingDirectory();
         if (const int s = args.indexOf ("--project"); s >= 0 && s + 1 < args.size())
             r.project = cwd.getChildFile (args[s + 1].unquoted());
@@ -336,6 +341,8 @@ private:
         {
             if (state->getMediaSummary().loading > 0 && elapsed < 60.0)
                 return;
+            if (screenshot->measureInput > 0 && elapsed < 3.0)
+                return;   // time for a test script to patch the loopback (e.g. jack_connect)
             const auto m = state->getMediaSummary();
             std::printf ("media: %d ready, %d loading, %d missing, %d errors, %.1f MB\n", m.ready, m.loading, m.missing,
                          m.errors, (double) m.ramBytes / (1024.0 * 1024.0));
@@ -343,6 +350,18 @@ private:
             {
                 const auto err = state->saveProjectAs (screenshot->saveAs);
                 std::printf ("project save-as: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+            }
+            if (screenshot->measureInput > 0)
+            {
+                const auto err = state->startLoopbackMeasurement (screenshot->measureInput - 1);
+                std::printf ("latency: start %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+                if (err.isEmpty())
+                {
+                    phase = 4;
+                    phaseStart = now;
+                    return;
+                }
+                setApplicationReturnValue (1);
             }
             if (screenshot->playSeconds > 0.0)
             {
@@ -353,6 +372,22 @@ private:
             }
             phase = 1;
             phaseStart = now;
+            return;
+        }
+        if (phase == 4)   // latency measurement
+        {
+            if (state->getMeasurement().running && elapsed < 30.0)
+                return;
+            const auto& m = state->getMeasurement();
+            std::printf ("latency: %s\n", m.message.toRawUTF8());
+            std::printf ("latency result: %s, round trip %.2f ms, driver-reported %.2f ms (buffer %d)\n",
+                         m.ok ? "ok" : "FAILED", state->getRoundTripMs(),
+                         audioDevice->getOutputLatencyMs() + audioDevice->getInputLatencyMs(), audioDevice->getBufferSize());
+            if (! m.ok)
+                setApplicationReturnValue (1);
+            phase = 2;
+            phaseStart = now;
+            startTimer (100);
             return;
         }
         if (phase == 1)   // playback
@@ -435,7 +470,8 @@ private:
         out.flush();
         std::printf ("screenshot %s: %s (%dx%d)\n", ok ? "written" : "FAILED",
                      screenshot->file.getFullPathName().toRawUTF8(), img.getWidth(), img.getHeight());
-        setApplicationReturnValue (ok ? 0 : 1);
+        if (! ok)
+            setApplicationReturnValue (1);   // keep an earlier failure (e.g. latency) too
         quit();
     }
 

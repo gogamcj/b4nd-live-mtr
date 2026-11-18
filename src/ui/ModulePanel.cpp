@@ -73,7 +73,20 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     addAndMakeVisible (sustainToggle);
     addAndMakeVisible (clockToggle);
 
-    for (auto* b : { &addButton, &removeButton, &applyButton, &testButton, &recallButton, &refreshButton })
+    addAndMakeVisible (measureInBox);
+    measureInBox.setTooltip ("The audio input the module's output is cabled into");
+    measureButton.setTooltip ("Sends test notes and listens on the chosen input; writes the measured delay into Delay ms. "
+                              "Measure the loopback in Audio Settings first for the best accuracy.");
+    measureButton.onClick = [this]
+    {
+        if (editing < 0)
+            return;
+        const auto err = state.startModuleMeasurement (editing, measureInBox.getSelectedItemIndex());
+        message = err.isEmpty() ? state.getMeasurement().message : err;
+        messageIsError = err.isNotEmpty();
+        repaint();
+    };
+    for (auto* b : { &addButton, &removeButton, &applyButton, &testButton, &recallButton, &refreshButton, &measureButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -148,6 +161,8 @@ void ModulePanel::refreshEnablement()
         c->setEnabled (canEdit && has);
     testButton.setEnabled (has);
     recallButton.setEnabled (has);
+    measureButton.setEnabled (canEdit && has && ! state.getMeasurement().running && state.getDevice().getNumInputs() > 0);
+    measureInBox.setEnabled (canEdit && has && ! state.getMeasurement().running);
     for (auto& r : trackRows)
     {
         r.module->setEnabled (canEdit);
@@ -348,6 +363,33 @@ void ModulePanel::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void ModulePanel::timerCallback()
 {
+    // Inputs of the running device (they change when the device does).
+    const int numIns = state.getDevice().getNumInputs();
+    if (measureInBox.getNumItems() != numIns)
+    {
+        const int prev = measureInBox.getSelectedItemIndex();
+        measureInBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < numIns; ++i)
+            measureInBox.addItem ("IN " + juce::String (i + 1), i + 1);
+        if (numIns > 0)
+            measureInBox.setSelectedItemIndex (juce::jlimit (0, numIns - 1, juce::jmax (0, prev)), juce::dontSendNotification);
+    }
+    // A module measurement finished: show the result and the new delay value.
+    const auto& m = state.getMeasurement();
+    if (m.midi && wasMeasuring && ! m.running)
+    {
+        message = m.message;
+        messageIsError = ! m.ok;
+        if (m.ok && m.moduleIndex == editing)
+            loadEditor();             // show the new Delay ms
+    }
+    else if (m.midi && m.running)
+    {
+        message = m.message + "  (" + juce::String (m.pingsDone) + " / " + juce::String (m.pings) + ")";
+        messageIsError = false;
+    }
+    wasMeasuring = m.midi && m.running;
+
     list.repaint();
     repaint (statusArea);
     repaint (lockArea);
@@ -428,6 +470,7 @@ void ModulePanel::paint (juce::Graphics& g)
     label (gapEdit, "Gap ms");
     label (settleEdit, "Settle ms");
     label (clockOffsetEdit, "Clock ms");
+    label (measureInBox, "Measure on");
 
     // Status line
     auto st = statusArea;
@@ -553,6 +596,12 @@ void ModulePanel::resized()
         clockOffsetEdit.setBounds (cr.removeFromLeft (70));
         cr.removeFromLeft (10);
         clockToggle.setBounds (cr);
+    }
+    {
+        auto mr = row (colB);
+        measureInBox.setBounds (mr.removeFromLeft (90));
+        mr.removeFromLeft (6);
+        measureButton.setBounds (mr);
     }
 
     tracksHeader = tracks.removeFromTop (26);

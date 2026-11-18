@@ -49,7 +49,9 @@ private:
     juce::ToggleButton sustainToggle { "Sustain pedal (CC64)" }, clockToggle { "Send MIDI Clock" };
     juce::TextEditor clockOffsetEdit;
     juce::TextButton applyButton { "APPLY" }, testButton { "TEST NOTE" }, recallButton { "SEND PRESET" },
-                     refreshButton { "Rescan" };
+                     refreshButton { "Rescan" }, measureButton { "MEASURE DELAY" };
+    juce::ComboBox measureInBox;
+    bool wasMeasuring = false;
 
     struct TrackRow
     {

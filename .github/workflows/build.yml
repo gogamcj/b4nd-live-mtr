@@ -209,6 +209,35 @@ jobs:
           grep -q "DSP overloads 0" play8.txt
           grep -q "DSP overloads 0" play2.txt
 
+      - name: Latency measurement test (JACK dummy, in-ear output patched into an input)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndlat
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          jackd -n b4ndlat -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          # With a cable: OUT2 (in-ear, the 2-out split) -> IN1. The app waits 3 s before measuring.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-latency.png --audio-settings \
+            --with-audio --measure-latency 1 | tee latency.txt &
+          RUN=$!
+          for i in $(seq 1 40); do
+            OUT=$(jack_lsp | grep -v '^system' | grep ':out_2$' || true)
+            IN=$(jack_lsp | grep -v '^system' | grep ':in_1$' || true)
+            if [ -n "$OUT" ] && [ -n "$IN" ]; then jack_connect "$OUT" "$IN"; break; fi
+            sleep 0.25
+          done
+          wait $RUN
+          grep -q "latency result: ok" latency.txt
+          # A JACK client-to-client connection delays by exactly one period.
+          grep -q "Round trip 5.33 ms" latency.txt
+          # Without a cable the measurement must fail, not invent a number.
+          if xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-latency-nocable.png --audio-settings \
+               --with-audio --measure-latency 1 | tee latency-nocable.txt; then
+            echo "expected a failure without a cable"; exit 1
+          fi
+          grep -q "nothing heard on the input" latency-nocable.txt
+          pkill -f "jackd -n b4ndlat" || true
+
       - name: Project save / reopen / crash recovery test
         run: |
           set -o pipefail
