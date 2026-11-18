@@ -278,8 +278,12 @@ jobs:
           xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems-reopened.png --size 1600x960 \
             --project ai-test.b4nd --at 10 | tee stems-reopen.txt
           grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' stems-reopen.txt
-          grep -Eq 'track "Vocals \(stem\)" AUDIO 0.0 dB MUTE media=vocals.wav STEM of ai-song.wav ai=[0-9]+%' stems-reopen.txt
-          grep -Eq 'track "Bass \(stem\)" AUDIO 0.0 dB MUTE media=bass.wav STEM of ai-song.wav' stems-reopen.txt
+          # The synthetic song has drums, bass and a pad: Demucs puts the pad in "other"; vocals,
+          # guitar and piano come out empty and get no track.
+          grep -Eq 'track "Bass \(stem\)" AUDIO 0.0 dB MUTE media=bass.wav STEM of ai-song.wav ai=[0-9]+%' stems-reopen.txt
+          grep -Eq 'track "Drums \(stem\)" AUDIO 0.0 dB MUTE media=drums.wav STEM of ai-song.wav' stems-reopen.txt
+          grep -Eq 'track "Other \(stem\)" AUDIO 0.0 dB MUTE media=other.wav STEM of ai-song.wav' stems-reopen.txt
+          if grep -q 'track "Vocals (stem)"' stems-reopen.txt; then echo "an empty stem got a track"; exit 1; fi
           grep -q "missing media: 0" stems-reopen.txt
 
       - name: Launch app under Xvfb (smoke test)

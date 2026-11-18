@@ -306,6 +306,8 @@ public:
     juce::String startAnalysis (int trackIndex = -1, juce::StringArray tasks = {});
     void cancelAnalysis();
     AnalyzerRunner::Status getAnalysisStatus() const { return analyzer.getStatus(); }
+    /** Running, or finished but its result not yet taken in (that happens on the next timer tick). */
+    bool isAnalysisPending() const { return analyzer.isBusy() || analyzer.getStatus().state != lastAnalysisState; }
     AnalyzerRunner& getAnalyzer() noexcept { return analyzer; }
     /** Last analysis result of the current song (from this session or its result.json), or nullptr. */
     const AnalysisResult* getAnalysisResult();

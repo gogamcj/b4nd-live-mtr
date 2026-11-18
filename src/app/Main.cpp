@@ -433,7 +433,9 @@ private:
         }
         if (phase == 5)   // analysis running (separate process)
         {
-            if (state->getAnalyzer().isBusy() && elapsed < 600.0)
+            // Wait until the app has taken the result in, not only until the process ended:
+            // applying before that would apply the previous result.
+            if (state->isAnalysisPending() && elapsed < 600.0)
                 return;
             if (state->getAnalyzer().isBusy())
                 state->cancelAnalysis();
