@@ -25,6 +25,7 @@ struct Rig
         for (int i = 0; i < 2; ++i) ptrs[i] = buf[i].data();
         engine.prepare (sr, block, 2, 0);
         engine.setRouting (OutputRouting::createForDevice (2));
+        engine.setLimiterEnabled (false);   // timing checks against the device latency; see the limiter test
         // Offline, callbacks run back to back (microseconds apart): the jitter filter would see
         // a "late device" and relock every time. These tests check the per-callback relation;
         // the filter has its own test below with a simulated clock.
@@ -498,4 +499,19 @@ TEST_CASE ("MIDI engine: locate chase sends program / controllers and restarts h
         for (const auto& e : r.got) offs48 += (e.msg.isNoteOff() && e.msg.data[1] == 48) ? 1 : 0;
         CHECK (offs48 == (muted ? 0 : 1));
     }
+}
+
+TEST_CASE ("MIDI engine: with the PA limiter on, module notes leave 1 ms later to match the PA")
+{
+    Rig r;
+    r.engine.setLimiterEnabled (true);
+    r.engine.setOutputLatencyMs (10.0);
+    r.engine.setPlan (planWithNotes ({ on (1000, 60), off (24000, 60) }, 0, 3), sr);
+    r.cmd (EngineCommand::Type::Play);
+    r.run (200);
+    CHECK (r.got.size() == 2);
+    if (r.got.size() != 2) return;
+    const double want = (double) (1000 - r.callbackPos[0]) / 48.0 + 10.0 + 1.0;
+    const double got = (double) (r.got[0].dueNs - r.callbackNs[0]) / 1e6;
+    CHECK (got > want - 0.3 && got < want + 0.3);
 }

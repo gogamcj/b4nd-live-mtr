@@ -47,9 +47,17 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
     {
         // Master: Main bus (PA) only. Click, guide and in-ear monitor are never affected.
         fader.onValueChange = [this] { state.setMasterVolume ((float) fader.getValue()); };
-        soloButton.setVisible (false);
-        muteButton.setVisible (false);
         pan.setVisible (false);
+        // M -> LIM (Main limiter on/off), S -> CLIP (latched over-0 dBFS warning, click clears).
+        muteButton.setButtonText ("LIM");
+        muteButton.setClickingTogglesState (false);
+        muteButton.setColour (juce::TextButton::buttonOnColourId, theme::ok.darker (0.3f));
+        muteButton.setTooltip ("PA limiter (-0.3 dBFS ceiling). Locked in Live Mode.");
+        muteButton.onClick = [this] { state.setLimiterEnabled (! state.isLimiterEnabled()); syncFromState(); };
+        soloButton.setButtonText ("CLIP");
+        soloButton.setColour (juce::TextButton::buttonOnColourId, theme::danger);
+        soloButton.setTooltip ("Lights when the PA mix went over 0 dBFS. Click to clear.");
+        soloButton.onClick = [this] { state.clearClipLatches(); };
     }
 
     syncFromState();
@@ -60,6 +68,9 @@ void ChannelStrip::syncFromState()
     if (track < 0)
     {
         fader.setValue (state.getMasterVolumeDb(), juce::dontSendNotification);
+        muteButton.setToggleState (state.isLimiterEnabled(), juce::dontSendNotification);
+        muteButton.setEnabled (! state.isLiveMode());
+        soloButton.setToggleState (state.isPAClipLatched(), juce::dontSendNotification);
         return;
     }
     const auto* song = state.getCurrentSong();
@@ -83,6 +94,12 @@ void ChannelStrip::paint (juce::Graphics& g)
 
     const auto* song = state.getCurrentSong();
     juce::String name = "MASTER", route = "MAIN BUS";
+    if (track < 0)
+    {
+        const float gr = state.getLimiterReductionDb();
+        route = ! state.isLimiterEnabled() ? juce::String ("LIMITER OFF")
+                : gr < -0.05f ? "GR " + juce::String (gr, 1) + " dB" : juce::String ("LIMITER 0.0");
+    }
     juce::Colour c = theme::accent;
     if (track >= 0 && song != nullptr && juce::isPositiveAndBelow (track, (int) song->tracks.size()))
     {
@@ -189,6 +206,8 @@ void MixerPanel::timerCallback()
 {
     for (auto* s : strips) s->updateMeter();
     master->updateMeter();
+    master->syncFromState();   // limiter GR and the clip latch change all the time
+    master->repaint();
     for (auto* m : outputMeters) m->update();
 }
 

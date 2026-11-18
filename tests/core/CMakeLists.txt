@@ -6,7 +6,8 @@ add_executable(b4nd_core_tests
     MidiTests.cpp
     SampleClockTests.cpp
     MidiChaseTests.cpp
-    LatencyProbeTests.cpp)
+    LatencyProbeTests.cpp
+    LimiterTests.cpp)
 
 target_link_libraries(b4nd_core_tests PRIVATE b4nd_core)
 add_test(NAME b4nd_core_tests COMMAND b4nd_core_tests)

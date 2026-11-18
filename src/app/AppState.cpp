@@ -469,6 +469,25 @@ void AppState::setMasterVolume (float db)
     sendChangeMessage();
 }
 
+void AppState::setLimiterEnabled (bool on)
+{
+    if (liveMode || on == limiterOn)
+        return;   // never switched during a show: it moves the PA path by 1 ms
+    limiterOn = on;
+    engine.setLimiterEnabled (on);
+    juce::Logger::writeToLog (juce::String ("Main limiter ") + (on ? "ON" : "OFF"));
+    markDirty();
+    sendChangeMessage();
+}
+
+bool AppState::isPAClipLatched() const
+{
+    for (int o = 0; o < juce::jmin (routing.getNumOutputs(), AudioEngine::maxOutputs); ++o)
+        if (routing.getOutput (o).isPA && engine.isClipLatched (o))
+            return true;
+    return false;
+}
+
 void AppState::setTrackPan (int trackIndex, float pan)
 {
     if (auto* s = currentSongMutable())
@@ -1544,6 +1563,11 @@ void AppState::timerCallback()
             outputLevels[(size_t) i] = engine.takeOutputPeak (i);
         for (int i = 0; i < (int) trackLevels.size(); ++i)
             trackLevels[(size_t) i] = engine.takeTrackPeak (i);
+        {
+            const float g = engine.takeLimiterGain();
+            const float db = g < 1.0f ? juce::Decibels::gainToDecibels (g, -60.0f) : 0.0f;
+            limiterGrDb = db < limiterGrDb ? db : juce::jmin (0.0f, limiterGrDb + 0.5f);   // fall back ~15 dB/s
+        }
 
         EngineEvent ev;
         while (engine.popEvent (ev))

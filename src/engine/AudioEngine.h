@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "core/LatencyProbe.h"
+#include "core/Limiter.h"
 #include "core/SampleClock.h"
 #include "core/OutputRouting.h"
 #include "core/SpscQueue.h"
@@ -149,6 +151,27 @@ public:
 
     void setMasterGain (float linear) noexcept       { masterGain.store (linear, std::memory_order_relaxed); }
 
+    // --- click (docs/06) ---
+    /** 1 = beats, 2 = 8ths, 4 = 16ths (quieter subdivision clicks). Takes effect at once. */
+    void setClickSubdivision (int perBeat) noexcept { clickSubdivision.store (perBeat == 2 || perBeat == 4 ? perBeat : 1, std::memory_order_relaxed); }
+    void setClickAccent (bool on) noexcept          { clickAccentOn.store (on, std::memory_order_relaxed); }
+    /** Bars of click before the song when PLAY starts from stop (0-4). Not after a pause. */
+    void setCountInBars (int bars) noexcept         { countInBars.store (std::clamp (bars, 0, 4), std::memory_order_relaxed); }
+    bool isCountingIn() const noexcept              { return countingIn.load (std::memory_order_relaxed); }
+
+    // --- Main (PA) bus limiter and meters (docs/06 §6) ---
+    /** On by default: -0.3 dBFS ceiling, 1 ms look-ahead (adds 1 ms to the PA path only;
+        external MIDI is scheduled 1 ms later to stay aligned). */
+    void setLimiterEnabled (bool on) noexcept       { limiterOn.store (on, std::memory_order_relaxed); }
+    bool isLimiterEnabled() const noexcept          { return limiterOn.load (std::memory_order_relaxed); }
+    /** Lowest limiter gain since the last call (1 = not limiting). */
+    float takeLimiterGain() noexcept                { return limiterGain.exchange (1.0f, std::memory_order_relaxed); }
+    /** Main bus went over 0 dBFS before the limiter (or reached an output without it). Latched. */
+    bool isClipLatched (int output) const noexcept  { return output >= 0 && output < maxOutputs && clipLatch[(size_t) output].load (std::memory_order_relaxed); }
+    void clearClipLatches() noexcept                { for (auto& c : clipLatch) c.store (false, std::memory_order_relaxed); }
+    /** RMS over ~300 ms per output (0..1). */
+    float getOutputRms (int output) const noexcept  { return output >= 0 && output < maxOutputs ? rmsTelemetry[(size_t) output].load (std::memory_order_relaxed) : 0.0f; }
+
     // --- external MIDI (docs/04) ---
     /** MIDI output thread (single consumer). */
     bool popMidi (MidiOutEvent& e) noexcept { return midiOut.pop (e); }
@@ -199,6 +222,11 @@ private:
     void renderChunk (float* const* outputs, int numOutputs, int numSamples) noexcept;
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
+    void renderCountIn (int numSamples) noexcept;
+    void startCountIn() noexcept;
+    void startClickVoice (int kind) noexcept;   // 0 accent, 1 normal, 2 subdivision
+    void renderClickVoice (const PlaybackPlan&, float* out, int from, int to, float gain, float& peak) noexcept;
+    float clickGain (const PlaybackPlan&) const noexcept;
     void renderMidi (int numSamples) noexcept;
     void renderMidiClock (int numSamples) noexcept;
     void stopMidiClock() noexcept;
@@ -255,11 +283,27 @@ private:
     // Bus buffers [kind][channel], sized in prepare().
     std::array<std::array<std::vector<float>, 2>, numBusKinds> busBuffers;
     std::atomic<float> masterGain { 1.0f };
+    Limiter limiter;                                 // audio thread only
+    bool limiterWasOn = true;
+    std::atomic<bool> limiterOn { true };
+    std::atomic<float> limiterGain { 1.0f };
+    std::array<std::atomic<bool>, maxOutputs> clipLatch {};
+    std::array<float, maxOutputs> rmsState {};        // audio thread only (mean square)
+    std::array<std::atomic<float>, maxOutputs> rmsTelemetry {};
+    float rmsCoef = 0.0f;
+    bool mainOverLatch = false;                       // this callback's Main mix went over 0 dBFS
+    /** When a sample reaches the speakers of the PA, after the device and the limiter. */
+    std::int64_t paLatencyNs() const noexcept;
     std::atomic<float> monitorClick { 1.0f }, monitorGuide { 1.0f }, monitorMain { 0.0f };
 
     // Click voice (audio thread only)
     int clickVoicePos = -1;
-    bool clickVoiceAccent = false;
+    int clickVoiceKind = 1;
+    std::atomic<int> clickSubdivision { 1 }, countInBars { 0 };
+    std::atomic<bool> clickAccentOn { true }, countingIn { false };
+    std::int64_t countInLeft = 0, countInLength = 0;   // audio thread only
+    double countInBeatSamples = 24000.0;
+    int countInBeatsPerBar = 4;
     std::int64_t lastRenderEnd = -1;
     std::array<RouteSlot, maxOutputs> routes;
     std::array<std::atomic<float>, maxOutputs> peaks {};

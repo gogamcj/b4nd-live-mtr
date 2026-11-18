@@ -7,6 +7,7 @@
 #include <memory>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 using namespace b4nd;
@@ -38,6 +39,7 @@ struct Player
         }
         engine.prepare (sr, block, outs, 0);
         engine.setRouting (routing);
+        engine.setLimiterEnabled (false);   // sample-exact checks; the limiter has its own tests
     }
 
     void command (EngineCommand::Type t, std::int64_t samples = 0)
@@ -434,4 +436,188 @@ TEST_CASE ("Playback: rendering tracks, click and plan swaps never allocates")
     pl.engine.collectGarbage();
     CHECK (allocs == 0);
     CHECK (allocsSwap == 0);
+}
+
+TEST_CASE ("Limiter in the engine: a too-hot MR never passes -0.3 dBFS on the PA, click untouched, clip latched")
+{
+    Player pl;
+    pl.engine.setLimiterEnabled (true);
+    auto p = planWithTrack (TrackRole::Audio, BusKind::Main, constantData (2, 96000, 0.9f, 0.9f));
+    addClick (*p, 120.0);
+    pl.engine.setPlan (std::move (p), sr);
+    pl.engine.setTrackGain (0, 2.0f);   // MR pushed to +5 dBFS
+    pl.engine.setMasterGain (1.0f);
+    pl.command (EngineCommand::Type::Play);
+    std::size_t allocs = 0;
+    {
+        b4ndtest::AllocationGuard g;
+        pl.engine.process (nullptr, 0, pl.ptrs.data(), pl.numOutputs, 256);
+        allocs = g.count();
+    }
+    pl.run (48000);
+    CHECK (allocs == 0);
+    CHECK (pl.peak (0) <= 0.9661f);
+    CHECK (pl.peak (1) <= 0.9661f);
+    CHECK (pl.peak (0) > 0.9f);              // limited, not muted
+    CHECK (pl.engine.takeLimiterGain() < 0.6f);
+    CHECK (pl.engine.isClipLatched (0));     // the Main mix went over: warn the operator
+    CHECK (pl.engine.isClipLatched (1));
+    CHECK (! pl.engine.isClipLatched (2));   // click output is fine
+    CHECK (pl.peak (2) > 0.1f);              // the click is unaffected by the PA limiter
+    pl.engine.clearClipLatches();
+    CHECK (! pl.engine.isClipLatched (0));
+    CHECK (pl.engine.getOutputRms (0) > 0.8f);
+
+    // Same song with the limiter off: the overload reaches the output (and is latched).
+    Player raw;
+    auto q = planWithTrack (TrackRole::Audio, BusKind::Main, constantData (2, 96000, 0.9f, 0.9f));
+    raw.engine.setPlan (std::move (q), sr);
+    raw.engine.setTrackGain (0, 2.0f);
+    raw.command (EngineCommand::Type::Play);
+    raw.run (24000);
+    CHECK (raw.peak (0) > 1.5f);
+    CHECK (raw.engine.isClipLatched (0));
+}
+
+TEST_CASE ("Limiter in the engine: the PA path is 1 ms later, the click is not")
+{
+    int clickOff = -1;
+    for (bool on : { false, true })
+    {
+        Player pl;
+        pl.engine.setLimiterEnabled (on);
+        auto p = planWithTrack (TrackRole::Audio, BusKind::Main, constantData (2, 48000, 0.5f, 0.5f), 4800);
+        addClick (*p, 60.0);   // first click at sample 0, next at 48000
+        pl.engine.setPlan (std::move (p), sr);
+        pl.command (EngineCommand::Type::Play);
+        pl.run (12000);
+        const auto mr = pl.onsets (0);
+        const auto click = pl.onsets (2);
+        CHECK (! mr.empty());
+        CHECK (! click.empty());
+        if (mr.empty() || click.empty()) continue;
+        CHECK (mr[0] == 4800 + (on ? 48 : 0));
+        CHECK (click[0] < 10);   // the click sound's own rise
+        if (! on) clickOff = click[0];
+        else CHECK (click[0] == clickOff);
+    }
+}
+
+namespace
+{
+/** Peak of the click output in a 2 ms window from each onset. */
+std::vector<float> onsetPeaks (const Player& pl, int ch, const std::vector<int>& at)
+{
+    std::vector<float> r;
+    for (int o : at)
+    {
+        float p = 0.0f;
+        for (int i = o; i < o + 96 && i < (int) pl.recorded[(size_t) ch].size(); ++i)
+            p = std::max (p, std::abs (pl.recorded[(size_t) ch][(size_t) i]));
+        r.push_back (p);
+    }
+    return r;
+}
+}
+
+TEST_CASE ("Click: 8th and 16th subdivisions are quieter, accent can be switched off")
+{
+    for (int sub : { 2, 4 })
+    {
+        Player pl;
+        auto p = std::make_unique<PlaybackPlan>();
+        p->lengthSamples = (std::int64_t) (sr * 10);
+        addClick (*p, 120.0);
+        pl.engine.setPlan (std::move (p), sr);
+        pl.engine.setClickSubdivision (sub);
+        pl.command (EngineCommand::Type::Play);
+        pl.run (48000 * 2 + 256);   // one 4/4 bar at 120 bpm = 2 s
+        const auto on = pl.onsets (2, 0.05f);
+        const int step = 24000 / sub;
+        CHECK ((int) on.size() == 4 * sub + 1);
+        const auto pk = onsetPeaks (pl, 2, on);
+        for (size_t i = 0; i < on.size() && i < pk.size(); ++i)
+        {
+            CHECK (std::abs (on[i] - (int) i * step) < 10);
+            const bool bar = i % (size_t) (4 * sub) == 0, beat = i % (size_t) sub == 0;
+            CHECK_NEAR (pk[i], bar ? 0.7f : beat ? 0.5f : 0.3f, 0.03f);
+        }
+    }
+    {
+        Player pl;
+        auto p = std::make_unique<PlaybackPlan>();
+        p->lengthSamples = (std::int64_t) (sr * 10);
+        addClick (*p, 120.0);
+        pl.engine.setPlan (std::move (p), sr);
+        pl.engine.setClickAccent (false);
+        pl.command (EngineCommand::Type::Play);
+        pl.run (48000 * 2 + 256);
+        for (float v : onsetPeaks (pl, 2, pl.onsets (2, 0.05f)))
+            CHECK_NEAR (v, 0.5f, 0.03f);
+    }
+}
+
+TEST_CASE ("Click: count-in plays one bar of click before the song, only from stop")
+{
+    Player pl;
+    auto p = planWithTrack (TrackRole::Audio, BusKind::Main, constantData (2, 480000, 0.5f, 0.5f));
+    addClick (*p, 120.0);
+    pl.engine.setPlan (std::move (p), sr);
+    pl.engine.setCountInBars (1);
+    pl.command (EngineCommand::Type::Play);
+    pl.run (256);
+    CHECK (pl.engine.isCountingIn());
+    CHECK (pl.engine.getPosition() == 0);
+    pl.run (96000 + 24000);
+    CHECK (! pl.engine.isCountingIn());
+    const auto mr = pl.onsets (0);
+    CHECK (! mr.empty());
+    // The MR starts after exactly one bar (its first samples ramp up through the gain smoothing).
+    if (! mr.empty()) CHECK (mr[0] >= 96000 && mr[0] < 96000 + 64);
+    const auto click = pl.onsets (2, 0.05f);
+    const auto pk = onsetPeaks (pl, 2, click);
+    CHECK (click.size() == 6);   // 4 count-in + song beats at 96000 and 120000
+    if (click.size() == 6)
+    {
+        for (int i = 0; i < 6; ++i) CHECK (std::abs (click[(size_t) i] - i * 24000) < 10);
+        CHECK_NEAR (pk[0], 0.7f, 0.03f);   // count-in bar accent
+        CHECK_NEAR (pk[1], 0.5f, 0.03f);
+        CHECK_NEAR (pk[4], 0.7f, 0.03f);   // the song's bar 1
+    }
+    // Ran 256 + 120064 samples (whole blocks); the first 96000 were count-in.
+    CHECK (pl.engine.getPosition() == 256 + 120064 - 96000);
+
+    // Pause and resume: no second count-in.
+    pl.command (EngineCommand::Type::Pause);
+    pl.run (256);
+    pl.command (EngineCommand::Type::Play);
+    pl.run (256);
+    CHECK (! pl.engine.isCountingIn());
+
+    // Stop during a count-in cancels it; the song never starts.
+    pl.command (EngineCommand::Type::Stop);
+    pl.run (4800);
+    pl.command (EngineCommand::Type::Locate, 0);
+    pl.command (EngineCommand::Type::Play);
+    pl.run (2560);
+    CHECK (pl.engine.isCountingIn());
+    pl.command (EngineCommand::Type::Stop);
+    pl.clear();
+    pl.run (96000 + 4800);
+    CHECK (pl.peak (0) < 1.0e-6f);
+    CHECK (! pl.engine.isCountingIn());
+}
+
+TEST_CASE ("Click: every tone has accent, normal and subdivision sounds at the set levels")
+{
+    for (auto tone : { ClickTone::Beep, ClickTone::Wood, ClickTone::Stick })
+    {
+        const auto c = PlaybackPlan::makeClick (tone, sr);
+        auto peak = [] (const std::vector<float>& v) { float p = 0.0f; for (float x : v) p = std::max (p, std::abs (x)); return p; };
+        CHECK_NEAR (peak (c.accent), 0.7f, 0.02f);
+        CHECK_NEAR (peak (c.normal), 0.5f, 0.02f);
+        CHECK_NEAR (peak (c.sub), 0.3f, 0.02f);
+        CHECK (c.accent.size() < (size_t) (0.05 * sr));   // short: never smears into the next beat
+        for (float x : c.accent) CHECK (std::isfinite (x));
+    }
 }

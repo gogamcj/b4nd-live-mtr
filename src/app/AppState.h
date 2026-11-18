@@ -176,6 +176,14 @@ public:
     /** Master fader: Main (PA) bus only. */
     void setMasterVolume (float db);
     float getMasterVolumeDb() const noexcept { return masterDb; }
+    /** Main (PA) bus limiter, -0.3 dBFS. On by default; saved with the project. Locked in Live Mode. */
+    void setLimiterEnabled (bool on);
+    bool isLimiterEnabled() const noexcept { return limiterOn; }
+    /** Current limiter gain reduction in dB (0 = none, negative = limiting), decays on the UI side. */
+    float getLimiterReductionDb() const noexcept { return limiterGrDb; }
+    /** Some PA output (or the Main mix) went over 0 dBFS since the last clear. */
+    bool isPAClipLatched() const;
+    void clearClipLatches() { engine.clearClipLatches(); sendChangeMessage(); }
 
     // --- media ---
     /** Assigns an audio file to an Audio/Guide track, or adds a new Audio track (trackIndex < 0).
@@ -331,6 +339,8 @@ private:
     bool emergency = false;
     bool liveMode = false;
     float masterDb = 0.0f;
+    bool limiterOn = true;
+    float limiterGrDb = 0.0f;
 
     OutputRouting routing = OutputRouting::createDefault (8);
 
