@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <mutex>
 #include <thread>
+#include <chrono>
+#include <atomic>
 
 using namespace b4nd;
 
@@ -44,10 +46,16 @@ public:
     }
     void send (int slot, const MidiBytes& b) override
     {
+        if (stallMs > 0)   // a driver call or a wake-up that takes long (Windows timer, busy CPU)
+        {
+            std::this_thread::sleep_for (std::chrono::milliseconds (stallMs));
+            stallMs = 0;
+        }
         const auto t = AudioEngine::clockNs();
         std::lock_guard<std::mutex> l (m);
         sent.push_back ({ slot, b, t });
     }
+    std::atomic<int> stallMs { 0 };
 
     void setPorts (std::vector<MidiPortInfo> p) { std::lock_guard<std::mutex> l (m); ports = std::move (p); }
     std::vector<Sent> takeSent() { std::lock_guard<std::mutex> l (m); auto r = sent; sent.clear(); return r; }
@@ -175,6 +183,29 @@ TEST_CASE ("MIDI out: messages leave at their due time, never early, in order")
     std::printf ("    timing: median %.3f ms, max %.3f ms late\n", median, lateMs.empty() ? 0.0 : lateMs.back());
     CHECK (median < 1.5);   // a shared CI VM still manages this; a show PC is far better
     svc.shutdown();
+}
+
+TEST_CASE ("MIDI out: bank / program gaps hold even when the MIDI thread is late")
+{
+    auto fake = std::make_unique<FakeBackend>();
+    auto* be = fake.get();
+    be->setPorts ({ { "UM-ONE", "id-1" } });
+    be->stallMs = 25;   // the first send (reset) blocks well past the bank and program due times
+    MidiOutputService svc (nullptr, std::move (fake));
+    svc.start (false);
+    svc.setModules ({ module ("UM-ONE", 3) });
+    waitFor ([&] { return be->sentCount() >= 7; });
+    const auto got = be->takeSent();
+    CHECK (got.size() == 7);
+    if (got.size() == 7)
+    {
+        CHECK (isCc (got[2].msg, 0, 87));
+        CHECK (isCc (got[3].msg, 32, 64));
+        CHECK (got[4].msg.status() == 0xc0);
+        CHECK (got[2].atNs - got[1].atNs >= 4'900'000);   // gap after the reset messages
+        CHECK (got[3].atNs - got[2].atNs >= 4'900'000);   // MSB -> LSB
+        CHECK (got[4].atNs - got[3].atNs >= 4'900'000);   // LSB -> program
+    }
 }
 
 TEST_CASE ("MIDI out: preset recall order and Ready status after the settle time")

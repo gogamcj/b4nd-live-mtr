@@ -311,8 +311,14 @@ void MidiOutputService::queueRecall (int slot)
     auto& s = slots[(size_t) slot];
     double readyAt = 0.0;
     const double start = s.profile.gapMs > 0 ? (double) s.profile.gapMs : 0.0;   // after the reset messages
+    double prevAt = -start;   // the first one keeps its gap after the reset messages
     for (const auto& m : presetRecallSequence (s.profile, &readyAt))
-        sendLater (slot, m.msg, start + m.atMs);
+    {
+        // The gap is kept relative to the previous message actually sent, so a late wake-up of
+        // the MIDI thread cannot squeeze bank MSB / LSB / program together.
+        sendLater (slot, m.msg, start + m.atMs, (std::max) (0.0, m.atMs - prevAt));
+        prevAt = m.atMs;
+    }
     s.readyAtMs = nowMs() + start + readyAt;
     setStatus (slot, PortStatus::Preparing);
 }
@@ -331,9 +337,10 @@ void MidiOutputService::sendTestNote (int slot, int note, int velocity, int leng
     sendLater (slot, MidiBytes::make ((std::uint8_t) (0x80 | ch), (std::uint8_t) (note & 0x7f), 0), (double) (std::max) (10, lengthMs));
 }
 
-void MidiOutputService::sendLater (int slot, const MidiBytes& m, double delayMs)
+void MidiOutputService::sendLater (int slot, const MidiBytes& m, double delayMs, double minGapMs)
 {
     Pending p;
+    p.minGapNs = (std::int64_t) ((std::max) (0.0, minGapMs) * 1.0e6);
     p.dueNs = AudioEngine::clockNs() + (std::int64_t) ((std::max) (0.0, delayMs) * 1.0e6);
     p.slot = slot;
     p.msg = m;
@@ -469,11 +476,38 @@ void MidiOutputService::run()
         }
 
         const auto now = AudioEngine::clockNs();
-        size_t n = 0;
-        while (n < pending.size() && pending[n].dueNs <= now + sendAheadNs)
-            sendOnThread (pending[n++]);
-        if (n > 0)
-            pending.erase (pending.begin(), pending.begin() + (std::ptrdiff_t) n);
+        std::array<std::int64_t, maxSlots> holdUntil {};   // a slot held back for a gap keeps its order
+        bool anySent = false, deferred = false;
+        for (size_t i = 0; i < pending.size() && pending[i].dueNs <= now + sendAheadNs; ++i)
+        {
+            auto& p = pending[i];
+            const bool validSlot = p.slot >= 0 && p.slot < maxSlots;
+            if (validSlot)
+            {
+                const auto slot = (size_t) p.slot;
+                std::int64_t notBefore = holdUntil[slot];
+                if (p.minGapNs > 0 && lastSentNs[slot] > 0)
+                    notBefore = (std::max) (notBefore, lastSentNs[slot] + p.minGapNs);
+                if (notBefore > now + sendAheadNs)
+                {
+                    p.dueNs = (std::max) (p.dueNs, notBefore);
+                    holdUntil[slot] = p.dueNs;
+                    deferred = true;
+                    continue;
+                }
+            }
+            sendOnThread (p);
+            if (validSlot)
+                lastSentNs[(size_t) p.slot] = AudioEngine::clockNs();
+            p.done = true;
+            anySent = true;
+        }
+        if (anySent)
+            pending.erase (std::remove_if (pending.begin(), pending.end(), [] (const Pending& p) { return p.done; }),
+                           pending.end());
+        if (deferred)
+            std::sort (pending.begin(), pending.end(), [] (const Pending& a, const Pending& b)
+                       { return a.dueNs != b.dueNs ? a.dueNs < b.dueNs : a.seq < b.seq; });
 
         if (pending.empty())
         {
