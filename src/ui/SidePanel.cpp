@@ -2,6 +2,7 @@
 #include "core/TimeFormat.h"
 #include "ui/AnalysisPanel.h"
 #include "ui/FootswitchPanel.h"
+#include "ui/SetlistPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -72,9 +73,11 @@ SidePanel::SidePanel (AppState& s) : state (s)
     modulesButton.setTooltip ("External MIDI sound modules: ports, channels, presets, status (Ctrl+M)");
     pluginsButton.onClick = [this] { showPluginWindow (state); };
     pluginsButton.setTooltip ("VST3 plugins: scan, Live Certified status, which plugin each VSTi track plays (Ctrl+P)");
+    setlistButton.onClick = [this] { showSetlistWindow (state); };
+    setlistButton.setTooltip ("Setlist: order, add / delete songs, start times, total, which songs are in RAM (Ctrl+L)");
     footswitchButton.onClick = [this] { showFootswitchWindow (state); };
     footswitchButton.setTooltip ("Footswitch / MIDI control: inputs, pedal mapping, MIDI Learn (Ctrl+F)");
-    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton })
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton, &setlistButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -189,6 +192,19 @@ void SidePanel::paintListBoxItem (int row, juce::Graphics& g, int width, int hei
     g.drawText (juce::String (song.tempo.bpmAtBeat (0.0), 0) + " BPM  " + song.key + "  "
                     + formatSeconds (song.lengthSeconds, false),
                 text, juce::Justification::topLeft);
+    // audio not ready for this song: loading, out of RAM, missing
+    const auto m = state.getSongMedia (row);
+    juce::String flag;
+    juce::Colour fc = theme::textDim;
+    if (m.missing + m.errors > 0) { flag = "MISSING"; fc = theme::danger; }
+    else if (m.loading > 0)      { flag = "LOADING"; fc = theme::warn; }
+    else if (m.unloaded > 0)     { flag = "NOT IN RAM"; }
+    if (flag.isNotEmpty())
+    {
+        g.setColour (fc);
+        g.setFont (theme::font (10.0f, true));
+        g.drawText (flag, text, juce::Justification::topRight);
+    }
 }
 
 void SidePanel::listBoxItemClicked (int row, const juce::MouseEvent&)
@@ -235,7 +251,8 @@ void SidePanel::resized()
     const int n = aiButtons.size();
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
-    totalArea = r.removeFromBottom (26);
+    totalArea = r.removeFromBottom (30);
+    setlistButton.setBounds (totalArea.removeFromRight (110).reduced (4, 3));
     footswitchButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     pluginsButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));

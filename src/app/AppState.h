@@ -45,7 +45,7 @@ struct TrackInfo
     juce::String mediaPath;            // empty: no media assigned
     double mediaStartSeconds = 0.0;
 
-    enum class MediaStatus { None, Loading, Ready, Missing, Error };
+    enum class MediaStatus { None, Loading, Ready, Missing, Error, Unloaded };   // Unloaded: out of the RAM window (Phase 13)
     MediaStatus mediaStatus = MediaStatus::None;
     juce::String mediaError;
     std::shared_ptr<const AudioData> media;   // decoded at mediaRate
@@ -223,10 +223,32 @@ public:
 
     struct MediaSummary
     {
-        int loading = 0, missing = 0, errors = 0, ready = 0;
+        int loading = 0, missing = 0, errors = 0, ready = 0, unloaded = 0;
         std::int64_t ramBytes = 0;
+        std::int64_t setlistBytes = 0;   // estimate: every song's media decoded
+        std::int64_t budgetBytes = 0;
+        bool windowed = false;           // more than the budget: only previous / current / next song in RAM
     };
     MediaSummary getMediaSummary() const;
+
+    /** Media of one song: what is in RAM, loading, missing. */
+    struct SongMedia { int tracks = 0, ready = 0, loading = 0, missing = 0, errors = 0, unloaded = 0; std::int64_t bytes = 0; };
+    SongMedia getSongMedia (int songIndex) const;
+    /** True when the song can be played with all its audio. */
+    bool isSongReady (int songIndex) const;
+    /** RAM for decoded media (B4ND_MEDIA_BUDGET_MB, else half the PC's RAM, at most 12 GB). */
+    static std::int64_t mediaBudgetBytes();
+    /** Takes finished decodes in now (command line tests that wait without the message loop). */
+    void pollMediaForTests() { applyFinishedMedia(); }
+
+    // --- setlist (Phase 13) ---
+    /** All rejected in Live Mode and while playing. Empty string on success. */
+    juce::String addSong (const juce::String& title, int atIndex = -1);
+    juce::String removeSong (int index);
+    juce::String moveSong (int from, int to);
+    juce::String setSongInfo (int index, const juce::String& title, const juce::String& artist);
+    /** Start time of each song in the show (song lengths added up) and the total. */
+    std::vector<double> getSongStartTimes() const;
 
     /** RAM above this is reported as a warning (docs/03 §6). */
     static constexpr std::int64_t ramWarningBytes = (std::int64_t) 4 * 1024 * 1024 * 1024;
@@ -403,6 +425,12 @@ private:
 
     double mediaSampleRate() const noexcept;
     void requestAllMedia();
+    std::map<juce::String, std::int64_t> mediaEstimates;   // path -> decoded bytes (from the header)
+    bool mediaWindowed = false;
+    std::int64_t setlistBytesEstimate = 0;
+    int purgeTicks = 0;
+    std::int64_t estimateSetlistBytes();
+    juce::String guardSetlistChange() const;
     void applyFinishedMedia();
     void rebuildPlan();
     void pushMixerToEngine();

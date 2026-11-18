@@ -134,7 +134,16 @@ void LiveModeView::paint (juce::Graphics& g)
     nextArea.removeFromTop (28 + 38);   // leave room for the exit button
     g.setColour (theme::textDim);
     g.setFont (theme::font (16.0f, true));
-    g.drawText ("NEXT", nextArea.removeFromTop (22), juce::Justification::centredRight);
+    {
+        // The next song's audio must be in RAM before the band gets there.
+        const int ni = state.getCurrentSongIndex() + 1;
+        const auto nm = state.getSongMedia (ni);
+        const bool bad = next != nullptr && nm.missing + nm.errors > 0;
+        const bool loading = next != nullptr && ! bad && ! state.isSongReady (ni);
+        g.setColour (bad ? theme::danger : loading ? theme::warn : theme::textDim);
+        g.drawText (bad ? "NEXT  -  AUDIO MISSING" : loading ? "NEXT  -  LOADING " + juce::String (nm.ready) + "/" + juce::String (nm.tracks) : juce::String ("NEXT"),
+                    nextArea.removeFromTop (22), juce::Justification::centredRight);
+    }
     g.setColour (next ? theme::text.withAlpha (0.8f) : theme::textFaint);
     g.setFont (theme::font (26.0f, true));
     g.drawFittedText (next ? next->title : juce::String ("(end of setlist)"), nextArea, juce::Justification::topRight, 2);
@@ -256,6 +265,8 @@ void LiveModeView::paint (juce::Graphics& g)
     }
     if (state.isEmergencyStopped())
         pill ("EMERGENCY STOPPED", theme::danger);
+    else if (! state.isSongReady (state.getCurrentSongIndex()))
+        pill ("LOADING SONG AUDIO", theme::warn);
     else
         pill (state.getTransportState() == TransportState::Playing ? "PLAYING" : "READY",
               state.getTransportState() == TransportState::Playing ? theme::play : theme::accent);

@@ -259,6 +259,7 @@ void TimelineView::paint (juce::Graphics& g)
                 case TrackInfo::MediaStatus::Loading: label = "LOADING  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
                 case TrackInfo::MediaStatus::Missing: label = "MISSING FILE  " + t.mediaPath; c = theme::danger; break;
                 case TrackInfo::MediaStatus::Error:   label = "LOAD ERROR  " + t.mediaError; c = theme::danger; break;
+                case TrackInfo::MediaStatus::Unloaded: label = "NOT IN RAM (loads when the song is next)  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
                 case TrackInfo::MediaStatus::Ready:   break;
             }
             auto box = lane.reduced (2, 3).toFloat();

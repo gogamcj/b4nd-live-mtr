@@ -235,6 +235,8 @@ void AppState::selectSong (int index)
     position = 0.0;
     trackLevels.fill (0.0f);
     juce::Logger::writeToLog ("Song selected: " + songs[(size_t) index].title);
+    if (mediaWindowed)
+        requestAllMedia();   // the next song starts decoding now, far ones leave RAM
     rebuildPlan();   // the engine swaps it in once the stop fade has finished
     sendChangeMessage();
 }
@@ -256,6 +258,13 @@ void AppState::play()
     auto* song = getCurrentSong();
     if (song == nullptr)
         return;
+    if (! isSongReady (currentSong))
+    {
+        // Never start a song without its audio (the MR would be missing on the PA).
+        juce::Logger::writeToLog ("Transport: PLAY refused, " + song->title + " is still loading");
+        sendChangeMessage();
+        return;
+    }
     emergency = false;
     if (position >= song->lengthSeconds)
         position = 0.0;
@@ -517,14 +526,75 @@ double AppState::mediaSampleRate() const noexcept
     return isEngineActive() ? engine.getSampleRate() : 48000.0;
 }
 
-void AppState::requestAllMedia()
+std::int64_t AppState::mediaBudgetBytes()
+{
+    if (const auto env = juce::SystemStats::getEnvironmentVariable ("B4ND_MEDIA_BUDGET_MB", {}); env.isNotEmpty())
+        return (std::int64_t) env.getLargeIntValue() * 1024 * 1024;
+    const auto ramMb = (std::int64_t) juce::SystemStats::getMemorySizeInMegabytes();
+    return std::min<std::int64_t> ((std::int64_t) 12 * 1024, std::max<std::int64_t> (1024, ramMb / 2)) * 1024 * 1024;
+}
+
+std::int64_t AppState::estimateSetlistBytes()
 {
     const double sr = mediaSampleRate();
-    for (auto& song : songs)
+    std::int64_t total = 0;
+    std::set<juce::String> seen;   // a file used by two songs is decoded once
+    for (const auto& song : songs)
+        for (const auto& t : song.tracks)
+        {
+            if (t.mediaPath.isEmpty() || ! seen.insert (t.mediaPath).second)
+                continue;
+            if (t.media != nullptr && std::abs (t.mediaRate - sr) < 0.5)
+            {
+                total += MediaPool::bytesOf (*t.media);
+                continue;
+            }
+            auto it = mediaEstimates.find (t.mediaPath + "@" + juce::String ((int) sr));
+            if (it == mediaEstimates.end())
+                it = mediaEstimates.emplace (t.mediaPath + "@" + juce::String ((int) sr), mediaPool.estimateBytes (juce::File (t.mediaPath), sr)).first;
+            total += it->second;
+        }
+    return total;
+}
+
+void AppState::requestAllMedia()
+{
+    // Phase 13: everything in RAM when it fits (nothing is ever decoded during the show).
+    // Otherwise only the previous, current and next song: the next one is decoded while the
+    // current one plays, so it is ready when the band gets there.
+    const double sr = mediaSampleRate();
+    const auto budget = mediaBudgetBytes();
+    const auto need = estimateSetlistBytes();
+    const bool windowed = need > budget;
+    setlistBytesEstimate = need;
+    if (windowed != mediaWindowed)
+    {
+        mediaWindowed = windowed;
+        juce::Logger::writeToLog (juce::String ("Media: setlist needs ") + juce::String (need >> 20) + " MB, budget "
+                                  + juce::String (budget >> 20) + " MB -> "
+                                  + (windowed ? "only previous / current / next song in RAM" : "every song in RAM"));
+    }
+    bool released = false;
+    for (int si = 0; si < (int) songs.size(); ++si)
+    {
+        auto& song = songs[(size_t) si];
+        const bool wanted = ! windowed || std::abs (si - currentSong) <= 1;
         for (auto& t : song.tracks)
         {
             if (t.mediaPath.isEmpty())
                 continue;
+            if (! wanted)
+            {
+                if (t.media != nullptr || t.mediaStatus == TrackInfo::MediaStatus::Loading || t.mediaStatus == TrackInfo::MediaStatus::Ready)
+                {
+                    t.media.reset();   // the overview stays for drawing
+                    t.mediaStatus = TrackInfo::MediaStatus::Unloaded;
+                    released = true;
+                }
+                if (t.mediaStatus != TrackInfo::MediaStatus::Missing)
+                    t.mediaStatus = TrackInfo::MediaStatus::Unloaded;
+                continue;
+            }
             if (t.media != nullptr && std::abs (t.mediaRate - sr) < 0.5)
                 continue;
             const juce::File f (t.mediaPath);
@@ -544,6 +614,38 @@ void AppState::requestAllMedia()
                 }
             }
         }
+    }
+    if (released)
+        mediaPool.purgeUnused();   // only songs two or more away: no plan of the engine holds them
+}
+
+AppState::SongMedia AppState::getSongMedia (int index) const
+{
+    SongMedia m;
+    if (! juce::isPositiveAndBelow (index, (int) songs.size()))
+        return m;
+    for (const auto& t : songs[(size_t) index].tracks)
+    {
+        if (t.mediaPath.isEmpty())
+            continue;
+        ++m.tracks;
+        switch (t.mediaStatus)
+        {
+            case TrackInfo::MediaStatus::Ready:    ++m.ready; if (t.media != nullptr) m.bytes += MediaPool::bytesOf (*t.media); break;
+            case TrackInfo::MediaStatus::Loading:  ++m.loading; break;
+            case TrackInfo::MediaStatus::Missing:  ++m.missing; break;
+            case TrackInfo::MediaStatus::Error:    ++m.errors; break;
+            case TrackInfo::MediaStatus::Unloaded: ++m.unloaded; break;
+            case TrackInfo::MediaStatus::None:     break;
+        }
+    }
+    return m;
+}
+
+bool AppState::isSongReady (int index) const
+{
+    const auto m = getSongMedia (index);
+    return m.loading == 0 && m.unloaded == 0;
 }
 
 void AppState::applyFinishedMedia()
@@ -561,9 +663,9 @@ void AppState::applyFinishedMedia()
         for (size_t si = 0; si < songs.size(); ++si)
             for (auto& t : songs[si].tracks)
             {
-                if (t.mediaPath != f.path
+                if (t.mediaPath != f.path || t.mediaStatus == TrackInfo::MediaStatus::Unloaded
                     || (t.mediaStatus == TrackInfo::MediaStatus::Ready && std::abs (t.mediaRate - sr) < 0.5))
-                    continue;
+                    continue;   // (an unloaded song left the RAM window while it was decoding)
                 if (f.result.data != nullptr)
                 {
                     t.media = f.result.data;
@@ -658,9 +760,13 @@ AppState::MediaSummary AppState::getMediaSummary() const
                 case TrackInfo::MediaStatus::Missing: ++m.missing; break;
                 case TrackInfo::MediaStatus::Error:   ++m.errors;  break;
                 case TrackInfo::MediaStatus::Ready:   ++m.ready;   break;
+                case TrackInfo::MediaStatus::Unloaded: ++m.unloaded; break;
                 case TrackInfo::MediaStatus::None:    break;
             }
     m.ramBytes = mediaPool.getCachedBytes();
+    m.budgetBytes = mediaBudgetBytes();
+    m.windowed = mediaWindowed;
+    m.setlistBytes = setlistBytesEstimate;
     return m;
 }
 
@@ -1608,6 +1714,13 @@ void AppState::timerCallback()
     pollMeasurement();
     pollAnalysis();
     engine.collectGarbage();
+    if (mediaWindowed && ++purgeTicks >= 60)
+    {
+        // Songs that left the RAM window are freed here, on the message thread, once the
+        // engine has given back the plan that still used them (never on the audio thread).
+        purgeTicks = 0;
+        mediaPool.purgeUnused();
+    }
 
     // Plugins: unsaved changes (editor / presets) and failures in the audio thread.
     bool pluginEvent = false;

@@ -37,6 +37,10 @@ public:
     MediaDecodeResult decode (const juce::File& file, double targetSampleRate,
                               const std::atomic<bool>* cancel = nullptr);
 
+    /** Decoded size in RAM (float, at most two channels, at the target rate) from the file
+        header, without decoding. 0 when the file cannot be read. */
+    std::int64_t estimateBytes (const juce::File& file, double targetSampleRate);
+
     /** "*.wav;*.aif;..." for file choosers and drag-and-drop filters. */
     juce::String getWildcard() const;
     bool canRead (const juce::File& file) const;
@@ -84,6 +88,8 @@ public:
     void purgeUnused();
 
     bool canRead (const juce::File& f) const { return decoder.canRead (f); }
+    /** Message thread (own decoder; the decode thread is not touched). */
+    std::int64_t estimateBytes (const juce::File& f, double sampleRate) { return probe.estimateBytes (f, sampleRate); }
     juce::String getWildcard() const { return decoder.getWildcard(); }
 
     static std::int64_t bytesOf (const AudioData& d) noexcept
@@ -103,6 +109,7 @@ private:
     static Key makeKey (const juce::File& f, double sr) { return { f.getFullPathName(), (std::int64_t) std::llround (sr) }; }
 
     MediaDecoder decoder;
+    MediaDecoder probe;
     mutable juce::CriticalSection lock;
     std::map<Key, std::shared_ptr<const AudioData>> cache;
     std::deque<Key> queue;

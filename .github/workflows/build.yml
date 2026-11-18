@@ -156,6 +156,31 @@ jobs:
           $edits = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter bass.mid | Where-Object { $_.DirectoryName -match "edit-" }
           if ($edits.Count -lt 1) { throw "edited bass.mid missing" }
 
+      - name: Setlist (order, RAM window)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          New-Item -ItemType Directory -Force setlist-test | Out-Null
+          foreach ($i in 1..4) { python tools/make-test-wav.py "$PWD/setlist-test/s$i.wav" --rate 44100 --seconds 20 }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" -ErrorAction SilentlyContinue | Remove-Item
+          Push-Location setlist-test
+          $p = Start-Process -FilePath (Resolve-Path "../$exe") -PassThru -Wait -ArgumentList @('--screenshot','../screenshot-setlist.png','--setlist',
+                 '--save-as', (& $q "$PWD/win.b4nd"),
+                 '--setlist-ops', 'select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,add:Four,select:4,media:s4.wav,move:4:1,wait:30')
+          Pop-Location
+          if ($p.ExitCode -ne 0) { throw "setlist run failed: $($p.ExitCode)" }
+          $env:B4ND_MEDIA_BUDGET_MB = "26"
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-setlist-window.png','--setlist',
+                 '--project', (& $q "$PWD/setlist-test/win.b4nd"), '--setlist-ops', 'select:1,wait:30,select:4,play,wait:30')
+          Remove-Item Env:B4ND_MEDIA_BUDGET_MB
+          if ($p.ExitCode -ne 0) { throw "setlist window run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Setlist|Media:|PLAY" | ForEach-Object { $_.Line }
+          foreach ($want in @("Setlist: moved .Four. from 4 to 1", "only previous / current / next song in RAM", "PLAY refused, .* is still loading")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
+
       - name: Footswitch (mapping, refusal while playing, double press)
         shell: pwsh
         run: |
@@ -414,6 +439,33 @@ jobs:
           # The transpose in Live Mode did nothing: the first notes moved up 1 semitone, not 2.
           first=$(grep -oE "opened .*first [0-9]+:[0-9]+" locks.txt | grep -oE "[0-9]+$")
           grep -Eq "try-save -> saved; .* first 0:$((first + 1)):" locks.txt
+
+      - name: Setlist end to end (order, save / reopen, RAM window, no play while loading)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p setlist-test && cd setlist-test
+          for i in 1 2 3 4; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 44100 --seconds 20; done
+          rm -rf win.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-setlist-build.png --save-as win.b4nd \
+            --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,add:Four,select:4,media:s4.wav,move:4:1,rename:1:Encore:B4ND,wait:30" \
+            | tee build.txt
+          grep -q "setlist op move:4:1: ok" build.txt
+          grep -q 'setlist: 4 songs, .*media all in RAM' build.txt
+          grep -q "project save: ok" build.txt
+          # Reopened with a RAM budget for three of the four songs: the order is kept, only
+          # previous / current / next are in RAM, a far song is loaded when selected and cannot
+          # play before its audio is there.
+          B4ND_MEDIA_BUDGET_MB=26 xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-setlist.png --setlist \
+            --project win.b4nd --setlist-ops "select:1,wait:30,select:4,play,wait:30,play,stop" | tee window.txt
+          grep -q '  01 "Encore" / "B4ND" starts 0:00' window.txt
+          grep -q 'media WINDOWED (budget 26 MB' window.txt
+          grep -q "setlist op select:4: ok; current 4, not playing" window.txt
+          grep -q "setlist op play: ok; current 4, not playing" window.txt     # refused: still loading
+          grep -Eq '  02 ".*" / ".*" starts .*audio 1 tracks: 0 ready, 0 loading, 1 not in RAM' window.txt
+          grep -Eq '  04 ".*" / ".*" starts .*audio 1 tracks: 1 ready' window.txt
+          grep -q "setlist op wait:30: ok; current 4, not playing" window.txt
+          test "$(grep -c 'setlist op play: ok; current 4, playing' window.txt)" = 1
 
       - name: Footswitch end to end (mapping, bounce, double press, refusals, learn)
         run: |

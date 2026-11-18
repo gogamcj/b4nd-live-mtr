@@ -11,6 +11,8 @@
 #include "ui/AnalysisPanel.h"
 #include "ui/MidiEditorPanel.h"
 #include "ui/FootswitchPanel.h"
+#include "ui/SetlistPanel.h"
+#include "core/TimeFormat.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
@@ -67,6 +69,8 @@ struct ScreenshotRequest
     bool applyAnalysis = false;    // --apply-analysis: then apply everything and save
     bool undoAnalysis = false;     // --undo-analysis: then undo the apply (before the save)
     juce::String analyzer;         // --analyzer <program or python>
+    bool setlistWindow = false;    // --setlist: show (and capture) the setlist window
+    juce::StringArray setlistOps;  // --setlist-ops add:<title>,move:<from>:<to>,rename:<i>:<title>[:<artist>],remove:<i>,select:<i>,media:<file>,next,play,stop,wait:<s> (1-based)
     bool footswitchWindow = false; // --footswitch: show (and capture) the footswitch window
     juce::StringArray footswitchPresses;   // --footswitch-press cc:65:127@0,note:60:100@300,learn:2@...
     juce::String midiEditTrack;    // --midi-edit <track name>: open the MIDI editor on it (and capture it)
@@ -94,6 +98,9 @@ struct ScreenshotRequest
         if (const int s = args.indexOf ("--analyze-tasks"); s >= 0 && s + 1 < args.size())
             r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         r.footswitchWindow = args.contains ("--footswitch");
+        r.setlistWindow = args.contains ("--setlist");
+        if (const int s = args.indexOf ("--setlist-ops"); s >= 0 && s + 1 < args.size())
+            r.setlistOps = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--footswitch-press"); s >= 0 && s + 1 < args.size())
             r.footswitchPresses = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--midi-edit"); s >= 0 && s + 1 < args.size())
@@ -325,6 +332,66 @@ public:
                 std::printf ("vsti midi rejected: %s\n", err.toRawUTF8());
     }
 
+    void printSetlist()
+    {
+        const auto starts = state->getSongStartTimes();
+        const auto ms = state->getMediaSummary();
+        std::printf ("setlist: %d songs, total %s, current %d, media %s (budget %lld MB, setlist %lld MB, in RAM %lld MB)\n",
+                     (int) state->getSongs().size(), formatSeconds (state->getSetlistTotalSeconds(), false).c_str(),
+                     state->getCurrentSongIndex() + 1, ms.windowed ? "WINDOWED" : "all in RAM",
+                     (long long) (ms.budgetBytes >> 20), (long long) (ms.setlistBytes >> 20), (long long) (ms.ramBytes >> 20));
+        for (int i = 0; i < (int) state->getSongs().size(); ++i)
+        {
+            const auto& s = state->getSongs()[(size_t) i];
+            const auto m = state->getSongMedia (i);
+            std::printf ("  %02d \"%s\" / \"%s\" starts %s, %s, audio %d tracks: %d ready, %d loading, %d not in RAM, %d missing%s\n", i + 1,
+                         s.title.toRawUTF8(), s.artist.toRawUTF8(), formatSeconds (starts[(size_t) i], false).c_str(),
+                         formatSeconds (s.lengthSeconds, false).c_str(), m.tracks, m.ready, m.loading, m.unloaded, m.missing,
+                         state->isSongReady (i) ? "" : "  NOT READY");
+        }
+    }
+
+    /** --setlist-ops: the setlist window's functions (1-based song numbers). */
+    void runSetlistOps()
+    {
+        for (const auto& op : screenshot->setlistOps)
+        {
+            const auto p = juce::StringArray::fromTokens (op, ":", "");
+            juce::String err;
+            if (p[0] == "add") err = state->addSong (p[1], p.size() > 2 ? p[2].getIntValue() - 1 : -1);
+            else if (p[0] == "move") err = state->moveSong (p[1].getIntValue() - 1, p[2].getIntValue() - 1);
+            else if (p[0] == "rename") err = state->setSongInfo (p[1].getIntValue() - 1, p[2], p[3]);
+            else if (p[0] == "remove") err = state->removeSong (p[1].getIntValue() - 1);
+            else if (p[0] == "select") state->selectSong (p[1].getIntValue() - 1);
+            else if (p[0] == "next") state->nextSong();
+            else if (p[0] == "media") err = state->addAudioFile (juce::File::getCurrentWorkingDirectory().getChildFile (p[1]));
+            else if (p[0] == "play") state->play();
+            else if (p[0] == "stop") state->stop();
+            else if (p[0] == "wait")
+            {
+                // let the media decode (the message loop is not running here)
+                const auto until = juce::Time::getMillisecondCounterHiRes() + p[1].getDoubleValue() * 1000.0;
+                while (state->getMediaSummary().loading > 0 && juce::Time::getMillisecondCounterHiRes() < until)
+                {
+                    juce::Thread::sleep (50);
+                    state->pollMediaForTests();
+                }
+            }
+            else err = "UNKNOWN OP";
+            std::printf ("setlist op %s: %s; current %d, %s\n", op.toRawUTF8(), err.isEmpty() ? "ok" : err.toRawUTF8(),
+                         state->getCurrentSongIndex() + 1,
+                         state->getTransportState() == TransportState::Playing ? "playing" : "not playing");
+            if (err == "UNKNOWN OP")
+                setApplicationReturnValue (1);
+        }
+        printSetlist();
+        if (state->hasProjectFile())
+        {
+            const auto err = state->saveProject();
+            std::printf ("project save: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+        }
+    }
+
     /** --footswitch-press: MIDI as if it came from a pedal (the MIDI-thread path), with times in ms.
         "cc:<n>:<value>@<ms>", "note:<n>:<velocity>@<ms>", "learn:<row>" (LEARN on a row of the window). */
     void runFootswitchPresses()
@@ -495,6 +562,7 @@ public:
         closeAnalysisWindow();
         closeMidiEditor();
         closeFootswitchWindow();
+        closeSetlistWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -642,6 +710,10 @@ private:
         {
             if (screenshot->midiEditTrack.isNotEmpty())
                 runMidiEdit();
+            if (! screenshot->setlistOps.isEmpty())
+                runSetlistOps();
+            if (screenshot->setlistWindow)
+                showSetlistWindow (*state);
             if (screenshot->footswitchWindow)
                 showFootswitchWindow (*state);
             if (! screenshot->footswitchPresses.isEmpty())
@@ -754,6 +826,8 @@ private:
             comp = getAnalysisWindowContent();
         if (screenshot->midiEditTrack.isNotEmpty() && getMidiEditorContent() != nullptr)
             comp = getMidiEditorContent();
+        if (screenshot->setlistWindow && getSetlistWindowContent() != nullptr)
+            comp = getSetlistWindowContent();
         if (screenshot->footswitchWindow && getFootswitchWindowContent() != nullptr)
             comp = getFootswitchWindowContent();
         if (screenshot->settings)
