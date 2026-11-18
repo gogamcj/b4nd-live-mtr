@@ -97,6 +97,7 @@ bool PluginInstrument::prepare (double sampleRate, int maxBlockSize, juce::Strin
         midi.ensureSize (16384);
         preparedRate = sampleRate;
         preparedBlock = maxBlockSize;
+        updateLatency();
         return true;
     }
     catch (const std::exception& e)
@@ -162,6 +163,15 @@ bool PluginInstrument::render (float* outL, float* outR, int n, const MidiBytes*
         outR[i] = std::isfinite (b) ? juce::jlimit (-4.0f, 4.0f, b) : 0.0f;
     }
     return true;
+}
+
+void PluginInstrument::updateLatency() noexcept
+{
+    // More than 1 s is not a real look-ahead: treat it as a bad report rather than shift the
+    // MIDI a whole second.
+    int l = 0;
+    try { l = plugin->getLatencySamples(); } catch (...) { l = 0; }
+    latency.store (juce::jlimit (0, preparedRate > 0.0 ? (int) preparedRate : 48000, l), std::memory_order_relaxed);
 }
 
 juce::String PluginInstrument::getFailure() const

@@ -29,6 +29,7 @@ endfunction()
 b4nd_test_plugin(b4nd_test_synth   Bsyn "B4ND Test Synth"   0 TRUE  Instrument Synth)
 b4nd_test_plugin(b4nd_test_crash   Bcrs "B4ND Test Crash"   1 TRUE  Instrument Synth)
 b4nd_test_plugin(b4nd_test_slow    Bslo "B4ND Test Slow"    2 TRUE  Instrument Synth)
+b4nd_test_plugin(b4nd_test_latency Blat "B4ND Test Latency" 4 TRUE Instrument Synth)
 b4nd_test_plugin(b4nd_test_badstate Bbst "B4ND Test BadState" 3 TRUE Instrument Synth)
 
 set(B4ND_TEST_PLUGIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/vst3" CACHE INTERNAL "")

@@ -77,6 +77,9 @@ public:
     virtual ~InstrumentProcessor() = default;
     virtual bool render (float* outL, float* outR, int numSamples,
                          const MidiBytes* msgs, const int* offsets, int count) noexcept = 0;
+    /** Delay between MIDI in and sound out (look-ahead instruments). The engine feeds MIDI this
+        much earlier so the sound lines up with the audio tracks (PDC). Any thread. */
+    virtual int getLatencySamples() const noexcept { return 0; }
 };
 
 /** A MIDI track that plays a software instrument into a bus. */
@@ -86,7 +89,7 @@ struct InstrumentTrackRuntime
     BusKind bus = BusKind::Main;
     std::shared_ptr<InstrumentProcessor> instrument;
     std::vector<MidiSampleEvent> events;
-    ChaseIndex chase;   // sorted by sample
+    ChaseIndex chase;
 };
 
 struct ClickSound

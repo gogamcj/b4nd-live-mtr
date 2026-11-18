@@ -5,6 +5,7 @@
 #include "TestHarness.h"
 #include "engine/AudioEngine.h"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -250,4 +251,47 @@ TEST_CASE ("Instruments: locate chase gives the instrument its program and held 
     CHECK (inst->got[1].msg.isNoteOn() && inst->got[1].msg.data[1] == 48 && inst->got[1].offset == 0);
     CHECK (inst->countIf (&MidiBytes::isNoteOn) == 1);
     CHECK (peak > 0.05f);   // the pad sounds right away
+}
+
+TEST_CASE ("Instruments: PDC feeds a look-ahead instrument its MIDI early by its latency")
+{
+    struct LatentInstrument final : InstrumentProcessor
+    {
+        bool render (float* l, float* r, int n, const MidiBytes* m, const int* o, int count) noexcept override
+        {
+            for (int i = 0; i < count; ++i)
+                if (got.size() < got.capacity())
+                    got.push_back (blocks * 256 + o[i]);
+            (void) m;
+            std::fill (l, l + n, 0.0f);
+            std::fill (r, r + n, 0.0f);
+            ++blocks;
+            return true;
+        }
+        int getLatencySamples() const noexcept override { return 480; }
+        LatentInstrument() { got.reserve (100); }
+        std::vector<std::int64_t> got;   // engine sample (block start + offset) where each event was fed
+        std::int64_t blocks = 0;
+    };
+    Rig r;
+    auto inst = std::make_shared<LatentInstrument>();
+    auto plan = std::make_unique<PlaybackPlan>();
+    plan->lengthSamples = (std::int64_t) (sr * 30);
+    InstrumentTrackRuntime t;
+    t.slot = 3;
+    t.instrument = inst;
+    t.events = { on (10000, 60), off (20000, 60), on (100, 62), off (300, 62) };
+    std::sort (t.events.begin(), t.events.end(), [] (const MidiSampleEvent& a, const MidiSampleEvent& b) { return a.sample < b.sample; });
+    t.chase = ChaseIndex::build (t.events);
+    plan->instrumentTracks.push_back (std::move (t));
+    r.engine.setPlan (std::move (plan), sr);
+    r.cmd (EngineCommand::Type::Play);
+    r.run (100);
+    // The engine starts playing at its first block; song sample s is block-relative s.
+    CHECK (inst->got.size() == 4);
+    if (inst->got.size() != 4) return;
+    CHECK (inst->got[0] == 0);              // 100 - 480 < 0: as early as possible (first block)
+    CHECK (inst->got[1] == 0);              // 300 - 480 < 0
+    CHECK (inst->got[2] == 10000 - 480);
+    CHECK (inst->got[3] == 20000 - 480);
 }

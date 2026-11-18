@@ -537,6 +537,10 @@ void AudioEngine::renderInstruments (int n) noexcept
                               || (anySolo && ! p.solo.load (std::memory_order_relaxed));
         auto& notes = instNotes[ti];
 
+        // PDC: an instrument whose sound comes out L samples late gets its MIDI L samples early.
+        // Events between the jump point and pos + L right after a locate are fed at once.
+        const auto lat = (std::int64_t) std::clamp (t.instrument->getLatencySamples(), 0, (int) sampleRate);
+
         int count = 0;
         if (reseek && pos > 0 && fadeAction == FadeAction::None)   // never while stopping
             chaser.chase (t.chase, pos, ! silenced, (std::int64_t) (chaseMinRemainingSec * sampleRate), [&] (const MidiBytes& m)
@@ -548,7 +552,7 @@ void AudioEngine::renderInstruments (int n) noexcept
                 notes.observe (m);
                 ++count;
             });
-        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n + lat)
         {
             const auto& e = t.events[cursor++];
             if (silenced && e.msg.isNoteOn())
@@ -561,7 +565,7 @@ void AudioEngine::renderInstruments (int n) noexcept
                 continue;
             }
             instMsgs[(size_t) count] = e.msg;
-            instOffsets[(size_t) count] = (int) std::clamp<std::int64_t> (e.sample - pos, 0, n - 1);
+            instOffsets[(size_t) count] = (int) std::clamp<std::int64_t> (e.sample - lat - pos, 0, n - 1);
             notes.observe (e.msg);
             ++count;
         }

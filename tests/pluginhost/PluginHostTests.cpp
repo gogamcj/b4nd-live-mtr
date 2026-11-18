@@ -212,3 +212,36 @@ TEST_CASE ("Scanner: missing scanner program fails cleanly")
     CHECK (report == nullptr);
     CHECK (failure.startsWith ("scanner program not found"));
 }
+
+TEST_CASE ("PluginInstrument: a look-ahead plugin reports its latency for PDC")
+{
+    const juce::ScopedJuceInitialiser_GUI juceInit;
+    juce::VST3PluginFormat format;
+    juce::OwnedArray<juce::PluginDescription> descs;
+    format.findAllTypesForFile (descs, pluginFile ("B4ND Test Latency"));
+    CHECK (descs.size() == 1);
+    if (descs.isEmpty()) return;
+    juce::String error;
+    auto inst = format.createInstanceFromDescription (*descs[0], 48000.0, 256, error);
+    CHECK (inst != nullptr);
+    if (inst == nullptr) return;
+    PluginInstrument pi (std::move (inst));
+    CHECK (pi.prepare (48000.0, 256, error));
+    CHECK (pi.getLatencySamples() == 480);
+
+    // The sound of a note fed at sample 0 starts 480 samples later.
+    std::vector<float> l (256), r (256), all;
+    const MidiBytes on { { 0x90, 60, 100 }, 3 };
+    const int at0 = 0;
+    for (int b = 0; b < 4; ++b)
+    {
+        pi.render (l.data(), r.data(), 256, b == 0 ? &on : nullptr, b == 0 ? &at0 : nullptr, b == 0 ? 1 : 0);
+        all.insert (all.end(), l.begin(), l.end());
+    }
+    int first = -1;
+    for (int i = 0; i < (int) all.size(); ++i)
+        if (std::abs (all[(size_t) i]) > 1.0e-6f) { first = i; break; }
+    CHECK (first >= 480);
+    CHECK (first <= 482);
+    if (first < 480 || first > 482) std::printf ("    first sound at %d\n", first);
+}
