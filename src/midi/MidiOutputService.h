@@ -90,7 +90,9 @@ public:
     void panic();
 
     /** Queues one message on a slot `delayMs` from now (message thread). */
-    void sendLater (int slot, const MidiBytes&, double delayMs);
+    /** minGapMs: never sent sooner than this after the previous message on the slot, even if
+        the MIDI thread woke late (bank / program gaps that old modules need). */
+    void sendLater (int slot, const MidiBytes&, double delayMs, double minGapMs = 0.0);
 
     /** Checks the port list now (normally once a second). */
     void pollPorts();
@@ -119,6 +121,8 @@ private:
         std::uint64_t seq = 0;   // keeps the order of events due at the same time
         int slot = 0;
         MidiBytes msg;
+        std::int64_t minGapNs = 0;   // after the previous message sent on this slot
+        bool done = false;           // MIDI thread scratch
     };
 
     struct Slot
@@ -151,6 +155,7 @@ private:
 
     // MIDI thread only
     std::vector<Pending> pending;
+    std::array<std::int64_t, maxSlots> lastSentNs {};   // MIDI thread only
     std::vector<Pending> incoming;
     std::uint64_t seqCounter = 0;
     std::array<ActiveNoteTracker, maxSlots> sounding;
