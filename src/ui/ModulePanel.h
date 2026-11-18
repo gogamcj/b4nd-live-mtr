@@ -46,7 +46,8 @@ private:
 
     juce::TextEditor nameEdit, msbEdit, lsbEdit, programEdit, volumeEdit, panEdit, delayEdit, gapEdit, settleEdit;
     juce::ComboBox portBox, channelBox, orderBox;
-    juce::ToggleButton sustainToggle { "Sustain pedal (CC64)" };
+    juce::ToggleButton sustainToggle { "Sustain pedal (CC64)" }, clockToggle { "Send MIDI Clock" };
+    juce::TextEditor clockOffsetEdit;
     juce::TextButton applyButton { "APPLY" }, testButton { "TEST NOTE" }, recallButton { "SEND PRESET" },
                      refreshButton { "Rescan" };
 

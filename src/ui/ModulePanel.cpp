@@ -40,7 +40,7 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     list.setColour (juce::ListBox::backgroundColourId, theme::panelInset);
     addAndMakeVisible (list);
 
-    for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit })
+    for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit, &clockOffsetEdit })
     {
         addAndMakeVisible (*e);
         e->setFont (theme::font (13.0f));
@@ -49,6 +49,10 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     for (auto* e : { &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &gapEdit, &settleEdit })
         e->setInputRestrictions (4, "0123456789");
     delayEdit.setInputRestrictions (6, "0123456789.");
+    clockOffsetEdit.setInputRestrictions (6, "-0123456789.");
+    clockToggle.setTooltip ("MIDI Clock (24 per beat) with Start / Stop / Continue / Song Position, following the song's tempo map. "
+                            "For arpeggiators, drum machines and delays that sync to the song.");
+    clockOffsetEdit.setTooltip ("Clock sent this many ms earlier (positive) or later (negative) than the music");
     msbEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
     lsbEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
     programEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
@@ -67,6 +71,7 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     for (auto* c : { &portBox, &channelBox, &orderBox })
         addAndMakeVisible (*c);
     addAndMakeVisible (sustainToggle);
+    addAndMakeVisible (clockToggle);
 
     for (auto* b : { &addButton, &removeButton, &applyButton, &testButton, &recallButton, &refreshButton })
     {
@@ -139,7 +144,7 @@ void ModulePanel::refreshEnablement()
     applyButton.setEnabled (canEdit && has);
     for (auto* c : std::initializer_list<juce::Component*> { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit,
                                                              &delayEdit, &gapEdit, &settleEdit, &portBox, &channelBox, &orderBox,
-                                                             &sustainToggle })
+                                                             &sustainToggle, &clockToggle, &clockOffsetEdit })
         c->setEnabled (canEdit && has);
     testButton.setEnabled (has);
     recallButton.setEnabled (has);
@@ -180,7 +185,7 @@ void ModulePanel::loadEditor()
     portBox.clear (juce::dontSendNotification);
     if (editing < 0)
     {
-        for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit })
+        for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit, &clockOffsetEdit })
             e->clear();
         refreshEnablement();
         repaint();
@@ -203,6 +208,8 @@ void ModulePanel::loadEditor()
             order = i + 1;
     orderBox.setSelectedId (order, juce::dontSendNotification);
     sustainToggle.setToggleState (p.sustainEnabled, juce::dontSendNotification);
+    clockToggle.setToggleState (p.clockOut, juce::dontSendNotification);
+    clockOffsetEdit.setText (juce::String (p.clockOffsetMs, 1), false);
 
     portBox.addItem ("(no port)", 1);
     int selected = 1;
@@ -245,6 +252,8 @@ void ModulePanel::applyEditor()
     p.channel = channelBox.getSelectedId() > 0 ? channelBox.getSelectedId() : 1;
     p.sendOrder = sendOrders[juce::jlimit (0, (int) std::size (sendOrders) - 1, orderBox.getSelectedId() - 1)];
     p.sustainEnabled = sustainToggle.getToggleState();
+    p.clockOut = clockToggle.getToggleState();
+    p.clockOffsetMs = clockOffsetEdit.getText().getDoubleValue();
     const int portId = portBox.getSelectedId();
     if (portId == 1)
     {
@@ -380,6 +389,8 @@ void ModulePanel::paintListBoxItem (int row, juce::Graphics& g, int width, int h
         sub << "   PC " << p.program;
     if (p.delayOffsetMs > 0.0)
         sub << "   -" << juce::String (p.delayOffsetMs, 1) << " ms";
+    if (p.clockOut)
+        sub << "   CLOCK";
     g.drawFittedText (sub, r, juce::Justification::centredLeft, 1);
 }
 
@@ -416,6 +427,7 @@ void ModulePanel::paint (juce::Graphics& g)
     label (orderBox, "Send order");
     label (gapEdit, "Gap ms");
     label (settleEdit, "Settle ms");
+    label (clockOffsetEdit, "Clock ms");
 
     // Status line
     auto st = statusArea;
@@ -536,6 +548,12 @@ void ModulePanel::resized()
     gapEdit.setBounds (row (colB).withWidth (70));
     settleEdit.setBounds (row (colB).withWidth (70));
     sustainToggle.setBounds (row (colA).withX (colA.getX() - 4).withWidth (220));
+    {
+        auto cr = row (colB);
+        clockOffsetEdit.setBounds (cr.removeFromLeft (70));
+        cr.removeFromLeft (10);
+        clockToggle.setBounds (cr);
+    }
 
     tracksHeader = tracks.removeFromTop (26);
     tracks.removeFromTop (6);

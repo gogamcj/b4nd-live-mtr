@@ -178,6 +178,8 @@ private:
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
     void renderMidi (int numSamples) noexcept;
+    void renderMidiClock (int numSamples) noexcept;
+    void stopMidiClock() noexcept;
     void renderInstruments (int numSamples) noexcept;
     /** Note Off / CC64 0 / CC123 into every instrument that has sounding notes (output discarded). */
     void releaseInstrumentNotes() noexcept;
@@ -265,6 +267,10 @@ private:
     std::array<ActiveNoteTracker, maxMidiPorts> midiNotes;
     std::array<std::size_t, maxTracks> midiCursor {};
     std::int64_t midiExpectedPos = -1;
+    // MIDI Clock (audio thread only)
+    std::int64_t clockNextTick = -1;      // next 24-PPQN tick to send; -1 = (re)start from the position
+    std::int64_t clockExpectedPos = -1;
+    bool clockRunning = false, clockNeedsStart = false;
     std::int64_t chunkStartNs = 0;
     std::atomic<std::int64_t> outputLatencyNs { 0 };
     SampleClock sampleClock;                         // audio thread only

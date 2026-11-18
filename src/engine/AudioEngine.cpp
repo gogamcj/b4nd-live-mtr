@@ -473,6 +473,7 @@ void AudioEngine::releaseMidiNotes() noexcept
         });
         activeNotesTelemetry[(size_t) port].store (0, std::memory_order_relaxed);
     }
+    stopMidiClock();
     releaseInstrumentNotes();
 }
 
@@ -638,6 +639,74 @@ void AudioEngine::renderMidi (int n) noexcept
             activeNotesTelemetry[(size_t) t.port].store (midiNotes[(size_t) t.port].activeCount(), std::memory_order_relaxed);
 }
 
+void AudioEngine::stopMidiClock() noexcept
+{
+    // Every stop / pause / locate / song change goes through here: slaves stop, and the next
+    // render restarts them with Song Position + Continue at the new position.
+    if (clockRunning && currentPlan != nullptr)
+    {
+        const auto now = nowNs();
+        for (const auto& c : currentPlan->midiClocks)
+            pushMidi (now, c.port, MidiBytes::make (0xfc));
+    }
+    clockRunning = false;
+    clockNeedsStart = false;
+    clockNextTick = -1;
+    clockExpectedPos = -1;
+}
+
+void AudioEngine::renderMidiClock (int n) noexcept
+{
+    const auto& plan = *currentPlan;
+    if (plan.midiClocks.empty())
+        return;
+
+    const std::int64_t pos = position.load (std::memory_order_relaxed);
+    if (pos != clockExpectedPos && clockNextTick >= 0)
+        stopMidiClock();   // the position jumped without a locate command (loop / song change)
+    if (clockNextTick < 0)
+    {
+        // (Re)start on the next 16th note: Song Position Pointer counts 16ths (6 clocks each),
+        // so the slave's first clock after Continue is exactly at that 16th.
+        const double beat = plan.tempo.beatAtSeconds ((double) pos / sampleRate);
+        const auto firstTick = (std::int64_t) std::ceil (beat * 24.0 - 1e-6);
+        clockNextTick = ((firstTick + 5) / 6) * 6;
+        clockNeedsStart = true;
+    }
+
+    const auto latency = outputLatencyNs.load (std::memory_order_relaxed);
+    const double nsPerSample = 1.0e9 / sampleRate;
+    for (int guard = 0; guard < 64; ++guard)   // 24 PPQN at 300 BPM is 120 clocks/s: a few per block
+    {
+        const auto s = (std::int64_t) std::llround (plan.tempo.secondsAtBeat ((double) clockNextTick / 24.0) * sampleRate);
+        if (s >= pos + n)
+            break;
+        const auto base = chunkStartNs + (std::int64_t) ((double) std::max<std::int64_t> (0, s - pos) * nsPerSample) + latency;
+        for (const auto& c : plan.midiClocks)
+        {
+            const auto due = std::max (chunkStartNs, base - (std::int64_t) (c.sendEarlyMs * 1.0e6));
+            if (clockNeedsStart)
+            {
+                if (clockNextTick == 0)
+                {
+                    pushMidi (due, c.port, MidiBytes::make (0xfa));   // Start
+                }
+                else
+                {
+                    const auto spp = std::min<std::int64_t> (clockNextTick / 6, 16383);
+                    pushMidi (due, c.port, MidiBytes::make (0xf2, (std::uint8_t) (spp & 0x7f), (std::uint8_t) ((spp >> 7) & 0x7f)));
+                    pushMidi (due, c.port, MidiBytes::make (0xfb));   // Continue
+                }
+            }
+            pushMidi (due, c.port, MidiBytes::make (0xf8));
+        }
+        clockNeedsStart = false;
+        clockRunning = true;
+        ++clockNextTick;
+    }
+    clockExpectedPos = pos + n;
+}
+
 void AudioEngine::renderClick (int n) noexcept
 {
     const auto& plan = *currentPlan;
@@ -720,6 +789,7 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         renderTracks (n);
         renderClick (n);
         renderMidi (n);
+        renderMidiClock (n);
         renderInstruments (n);
         lastRenderEnd = pos + n;
     }

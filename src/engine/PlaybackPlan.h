@@ -54,6 +54,13 @@ struct MidiTrackRuntime
     std::vector<MidiSampleEvent> events;   // sorted by sample
 };
 
+/** A MIDI port that receives MIDI Clock (24 PPQN) and transport messages (docs/04 §5). */
+struct MidiClockRuntime
+{
+    int port = 0;
+    double sendEarlyMs = 0.0;   // clock offset: positive = earlier
+};
+
 /**
     A software instrument (VSTi), implemented outside the engine (src/plugins wraps VST3).
 
@@ -95,6 +102,7 @@ struct PlaybackPlan
     TempoMap tempo;
     std::vector<TrackRuntime> tracks;
     std::vector<MidiTrackRuntime> midiTracks;
+    std::vector<MidiClockRuntime> midiClocks;
     std::vector<InstrumentTrackRuntime> instrumentTracks;
     bool hasClick = false;
     int clickSlot = -1;

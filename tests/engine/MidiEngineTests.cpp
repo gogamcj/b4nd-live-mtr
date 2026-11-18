@@ -334,3 +334,121 @@ TEST_CASE ("MIDI engine: a module slower than the output latency gets its notes 
         CHECK (got[i].first.dueNs >= got[i].second);                      // queued before it is due
     }
 }
+
+namespace
+{
+std::unique_ptr<PlaybackPlan> planWithClock (TempoMap tempo, int port = 2, double earlyMs = 0.0)
+{
+    auto p = std::make_unique<PlaybackPlan>();
+    p->lengthSamples = (std::int64_t) (sr * 60);
+    p->tempo = std::move (tempo);
+    p->midiClocks.push_back ({ port, earlyMs });
+    return p;
+}
+TempoMap tempoAt (double bpm)
+{
+    TempoMap t;
+    t.setTempoPoints ({ { 0.0, bpm } });
+    return t;
+}
+} // namespace
+
+TEST_CASE ("MIDI clock: Start, 24 clocks per beat at exact intervals, Stop")
+{
+    Rig r;
+    r.engine.setClockSmoothing (true);
+    r.engine.setTimeSourceForTesting (&fakeClock);
+    r.engine.setPlan (planWithClock (tempoAt (120.0)), sr);
+    const double blockNs = block * 1.0e9 / sr;
+    r.cmd (EngineCommand::Type::Play);
+    std::vector<MidiOutEvent> got;
+    for (int b = 0; b < 375; ++b)   // 2.0 s
+    {
+        fakeNow = (std::int64_t) (3.0e12 + b * blockNs);
+        r.engine.process (nullptr, 0, r.ptrs, 2, block);
+        MidiOutEvent e;
+        while (r.engine.popMidi (e)) got.push_back (e);
+    }
+    CHECK (! got.empty() && got.front().msg.data[0] == 0xfa && got.front().port == 2);
+    std::vector<std::int64_t> ticks;
+    for (const auto& e : got)
+        if (e.msg.data[0] == 0xf8) ticks.push_back (e.dueNs);
+    // 120 BPM = 2 beats/s = 48 clocks/s: ticks at 0 .. 1.979 s
+    CHECK (ticks.size() >= 95 && ticks.size() <= 97);
+    double worst = 0.0;
+    for (size_t i = 1; i < ticks.size(); ++i)
+        worst = std::max (worst, std::abs ((double) (ticks[i] - ticks[i - 1]) - 1.0e9 / 48.0));
+    CHECK (worst < 25'000.0);   // one sample of rounding
+    CHECK (got.size() > 1 && got[1].msg.data[0] == 0xf8 && got[1].dueNs == got[0].dueNs);   // first clock = beat 1
+
+    got.clear();
+    r.cmd (EngineCommand::Type::Pause);
+    r.run (2);
+    for (const auto& e : r.got) got.push_back (e);
+    CHECK (std::count_if (got.begin(), got.end(), [] (const MidiOutEvent& e) { return e.msg.data[0] == 0xfc; }) == 1);
+    CHECK (std::none_of (got.begin(), got.end(), [] (const MidiOutEvent& e) { return e.msg.data[0] == 0xf8; }));
+}
+
+TEST_CASE ("MIDI clock: locate sends Stop, Song Position on the next 16th, Continue, then clocks from there")
+{
+    Rig r;
+    r.engine.setClockSmoothing (false);
+    r.engine.setPlan (planWithClock (tempoAt (120.0)), sr);
+    r.cmd (EngineCommand::Type::Play);
+    r.run (20);
+    r.got.clear();
+    r.callbackNs.clear();
+    r.callbackPos.clear();
+    // Locate to 1.01 s = beat 2.02 -> next 16th is beat 2.25 = 16th #9 = clock 54 (at 1.125 s).
+    r.cmd (EngineCommand::Type::Locate, (std::int64_t) (1.01 * sr));
+    r.run (60);
+    const auto& g = r.got;
+    size_t i = 0;
+    while (i < g.size() && g[i].msg.data[0] != 0xfc) ++i;
+    CHECK (i < g.size());
+    size_t j = i;
+    while (j < g.size() && g[j].msg.data[0] != 0xf2) ++j;
+    CHECK (j < g.size());
+    if (j + 2 >= g.size()) return;
+    CHECK (g[j].msg.data[1] == 9 && g[j].msg.data[2] == 0);
+    CHECK (g[j + 1].msg.data[0] == 0xfb);
+    CHECK (g[j + 2].msg.data[0] == 0xf8);
+    // No clock between the locate and the Continue
+    for (size_t k = i; k < j; ++k) CHECK (g[k].msg.data[0] != 0xf8);
+    // The first clock is sent in the callback containing sample 1.125 s
+    CHECK (std::abs ((double) r.callbackPos[j + 2] - 1.125 * sr) < block);
+}
+
+TEST_CASE ("MIDI clock: follows a tempo change and the offset sends it earlier")
+{
+    TempoMap t;
+    t.setTempoPoints ({ { 0.0, 120.0 }, { 4.0, 60.0 } });   // halves at beat 4 (2.0 s)
+    Rig r;
+    r.engine.setClockSmoothing (true);
+    r.engine.setTimeSourceForTesting (&fakeClock);
+    r.engine.setOutputLatencyMs (10.0);
+    r.engine.setPlan (planWithClock (t, 1, 4.0), sr);
+    const double blockNs = block * 1.0e9 / sr;
+    const double epoch = 4.0e12;
+    r.cmd (EngineCommand::Type::Play);
+    std::vector<MidiOutEvent> ticks;
+    std::int64_t playStartSample = -1;
+    for (int b = 0; b < 750; ++b)   // 4 s
+    {
+        fakeNow = (std::int64_t) (epoch + b * blockNs);
+        const auto before = r.engine.getPosition();
+        r.engine.process (nullptr, 0, r.ptrs, 2, block);
+        if (playStartSample < 0 && r.engine.getPosition() > before)
+            playStartSample = (std::int64_t) b * block - before;
+        MidiOutEvent e;
+        while (r.engine.popMidi (e)) if (e.msg.data[0] == 0xf8) ticks.push_back (e);
+    }
+    // 96 clocks in the first 2 s, then 24/s: 96 + 48 = 144 in 4 s
+    CHECK (ticks.size() >= 143 && ticks.size() <= 145);
+    if (ticks.size() < 110) return;
+    CHECK (std::abs ((double) (ticks[50].dueNs - ticks[49].dueNs) - 1.0e9 / 48.0) < 25'000.0);
+    CHECK (std::abs ((double) (ticks[105].dueNs - ticks[104].dueNs) - 1.0e9 / 24.0) < 25'000.0);
+    // Clock 96 = beat 4 at 2.0 s: due = start + 2.0 s + latency - offset
+    const double ideal = epoch + (double) playStartSample * 1.0e9 / sr + 2.0e9 + 10.0e6 - 4.0e6;
+    CHECK (std::abs ((double) ticks[96].dueNs - ideal) < 0.1e6);
+}

@@ -669,6 +669,7 @@ static ModuleProfile sanitise (ModuleProfile p)
     p.volumeCc = juce::jlimit (0, 127, p.volumeCc);
     p.panCc = juce::jlimit (0, 127, p.panCc);
     p.delayOffsetMs = juce::jlimit (0.0, 200.0, p.delayOffsetMs);
+    p.clockOffsetMs = juce::jlimit (-50.0, 50.0, p.clockOffsetMs);
     p.gapMs = juce::jlimit (0, 500, p.gapMs);
     p.settleMs = juce::jlimit (0, 5000, p.settleMs);
     if (p.deviceName.empty())
@@ -1196,6 +1197,18 @@ void AppState::rebuildPlan()
         rt.bus = t.bus;
         rt.clips.push_back ({ t.media, (std::int64_t) std::llround (t.mediaStartSeconds * sr) });
         plan->tracks.push_back (std::move (rt));
+    }
+
+    // MIDI Clock to every module that asks for it (one clock per port, even if shared).
+    std::vector<std::string> clockPorts;
+    for (int m = 0; m < (int) modules.size() && m < AudioEngine::maxMidiPorts; ++m)
+    {
+        const auto& mp = modules[(size_t) m];
+        const auto key = mp.portIdentifier.empty() ? mp.portName : mp.portIdentifier;
+        if (! mp.clockOut || std::find (clockPorts.begin(), clockPorts.end(), key) != clockPorts.end())
+            continue;
+        clockPorts.push_back (key);
+        plan->midiClocks.push_back ({ m, mp.clockOffsetMs });
     }
 
     pushMixerToEngine();

@@ -162,9 +162,12 @@ public:
             for (const auto& spec : screenshot->moduleNames)
             {
                 // "Name" or "Name@port": the first MIDI output whose name contains `port`.
+                // A "+clock" suffix also sends MIDI Clock to it.
                 ModuleProfile p;
-                p.deviceName = spec.upToFirstOccurrenceOf ("@", false, false).toStdString();
-                if (const auto want = spec.fromFirstOccurrenceOf ("@", false, false); want.isNotEmpty())
+                p.clockOut = spec.endsWith ("+clock");
+                const auto bare = spec.upToLastOccurrenceOf ("+clock", false, false);
+                p.deviceName = bare.upToFirstOccurrenceOf ("@", false, false).toStdString();
+                if (const auto want = bare.fromFirstOccurrenceOf ("@", false, false); want.isNotEmpty())
                 {
                     for (const auto& port : state->listMidiOutputs())
                         if (port.name.containsIgnoreCase (want))
