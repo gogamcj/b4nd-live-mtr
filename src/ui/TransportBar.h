@@ -27,7 +27,8 @@ private:
     AppState& state;
     juce::TextButton restartButton { "|<" }, playButton { "PLAY" }, pauseButton { "PAUSE" },
                      stopButton { "STOP" }, loopButton { "LOOP" }, emergencyButton { "EMERGENCY STOP" },
-                     liveButton { "LIVE MODE" };
+                     liveButton { "LIVE MODE" }, clickButton { "CLICK" };
+    void showClickMenu();
 
     juce::Rectangle<int> infoArea, cellsArea;
 };

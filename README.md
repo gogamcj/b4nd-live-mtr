@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 6 (오디오·MIDI 동기화)
+## 현재 상태: Phase 14 (공연 안정성)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -43,6 +43,58 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - 곡 중간으로 이동하거나 일시정지 후 다시 재생하면, 그 위치의 음색(Program/CC)과 길게 눌려 있어야 할 음을 다시 보냅니다
 - 지연이 있는 VSTi는 MIDI를 그만큼 먼저 받아 소리가 MR과 맞습니다 (PDC)
 - 지연 측정: 오디오 설정 창(Ctrl+,) LATENCY에서 인이어 출력을 입력에 케이블로 연결하고 Measure Round Trip. 그다음 MIDI MODULES 창에서 모듈 출력을 입력에 연결하고 MEASURE DELAY를 누르면 모듈 지연이 Delay ms에 기록됩니다. 측정 틱은 PA 출력으로 나가지 않고, 정지 중에만 동작합니다
+
+- PA(Main) 출력에는 -0.3 dBFS 리미터가 기본으로 걸려 있습니다. 마스터 스트립의 LIM으로 끄고 켜며(공연 모드에서는 잠김), CLIP은 Main 믹스가 0 dBFS를 넘었을 때 켜집니다
+- 상단 CLICK 버튼: 곡마다 카운트인(0/1/2/4마디), 8분·16분 분할, 첫 박 악센트, 음색(Beep/Wood/Stick)을 고릅니다. 카운트인 중에는 BAR . BEAT 칸에 COUNT-IN이 표시됩니다
+- 외부 모듈의 오디오 출력을 오디오 인터페이스 입력에 연결했다면 MIDI MODULES 창의 Audio return에서 그 입력을 고르세요. 믹서에 RETURN 스트립이 생기고 PA로 나갑니다
+
+- AI 분석: 좌측 AI ANALYSIS의 BPM / Beat / Key 등을 누르거나 Ctrl+Shift+A로 엽니다.
+  - 곡의 MR 트랙을 분석해 BPM, 마디 1 위치, 박자, Key, 코드, 구간(Intro/Verse/Chorus...)을 신뢰도와 함께 보여 줍니다.
+  - 결과는 초안입니다. 고친 뒤 APPLY TO SONG을 눌러야 곡에 들어가고, UNDO APPLY로 되돌릴 수 있습니다.
+  - 분석기는 앱 옆의 `b4nd-analyzer` 폴더(Windows 빌드에 포함, Python 불필요)나 Python 3 + numpy + scipy로 실행됩니다. 공연 모드에서는 쓸 수 없습니다.
+- 스템 분리: 좌측 Stem Separation을 누르거나 분석 창에서 "Stems"를 켜고 ANALYZE를 누릅니다.
+  - Demucs(htdemucs_6s)로 Vocals / Drums / Bass / Guitar / Piano / Other를 나눕니다. CPU에서는 곡당 몇 분 걸립니다.
+  - APPLY TO SONG을 누르면 스템이 음소거된 트랙으로 추가됩니다. 원본 트랙은 그대로 있고, 필요한 스템만 켜서 쓰면 됩니다.
+  - 스템 트랙에는 보라색 "AI 신뢰도" 표시가 붙고, 확인이 필요하면 노란 "!"가 붙습니다 (Guitar/Piano는 항상 귀로 확인).
+  - Windows 빌드의 분석기에는 Demucs와 모델 파일이 들어 있어 인터넷 없이 동작합니다.
+- Audio to MIDI: 좌측 Audio to MIDI를 누르거나 분석 창에서 "Audio to MIDI"를 켭니다. 곡의 스템 트랙을 MIDI로 바꿉니다.
+  - 베이스·보컬은 한 번에 한 음, 피아노·기타는 화음, 드럼은 킥/스네어/하이햇으로 변환합니다 (Basic Pitch, 모델 포함).
+  - APPLY TO SONG을 누르면 음소거된 MIDI 트랙(악기 없음)으로 추가됩니다. VSTi를 고르면 연주합니다.
+- 세트리스트: 좌측 EDIT SETLIST 또는 Ctrl+L. 곡 추가·삭제·순서 바꾸기, 곡마다 시작 시각과 총 시간, 오디오가 RAM에 있는지 보여 줍니다.
+  - 전체 오디오가 RAM 예산(PC RAM의 절반, 최대 12 GB)에 들어가면 모두 미리 불러옵니다. 넘으면 이전·현재·다음 곡만 두고, 다음 곡은 지금 곡을 연주하는 동안 불러옵니다.
+  - 오디오가 다 불러와지지 않은 곡은 재생하지 않습니다. 공연 화면 NEXT 옆에 로딩 상태가 보입니다.
+- 풋스위치: 좌측 FOOTSWITCH 또는 Ctrl+F. 페달이 꽂힌 MIDI 입력을 켜고, 동작마다 LEARN을 누른 뒤 페달을 밟습니다.
+  - 기본값: CC 64 / Note 60 재생·일시정지, CC 65 / Note 62 다음 곡, CC 66 / Note 64 이전 곡, CC 67 다음 큐, CC 68 두 번 = 비상 정지.
+  - 재생 중에는 페달로 곡을 넘기거나 처음으로 돌아가지 않습니다 (실수 방지). 공연 화면 아래 PEDAL 칸에 방금 누른 동작과 연결 상태가 보입니다.
+- 공연 전 점검: 좌측 SHOW CHECK 또는 Ctrl+K. 오디오 장치, 출력 테스트, 오디오 파일, MIDI 모듈, VSTi, 풋스위치, 전원 옵션을 한 화면에서 봅니다.
+  - LIVE MODE를 누르면 먼저 점검하고, 빨간 항목(장치 없음, 오디오 파일 누락, 모듈 분리, VSTi 로드 실패)이 있으면 들어가지 않습니다. 리허설이면 ENTER ANYWAY로 들어갈 수 있습니다.
+  - Live Mode나 재생 중에는 Windows 절전과 화면 꺼짐을 막습니다.
+  - 앱이 비정상 종료되면 다음에 열 때 마지막 곡과 위치로 돌아갈지 묻습니다.
+  - 장시간 테스트: `"B4ND LIVE MTR.exe" --screenshot soak.png --with-audio --project <프로젝트> --soak 150 --soak-csv soak.csv` (docs/10 §4)
+- MIDI 에디터: 타임라인에서 MIDI 트랙을 더블클릭하거나 Ctrl+E. 피아노롤 뒤에 원래 스템(또는 MR) 파형이 깔립니다.
+  - 클릭/드래그로 선택, 끌어서 이동, 오른쪽 끝을 끌어 길이 조절, 더블클릭으로 추가/삭제, 아래 줄에서 벨로시티를 끌어 바꿉니다 (Alt: 그리드 무시).
+  - Q 퀀타이즈, ↑/↓ 이조(Shift: 옥타브), ←/→ 그리드만큼 이동, Delete 삭제, Ctrl+Z / Ctrl+Y 실행 취소/다시 실행.
+  - SAVE를 눌러야 트랙에 들어갑니다. 새 MIDI 파일로 저장하고 이전 파일은 남겨 둡니다. 재생 중에는 저장할 수 없고, 공연 모드에서는 에디터가 닫힙니다.
+
+![공연 전 점검](docs/images/phase14-show-check.png)
+
+![세트리스트](docs/images/phase13-setlist.png)
+
+![풋스위치 설정](docs/images/phase12-footswitch.png)
+
+![공연 화면의 PEDAL 표시](docs/images/phase12-live-pedal.png)
+
+![MIDI 에디터](docs/images/phase11-midi-editor.png)
+
+![MIDI로 변환한 트랙](docs/images/phase10-midi.png)
+
+![스템 트랙](docs/images/phase9-stems.png)
+
+![AI 분석 창](docs/images/phase8-analysis.png)
+
+![코드 줄과 AI 큐](docs/images/phase8-timeline.png)
+
+![믹서와 모듈 리턴](docs/images/phase7-mixer-return.png)
 
 ![지연 측정](docs/images/phase6-latency.png)
 
@@ -77,6 +129,11 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | Ctrl+, | 오디오 설정 |
 | Ctrl+M | MIDI 음원 모듈 |
 | Ctrl+P | VST3 플러그인 |
+| Ctrl+Shift+A | AI 분석 |
+| Ctrl+F | 풋스위치 설정 |
+| Ctrl+L | 세트리스트 |
+| Ctrl+K | 공연 전 점검 |
+| Ctrl+E | MIDI 에디터 (또는 MIDI 트랙 더블클릭) |
 | Ctrl+S / Ctrl+Shift+S | 저장 / 다른 이름으로 저장 |
 | Ctrl+O / Ctrl+N | 프로젝트 열기 / 새 프로젝트 |
 
@@ -99,7 +156,9 @@ cmake --preset windows-msvc-asio
 cmake --build --preset windows-msvc-asio
 ```
 
-GitHub Actions가 매 push/PR마다 Windows(MSVC)와 Linux에서 빌드·테스트하고, Windows 실행 파일과 UI 스크린샷을 Artifact로 올립니다.
+GitHub Actions가 매 push/PR마다 Windows(MSVC)와 Linux에서 빌드·테스트하고, Windows 실행 파일(단독 실행 분석기 포함)과 UI 스크린샷을 Artifact로 올립니다.
+
+분석기만 따로 테스트하려면: `cd analyzer && python -m unittest discover -s tests -t .` (numpy, scipy 필요)
 
 ## 라이선스 메모
 

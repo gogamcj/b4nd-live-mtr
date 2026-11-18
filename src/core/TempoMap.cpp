@@ -119,14 +119,23 @@ std::size_t TempoMap::sigIndexForBar (int bar) const noexcept
     return it == timeSigs.begin() ? 0 : static_cast<std::size_t> (std::distance (timeSigs.begin(), it) - 1);
 }
 
+bool TempoMap::setOffsetSeconds (double seconds)
+{
+    if (! std::isfinite (seconds) || seconds < 0.0 || seconds > 3600.0)
+        return false;
+    offsetSeconds = seconds;
+    return true;
+}
+
 double TempoMap::secondsAtBeat (double beat) const noexcept
 {
     const auto i = tempoIndexForBeat (beat);
-    return tempoStartSeconds[i] + (beat - tempo[i].beat) * 60.0 / tempo[i].bpm;
+    return offsetSeconds + tempoStartSeconds[i] + (beat - tempo[i].beat) * 60.0 / tempo[i].bpm;
 }
 
 double TempoMap::beatAtSeconds (double seconds) const noexcept
 {
+    seconds -= offsetSeconds;
     const auto i = tempoIndexForSeconds (seconds);
     return tempo[i].beat + (seconds - tempoStartSeconds[i]) * tempo[i].bpm / 60.0;
 }

@@ -5,11 +5,15 @@
 #include "audio/AudioDeviceController.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
+#include "app/AnalyzerRunner.h"
 #include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
+#include "midi/FootswitchInput.h"
 #include "midi/MidiOutputService.h"
 #include "plugins/PluginHost.h"
 
+#include <map>
+#include <optional>
 #include <set>
 
 namespace b4nd
@@ -41,12 +45,20 @@ struct TrackInfo
     juce::String mediaPath;            // empty: no media assigned
     double mediaStartSeconds = 0.0;
 
-    enum class MediaStatus { None, Loading, Ready, Missing, Error };
+    enum class MediaStatus { None, Loading, Ready, Missing, Error, Unloaded };   // Unloaded: out of the RAM window (Phase 13)
     MediaStatus mediaStatus = MediaStatus::None;
     juce::String mediaError;
     std::shared_ptr<const AudioData> media;   // decoded at mediaRate
     double mediaRate = 0.0;
     std::shared_ptr<const std::vector<float>> overview;   // peak per bucket over the whole file, for drawing
+
+    // --- AI stems (docs/07): separated from another track's media ---
+    juce::String stemName;             // vocals | drums | bass | guitar | piano | other; empty: not a stem
+    juce::String stemSourcePath;       // media the stem was separated from
+    float aiConfidence = -1.0f;        // 0..1, < 0: not AI-made
+    juce::String aiWarning;            // shown with a warning icon; empty: none
+    bool isStem() const noexcept { return stemName.isNotEmpty(); }
+    juce::String aiPart;               // MIDI converted from a stem (bass, drums, ...); empty: not AI MIDI
 
     // --- external MIDI (MidiExternal tracks) ---
     juce::String midiPath;             // .mid file; empty: none
@@ -74,6 +86,8 @@ struct CuePoint
 {
     juce::String name;
     double seconds = 0.0;
+    juce::String section = "custom";   // intro | verse | pre_chorus | chorus | bridge | solo | outro | custom
+    juce::String source = "user";      // user | ai (from analysis, until the user edits it)
 };
 
 struct SongInfo
@@ -86,6 +100,13 @@ struct SongInfo
     TempoMap tempo;
     std::vector<TrackInfo> tracks;
     std::vector<CuePoint> cues;
+    ClickSettingsData click;           // tone, accent, subdivision, count-in (saved per song)
+
+    // --- analysis (docs/07): drafts the user accepted, with their confidences ---
+    double bpmConfidence = -1.0;       // < 0: not from analysis
+    double keyConfidence = -1.0;
+    std::vector<ChordData> chords;     // shown on the timeline, never played
+    std::vector<AnalysisRunData> analysisRuns;
 };
 
 enum class TransportState
@@ -167,6 +188,8 @@ public:
     void toggleLoop();
     void jumpToCue (int cueIndex);
     void jumpToNextCue();
+    /** The cue before the play head (if the play head is within 1.5 s after a cue, the one before that). */
+    void jumpToPreviousCue();
 
     // --- mixer (pushed to the engine in real time) ---
     void setTrackVolume (int trackIndex, float db);
@@ -176,6 +199,21 @@ public:
     /** Master fader: Main (PA) bus only. */
     void setMasterVolume (float db);
     float getMasterVolumeDb() const noexcept { return masterDb; }
+    /** Main (PA) bus limiter, -0.3 dBFS. On by default; saved with the project. Locked in Live Mode. */
+    void setLimiterEnabled (bool on);
+
+    /** Click of the current song. Rejected in Live Mode. Subdivision / accent / count-in act at
+        once; a new tone is used from the next stop. Count-in is 0, 1, 2 or 4 bars. */
+    juce::String setClickSettings (const ClickSettingsData&);
+    ClickSettingsData getClickSettings() const;
+    static ClickTone clickToneFromName (const std::string&);
+    bool isCountingIn() const noexcept { return isEngineActive() && engine.isCountingIn(); }
+    bool isLimiterEnabled() const noexcept { return limiterOn; }
+    /** Current limiter gain reduction in dB (0 = none, negative = limiting), decays on the UI side. */
+    float getLimiterReductionDb() const noexcept { return limiterGrDb; }
+    /** Some PA output (or the Main mix) went over 0 dBFS since the last clear. */
+    bool isPAClipLatched() const;
+    void clearClipLatches() { engine.clearClipLatches(); sendChangeMessage(); }
 
     // --- media ---
     /** Assigns an audio file to an Audio/Guide track, or adds a new Audio track (trackIndex < 0).
@@ -185,10 +223,50 @@ public:
 
     struct MediaSummary
     {
-        int loading = 0, missing = 0, errors = 0, ready = 0;
+        int loading = 0, missing = 0, errors = 0, ready = 0, unloaded = 0;
         std::int64_t ramBytes = 0;
+        std::int64_t setlistBytes = 0;   // estimate: every song's media decoded
+        std::int64_t budgetBytes = 0;
+        bool windowed = false;           // more than the budget: only previous / current / next song in RAM
     };
     MediaSummary getMediaSummary() const;
+
+    /** Media of one song: what is in RAM, loading, missing. */
+    struct SongMedia { int tracks = 0, ready = 0, loading = 0, missing = 0, errors = 0, unloaded = 0; std::int64_t bytes = 0; };
+    SongMedia getSongMedia (int songIndex) const;
+    /** True when the song can be played with all its audio. */
+    bool isSongReady (int songIndex) const;
+    /** RAM for decoded media (B4ND_MEDIA_BUDGET_MB, else half the PC's RAM, at most 12 GB). */
+    static std::int64_t mediaBudgetBytes();
+    /** Takes finished decodes in now (command line tests that wait without the message loop). */
+    void pollMediaForTests() { applyFinishedMedia(); }
+
+    // --- show check, recovery, soak (Phase 14) ---
+    struct ShowCheckItem
+    {
+        enum class Level { Ok, Info, Warn, Block } level = Level::Ok;
+        juce::String title, detail;
+    };
+    /** docs/10 §5: what must be right before a show. Block items stop Live Mode (with an
+        explicit override); Warn items are shown. */
+    std::vector<ShowCheckItem> runShowCheck();
+    static bool hasBlockers (const std::vector<ShowCheckItem>&);
+    bool wasOutputTestRun() const noexcept { return outputTestRun; }
+    /** After a crash: the song and position that were playing (from the last run). */
+    struct Recovery { bool available = false; int song = -1; double seconds = 0.0; juce::String title; };
+    const Recovery& getRecovery() const noexcept { return recovery; }
+    void restoreRecovery();
+    void dismissRecovery() { recovery = {}; }
+    static juce::File getPositionRecordFile();
+
+
+    /** All rejected in Live Mode and while playing. Empty string on success. */
+    juce::String addSong (const juce::String& title, int atIndex = -1);
+    juce::String removeSong (int index);
+    juce::String moveSong (int from, int to);
+    juce::String setSongInfo (int index, const juce::String& title, const juce::String& artist);
+    /** Start time of each song in the show (song lengths added up) and the total. */
+    std::vector<double> getSongStartTimes() const;
 
     /** RAM above this is reported as a warning (docs/03 §6). */
     static constexpr std::int64_t ramWarningBytes = (std::int64_t) 4 * 1024 * 1024 * 1024;
@@ -205,10 +283,41 @@ public:
     void recallModulePreset (int index) { midi.recallPreset (index); }
     std::vector<MidiPortInfo> listMidiOutputs() { return midi.listOutputs(); }
     MidiOutputService& getMidiOutput() noexcept { return midi; }
+    /** Module audio return (LINE IN -> Main bus): trim and mute work while playing and in Live Mode. */
+    void setModuleReturnGain (int index, float db);
+    void setModuleReturnMute (int index, bool mute);
+    bool isModuleReturnMuted (int index) const noexcept { return juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs) && returnMuted[(size_t) index]; }
+    float getModuleReturnLevel (int index) const noexcept { return juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs) ? returnLevels[(size_t) index] : 0.0f; }
 
     /** Assigns a .mid file to an external MIDI track, or adds a new one (trackIndex < 0). */
     juce::String addMidiFile (const juce::File&, int trackIndex = -1);
     juce::String setTrackModule (int trackIndex, const juce::String& moduleId, int channel = 0);
+
+    // --- footswitch / MIDI control (Phase 12, docs/04 §8) ---
+    FootswitchInput& getFootswitch() noexcept { return *footswitch; }
+    /** Runs a stage action. From a footswitch, song changes and RESTART are refused while a
+        song plays (a stray step must not end a song): the result says why. Empty = done. */
+    juce::String performLiveAction (LiveAction, bool fromFootswitch);
+    /** The inputs to listen to and the mapping; saved in the app settings (they belong to the
+        PC and its pedal, not to a project). */
+    void setFootswitchPorts (const std::vector<MidiPortInfo>&);
+    void setFootswitchBindings (const std::vector<FootswitchBinding>&);
+    /** "NEXT SONG (CC 65)" / "refused: ..." for the status displays; empty when nothing yet. */
+    const juce::String& getLastFootswitchText() const noexcept { return lastFootswitchText; }
+    double getLastFootswitchMs() const noexcept { return lastFootswitchMs; }
+    static juce::File getFootswitchSettingsFile();
+
+    // --- MIDI editor (Phase 11) ---
+    /** A song by id (any song in the setlist, not only the current one). */
+    const SongInfo* findSong (const juce::String& songId) const noexcept;
+    /** Why a MIDI track cannot be saved now (Live Mode, playing), or empty. Editing the draft
+        in the editor is always possible outside Live Mode; only saving is locked. */
+    juce::String midiEditLockReason() const;
+    /** Saves edited events of a MIDI track: writes a new .mid file (the old one stays on disk,
+        so an edit can always be traced back) and points the track at it. The file is read back
+        before the track uses it. Empty string on success, else the reason. */
+    juce::String saveMidiEdit (const juce::String& songId, const juce::String& trackId,
+                               const std::vector<MidiTickEvent>& events);
 
     struct MidiSummary
     {
@@ -258,6 +367,43 @@ public:
     PluginSummary getPluginSummary() const;
     static juce::String pluginStatusText (const TrackInfo&);
 
+    // --- song analysis (docs/07): offline, separate process, results are drafts ---
+    /** The audio track analysed by default: the first Main-bus audio track with loaded media
+        (one called Original / Mix / MR first), or -1. */
+    int findAnalysisSourceTrack() const;
+    /** Analyses a track of the current song (default: findAnalysisSourceTrack). Needs a saved
+        project (results go to analysis/<song-id>/), not in Live Mode, not while playing. */
+    juce::String startAnalysis (int trackIndex = -1, juce::StringArray tasks = {});
+    void cancelAnalysis();
+    AnalyzerRunner::Status getAnalysisStatus() const { return analyzer.getStatus(); }
+    /** Running, or finished but its result not yet taken in (that happens on the next timer tick). */
+    bool isAnalysisPending() const { return analyzer.isBusy() || analyzer.getStatus().state != lastAnalysisState; }
+    AnalyzerRunner& getAnalyzer() noexcept { return analyzer; }
+    /** Last analysis result of the current song (from this session or its result.json), or nullptr. */
+    const AnalysisResult* getAnalysisResult();
+
+    /** What to take from the result, and the user's corrections. */
+    struct AnalysisApply
+    {
+        bool withTempo = true, withTimeSig = true, withKey = true, withCues = true, withChords = true;
+        bool withStems = true;       // add the separated stems as (muted) tracks; the original stays
+        bool withMidi = true;        // add the converted parts as (muted) MIDI tracks
+        double bpm = 0.0;            // > 0: one constant tempo at this BPM instead of the analysed map
+        double tempoScale = 1.0;     // 2 or 0.5: the analyser picked half / double tempo
+        double gridStartSec = -1.0;  // >= 0: bar 1 starts here instead
+        int numerator = 0;           // > 0: instead of the analysed time signature
+        juce::String key;            // not empty: instead of the analysed key
+        bool useEditedSections = false;
+        std::vector<AnalysisResult::Section> sections;   // edited list (names, removed rows)
+    };
+    /** Writes the accepted parts into the current song (stopped, not in Live Mode). AI cues of an
+        earlier apply are replaced, the user's own cues are kept. Stems become muted tracks after
+        the others (stems of an earlier separation of the same track are re-pointed, keeping
+        their mixer settings); their files move to stems/<song-id>/<run>/. One level of undo. */
+    juce::String applyAnalysis (const AnalysisApply&);
+    bool canUndoAnalysisApply() const;
+    juce::String undoAnalysisApply();
+
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
     void setLiveMode (bool shouldBeLive);
@@ -297,9 +443,24 @@ private:
 
     double mediaSampleRate() const noexcept;
     void requestAllMedia();
+    std::map<juce::String, std::int64_t> mediaEstimates;   // path -> decoded bytes (from the header)
+    bool mediaWindowed = false;
+    std::int64_t setlistBytesEstimate = 0;
+    int purgeTicks = 0;
+    bool outputTestRun = false;
+    Recovery recovery;
+    double lastPositionWriteMs = 0.0;
+    juce::String lastPositionWritten;
+    void updateKeepAwake();
+    void writePositionRecord (bool force);
+    void readRecoveryRecord (const juce::StringArray& lines);
+    std::int64_t estimateSetlistBytes();
+    juce::String guardSetlistChange() const;
     void applyFinishedMedia();
     void rebuildPlan();
     void pushMixerToEngine();
+    void pushClickToEngine();
+    void pushLineInputs();
     void loadMidiFile (TrackInfo&, const SongInfo&);
     void sendTrackVolumeToModule (const TrackInfo&);
     juce::String guardModuleChange() const;
@@ -331,6 +492,8 @@ private:
     bool emergency = false;
     bool liveMode = false;
     float masterDb = 0.0f;
+    bool limiterOn = true;
+    float limiterGrDb = 0.0f;
 
     OutputRouting routing = OutputRouting::createDefault (8);
 
@@ -358,11 +521,37 @@ private:
     double roundTripMs = -1.0;
     juce::String roundTripKey;   // device / rate / buffer it was measured with
 
-    std::vector<ModuleProfile> modules;   // module i = MIDI port slot i
+    std::vector<ModuleProfile> modules;   // module i = MIDI port slot i = engine line input i
+    std::array<bool, AudioEngine::maxLineInputs> returnMuted {};
+    std::array<float, AudioEngine::maxLineInputs> returnLevels {};
     MidiOutputService midi;
+    std::unique_ptr<FootswitchInput> footswitch;
+    juce::String lastFootswitchText;
+    double lastFootswitchMs = 0.0;
+    void loadFootswitchSettings();
+    void saveFootswitchSettings();
     PluginHost plugins;
     bool instrumentStateStale = false;   // a plugin changed: capture its state when stopped
     std::set<const PluginInstrument*> failureLogged;
+    void pollAnalysis();
+    AnalyzerRunner analyzer;
+    AnalyzerRunner::State lastAnalysisState = AnalyzerRunner::State::Idle;
+    juce::String analysisStartedAt, analysisTasks;
+    std::map<juce::String, AnalysisResult> analysisResults;   // song id -> last result
+    struct AnalysisUndo
+    {
+        juce::String songId;
+        TempoMap tempo;
+        juce::String key;
+        double bpmConfidence = -1.0, keyConfidence = -1.0;
+        std::vector<CuePoint> cues;
+        std::vector<ChordData> chords;
+        std::optional<std::vector<TrackInfo>> tracks;   // when stems were applied
+        juce::File stemsFrom, stemsTo;                  // the moved stem folder
+    };
+    std::optional<AnalysisUndo> analysisUndo;
+    juce::String applyStems (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
+    juce::String applyMidi (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

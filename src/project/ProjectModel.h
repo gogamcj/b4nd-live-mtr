@@ -25,6 +25,7 @@ struct MediaRef
     double durationSec = 0.0;
     int sampleRate = 0;
     int channels = 0;
+    std::string sourceMediaId;       // stems: the media they were separated from
 };
 
 struct CueData
@@ -63,6 +64,8 @@ struct TrackData
     std::string moduleProfileId;   // external module (midi_external)
     int midiChannel = 0;           // 1-16 overrides the profile's channel, 0 = use the profile's
     std::string midiPath;          // .mid file, stored like media paths
+
+    double aiConfidence = -1.0;    // stems (and later MIDI) made by the AI: 0..1, < 0 = not AI-made
 };
 
 /** A plugin instance and its saved state (docs/05 §6). The state is stored in the database
@@ -83,11 +86,30 @@ struct PluginSlotData
 struct ClickSettingsData
 {
     bool enabled = true;
-    int countInBars = 1;
+    int countInBars = 0;                 // 0, 1, 2 or 4 (schema v5 reset older files to 0)
     bool accentFirst = true;
-    std::string sound = "default";
+    std::string sound = "default";       // default (beep) | wood | stick
     double volumeDb = -6.0;
     int subdivision = 1;
+};
+
+/** One chord of the analysed chord timeline (docs/07). Draft data: shown, never played. */
+struct ChordData
+{
+    double startSec = 0.0, endSec = 0.0;
+    std::string chord;          // "Am", "F#", "Bb", "N" (no chord)
+    double confidence = -1.0;   // 0..1, < 0 = unknown
+};
+
+/** One run of the analyzer for a song: what ran, how it ended, where its result.json is. */
+struct AnalysisRunData
+{
+    std::string id;
+    std::string startedAt, finishedAt;   // ISO 8601 UTC
+    std::string status;                  // done | partial | failed | cancelled
+    std::string tasks;                   // "tempo,key,chords,structure"
+    std::string resultRelPath;           // relative to the package folder
+    std::string modelVersions;           // JSON: analyzer and library versions
 };
 
 struct SongData
@@ -102,9 +124,14 @@ struct SongData
     std::string notes;
     std::vector<TempoPoint> tempoPoints;
     std::vector<TimeSigPoint> timeSigPoints;
+    double gridOffsetSec = 0.0;     // song time of bar 1 beat 1 (TempoMap offset)
+    double bpmConfidence = -1.0;    // from analysis, < 0 = not analysed / set by hand
+    double keyConfidence = -1.0;
     std::vector<CueData> cues;
     std::vector<TrackData> tracks;
     ClickSettingsData click;
+    std::vector<ChordData> chords;
+    std::vector<AnalysisRunData> analysisRuns;
 };
 
 struct OutputData
@@ -139,6 +166,8 @@ struct ProjectData
     std::vector<OutputData> outputs;     // empty: use the device default preset
     std::vector<ModuleProfile> modules;  // external sound modules
     std::vector<PluginSlotData> plugins; // software instrument instances
+    double masterVolumeDb = 0.0;         // Main (PA) bus (v5)
+    bool limiterOn = true;               // Main (PA) bus limiter (v5)
 
     const MediaRef* findMedia (const std::string& mediaId) const
     {

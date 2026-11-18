@@ -107,6 +107,9 @@ struct ModuleProfile
     double delayOffsetMs = 0.0;      // module latency compensation (positive = module is slow, send earlier)
     bool clockOut = false;           // send MIDI Clock + Start/Stop/Continue/Song Position to this port
     double clockOffsetMs = 0.0;      // clock sent this much earlier (positive) or later (negative)
+    int returnInput = -1;            // audio input (0-based) the module's output is cabled into, -1 = none
+    bool returnStereo = false;       // returnInput and returnInput + 1
+    double returnGainDb = 0.0;       // trim of the return into the Main bus
     std::string sendOrder = "msb,lsb,pc";
     int gapMs = 20;                  // between bank / program messages
     int settleMs = 200;              // after the last message before "Ready"

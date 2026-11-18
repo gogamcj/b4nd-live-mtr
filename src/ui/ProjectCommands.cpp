@@ -89,12 +89,34 @@ void save (AppState& state)
 
 void reviewOpenedProject (AppState& state)
 {
-    const auto& missing = state.getMissingMediaOnOpen();
-    auto warnMissing = [&state]
+    // After a crash: offer to go back to the song and place where it stopped (docs/10 §4.6).
+    auto offerRecovery = [&state]
+    {
+        const auto& r = state.getRecovery();
+        if (! r.available)
+            return;
+        const int sec = (int) r.seconds;
+        juce::AlertWindow::showOkCancelBox (
+            juce::MessageBoxIconType::QuestionIcon, "Continue where it stopped?",
+            "Last time the program stopped in song " + juce::String (r.song + 1) + " \"" + r.title + "\" at "
+                + juce::String (sec / 60) + ":" + juce::String (sec % 60).paddedLeft ('0', 2) + ".\n\nGo back there (stopped, ready to play)?",
+            "Go there", "Stay at the start", nullptr,
+            juce::ModalCallbackFunction::create ([&state] (int result)
+            {
+                if (result == 1)
+                    state.restoreRecovery();
+                else
+                    state.dismissRecovery();
+            }));
+    };
+    auto warnMissing = [&state, offerRecovery]
     {
         const auto& m = state.getMissingMediaOnOpen();
         if (m.isEmpty())
+        {
+            offerRecovery();
             return;
+        }
         juce::String list;
         for (int i = 0; i < juce::jmin (8, m.size()); ++i)
             list << "\n  " << m[i];
@@ -102,6 +124,7 @@ void reviewOpenedProject (AppState& state)
             list << "\n  ... and " << (m.size() - 8) << " more";
         showError ("Missing media", juce::String (m.size()) + " audio file(s) were not found. Those tracks stay silent "
                                       "and are marked MISSING on the timeline:" + list);
+        offerRecovery();
     };
 
     if (state.lastOpenHadStaleLock() && state.getLastOpenBackups().size() > 1)
@@ -124,8 +147,7 @@ void reviewOpenedProject (AppState& state)
             }));
         return;
     }
-    if (! missing.isEmpty())
-        warnMissing();
+    warnMissing();   // (also offers the recovery)
 }
 
 } // namespace b4nd::projectCommands

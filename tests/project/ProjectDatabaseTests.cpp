@@ -38,9 +38,14 @@ ProjectData sampleProject()
     p.name = "주말 공연 2026";   // Korean title must survive the round trip
     p.sampleRate = 48000;
     p.appVersion = "0.1.0";
+    p.masterVolumeDb = -3.5;
+    p.limiterOn = false;
 
     MediaRef mr;
     mr.id = newUuid(); mr.path = "media/backing.wav"; mr.durationSec = 180.5; mr.sampleRate = 44100; mr.channels = 2;
+    MediaRef st;   // listed before its source: the source link is written after all rows
+    st.id = newUuid(); st.kind = "stem"; st.path = "stems/song/vocals.wav"; st.sourceMediaId = mr.id; st.channels = 2;
+    p.media.push_back (st);
     p.media.push_back (mr);
     MediaRef gd;
     gd.id = newUuid(); gd.kind = "guide"; gd.path = "C:/Shows/guide 보컬.wav"; gd.durationSec = 180.0; gd.sampleRate = 48000; gd.channels = 1;
@@ -64,6 +69,9 @@ ProjectData sampleProject()
         a.id = newUuid(); a.name = "Original Mix"; a.kind = "audio"; a.busKind = "main";
         a.volumeDb = -3.5; a.pan = -0.25; a.mute = true;
         a.clips.push_back ({ newUuid(), mr.id, 1.5, 0.25, 0.0 });
+        TrackData v;
+        v.id = newUuid(); v.name = "Stem: Vocals"; v.kind = "audio"; v.mute = true; v.aiConfidence = i == 0 ? 0.0 : 0.62;
+        v.clips.push_back ({ newUuid(), st.id, 1.5, 0.0, 0.0 });
         TrackData g;
         g.id = newUuid(); g.name = "Guide"; g.kind = "guide"; g.busKind = "guide"; g.solo = true;
         g.clips.push_back ({ newUuid(), gd.id, 0.0, 0.0, 0.0 });
@@ -75,9 +83,21 @@ ProjectData sampleProject()
         x.id = newUuid(); x.name = "Strings"; x.kind = "midi_external"; x.moduleProfileId = "mod-integra";
         x.midiChannel = i == 0 ? 0 : 5; x.midiPath = "media/strings 현악.mid";
         m.pluginSlotId = "slot-piano-" + std::to_string (i);
-        s.tracks = { a, g, c, m, x };
+        s.tracks = { a, v, g, c, m, x };
         s.click.countInBars = 2;
+        s.click.sound = "wood";
+        s.click.subdivision = 2;
+        s.click.accentFirst = false;
         s.click.volumeDb = -9.0;
+        if (i != 1)   // song 2: never analysed (NULL confidences, no chords)
+        {
+            s.gridOffsetSec = 0.6025 + i;
+            s.bpmConfidence = 0.93;
+            s.keyConfidence = i == 0 ? 0.0 : 0.41;   // 0 is a value, not "unknown"
+            s.chords = { { 0.6, 2.5, "Am", 0.81 }, { 2.5, 4.375, "F", -1.0 }, { 4.375, 6.25, "N", 0.2 } };
+            s.analysisRuns = { { newUuid(), "2026-11-18T10:00:00Z", "2026-11-18T10:00:02Z", "partial", "tempo,key,stems",
+                                 "analysis/" + s.id + "/result.json", "{\"b4nd_analyzer\": \"0.1.0\"}" } };
+        }
         p.songs.push_back (s);
     }
     ModuleProfile mod;
@@ -85,6 +105,7 @@ ProjectData sampleProject()
     mod.channel = 3; mod.bankMsb = 87; mod.bankLsb = -1; mod.program = 41; mod.volume = 90; mod.pan = -1;
     mod.delayOffsetMs = 4.5; mod.sendOrder = "lsb,msb,pc"; mod.gapMs = 30; mod.settleMs = 400; mod.sustainEnabled = false;
     mod.clockOut = true; mod.clockOffsetMs = -2.5;
+    mod.returnInput = 2; mod.returnStereo = true; mod.returnGainDb = -4.5;
     ModuleProfile plain;
     plain.id = "mod-plain"; plain.deviceName = "GM"; plain.portName = "Port 2";
     p.modules = { mod, plain };
@@ -113,12 +134,14 @@ ProjectData sampleProject()
 
 bool sameProject (const ProjectData& a, const ProjectData& b)
 {
+    if (a.masterVolumeDb != b.masterVolumeDb || a.limiterOn != b.limiterOn)   // NOLINT exact: stored as REAL
+        return false;
     if (a.id != b.id || a.name != b.name || a.sampleRate != b.sampleRate || a.media.size() != b.media.size()
         || a.songs.size() != b.songs.size() || a.setlists.size() != b.setlists.size() || a.outputs.size() != b.outputs.size())
         return false;
     for (size_t i = 0; i < a.media.size(); ++i)
         if (a.media[i].id != b.media[i].id || a.media[i].path != b.media[i].path || a.media[i].kind != b.media[i].kind
-            || a.media[i].channels != b.media[i].channels)
+            || a.media[i].channels != b.media[i].channels || a.media[i].sourceMediaId != b.media[i].sourceMediaId)
             return false;
     for (size_t i = 0; i < a.songs.size(); ++i)
     {
@@ -126,8 +149,24 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
         if (x.id != y.id || x.title != y.title || x.key != y.key || x.lengthSec != y.lengthSec   // NOLINT exact: stored as REAL
             || x.lastPositionSec != y.lastPositionSec || x.tempoPoints.size() != y.tempoPoints.size()
             || x.timeSigPoints.size() != y.timeSigPoints.size() || x.cues.size() != y.cues.size()
-            || x.tracks.size() != y.tracks.size() || x.click.countInBars != y.click.countInBars)
+            || x.tracks.size() != y.tracks.size() || x.click.countInBars != y.click.countInBars
+            || x.click.sound != y.click.sound || x.click.subdivision != y.click.subdivision || x.click.accentFirst != y.click.accentFirst)
             return false;
+        if (x.gridOffsetSec != y.gridOffsetSec || x.bpmConfidence != y.bpmConfidence   // NOLINT exact: stored as REAL
+            || x.keyConfidence != y.keyConfidence || x.chords.size() != y.chords.size()
+            || x.analysisRuns.size() != y.analysisRuns.size())
+            return false;
+        for (size_t k = 0; k < x.chords.size(); ++k)
+            if (x.chords[k].startSec != y.chords[k].startSec || x.chords[k].endSec != y.chords[k].endSec
+                || x.chords[k].chord != y.chords[k].chord || x.chords[k].confidence != y.chords[k].confidence)
+                return false;
+        for (size_t k = 0; k < x.analysisRuns.size(); ++k)
+        {
+            const auto &r = x.analysisRuns[k], &q = y.analysisRuns[k];
+            if (r.id != q.id || r.startedAt != q.startedAt || r.finishedAt != q.finishedAt || r.status != q.status
+                || r.tasks != q.tasks || r.resultRelPath != q.resultRelPath || r.modelVersions != q.modelVersions)
+                return false;
+        }
         for (size_t k = 0; k < x.tempoPoints.size(); ++k)
             if (x.tempoPoints[k].beat != y.tempoPoints[k].beat || x.tempoPoints[k].bpm != y.tempoPoints[k].bpm)
                 return false;
@@ -144,7 +183,7 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             if (t.id != u.id || t.name != u.name || t.kind != u.kind || t.busKind != u.busKind || t.volumeDb != u.volumeDb
                 || t.pan != u.pan || t.mute != u.mute || t.solo != u.solo || t.destinationLabel != u.destinationLabel
                 || t.clips.size() != u.clips.size() || t.moduleProfileId != u.moduleProfileId || t.midiChannel != u.midiChannel
-            || t.midiPath != u.midiPath || t.pluginSlotId != u.pluginSlotId)
+            || t.midiPath != u.midiPath || t.pluginSlotId != u.pluginSlotId || t.aiConfidence != u.aiConfidence)   // NOLINT exact
                 return false;
             for (size_t c = 0; c < t.clips.size(); ++c)
                 if (t.clips[c].mediaId != u.clips[c].mediaId || t.clips[c].startSec != u.clips[c].startSec
@@ -168,7 +207,8 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             || m.channel != n.channel || m.bankMsb != n.bankMsb || m.bankLsb != n.bankLsb || m.program != n.program
             || m.volumeCc != n.volumeCc || m.volume != n.volume || m.panCc != n.panCc || m.pan != n.pan
             || m.sustainEnabled != n.sustainEnabled || m.delayOffsetMs != n.delayOffsetMs || m.sendOrder != n.sendOrder
-            || m.gapMs != n.gapMs || m.settleMs != n.settleMs || m.clockOut != n.clockOut || m.clockOffsetMs != n.clockOffsetMs)
+            || m.gapMs != n.gapMs || m.settleMs != n.settleMs || m.clockOut != n.clockOut || m.clockOffsetMs != n.clockOffsetMs
+            || m.returnInput != n.returnInput || m.returnStereo != n.returnStereo || m.returnGainDb != n.returnGainDb)
             return false;
     }
     if (a.setlists[0].songIds != b.setlists[0].songIds || a.setlists[0].venue != b.setlists[0].venue)
@@ -323,6 +363,7 @@ TEST_CASE ("Project: corrupted pages are detected on open")
             s.id = newUuid();
             for (auto& tr : s.tracks) { tr.id = newUuid(); for (auto& c : tr.clips) c.id = newUuid(); }
             for (auto& c : s.cues) c.id = newUuid();
+            for (auto& r : s.analysisRuns) r.id = newUuid();
             s.notes = std::string (2000, 'x');
             p.songs.push_back (s);
         }
@@ -415,6 +456,10 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
         CHECK (db.open (file, true).ok);
         p.modules.clear();
         p.plugins.clear();
+        p.masterVolumeDb = 0.0;   // v1 had no mix settings: the upgrade gives the defaults
+        p.limiterOn = true;
+        for (auto& s : p.songs)
+            s.click.countInBars = 0;   // and resets count-in (never played before v5)
         for (auto& s : p.songs)
             for (auto& tr : s.tracks)
             {
@@ -428,7 +473,9 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
     sqlite3_open (file.c_str(), &raw);
     CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; ALTER TABLE plugin_slot DROP COLUMN state_blob;"
                               " ALTER TABLE plugin_slot DROP COLUMN description_xml; ALTER TABLE module_profile DROP COLUMN clock_out;"
-                              " ALTER TABLE module_profile DROP COLUMN clock_offset_ms; UPDATE schema_version SET version = 1;",
+                               " ALTER TABLE module_profile DROP COLUMN clock_offset_ms; ALTER TABLE project DROP COLUMN master_volume_db;"
+                               " ALTER TABLE project DROP COLUMN limiter_on; ALTER TABLE module_profile DROP COLUMN return_stereo;"
+                              " ALTER TABLE module_profile DROP COLUMN return_gain_db; UPDATE schema_version SET version = 1;",
                          nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close (raw);
 
@@ -445,4 +492,35 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
     ProjectData r;
     CHECK (db.load (r).ok);
     CHECK (sameProject (withModules, r));
+}
+
+TEST_CASE ("Project: v4 files get count-in 0 on upgrade (older builds stored 1 but never counted in)")
+{
+    TempDir t;
+    const auto file = t.sub ("v4.db");
+    auto p = sampleProject();
+    {
+        ProjectDatabase db;
+        CHECK (db.open (file, true).ok);
+        CHECK (db.save (p).ok);
+    }
+    sqlite3* raw = nullptr;
+    sqlite3_open (file.c_str(), &raw);
+    CHECK (sqlite3_exec (raw, "ALTER TABLE project DROP COLUMN master_volume_db; ALTER TABLE project DROP COLUMN limiter_on;"
+                              " ALTER TABLE module_profile DROP COLUMN return_stereo; ALTER TABLE module_profile DROP COLUMN return_gain_db;"
+                              " UPDATE click_settings SET count_in_bars = 1; UPDATE schema_version SET version = 4;",
+                         nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close (raw);
+    ProjectDatabase db;
+    CHECK (db.open (file, false).ok);
+    CHECK (db.getSchemaVersion() == 5);
+    ProjectData q;
+    CHECK (db.load (q).ok);
+    for (const auto& s : q.songs)
+    {
+        CHECK (s.click.countInBars == 0);
+        CHECK (s.click.sound == "wood");   // the rest of the click settings stay
+    }
+    CHECK (q.limiterOn);
+    CHECK (q.masterVolumeDb == 0.0);
 }

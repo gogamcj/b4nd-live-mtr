@@ -211,3 +211,28 @@ CREATE TABLE analysis_run (
 - `module_profile`에 `clock_out INTEGER DEFAULT 0`(이 포트로 MIDI Clock을 보낼지)과 `clock_offset_ms REAL DEFAULT 0`(클럭만 앞당기거나 늦추는 값, ±50 ms로 제한)을 추가했다
 - 지연 측정 결과는 기존 `delay_offset_ms`에 들어간다. 루프백 왕복 지연은 장치·샘플레이트·버퍼 크기에 따라 달라지므로 프로젝트에 저장하지 않는다 (앱을 켤 때마다 다시 잰다)
 - v1–v3 파일은 트랜잭션 하나로 v4까지 올린다. 테스트: v4 열 왕복, v1 파일에서 올린 뒤 기본값
+
+### 스키마 v5 (Phase 7)
+
+- `project.master_volume_db REAL DEFAULT 0`, `project.limiter_on INTEGER DEFAULT 1`: Main 볼륨과 PA 리미터
+- `module_profile.return_stereo INTEGER DEFAULT 0`, `module_profile.return_gain_db REAL DEFAULT 0`: 모듈 오디오 리턴. 입력 채널은 처음 설계에 있던 `audio_input_channel`을 쓴다 (0부터, NULL = 없음)
+- `click_settings`(곡마다, 설계 때부터 있던 표)를 실제로 쓴다: `count_in_bars`, `accent_first`, `sound`(default | wood | stick), `subdivision`(1, 2, 4). `volume_db`는 쓰지 않는다 (클릭 트랙 페이더가 레벨)
+- v4 → v5 업그레이드에서 `count_in_bars`를 모두 0으로 바꾼다. 예전 빌드는 기본값 1을 저장했지만 카운트인을 하지 않았다. 열자마자 곡이 1마디 늦게 시작하는 일이 없게 하기 위해서다. 새 기본값도 0이다
+- 테스트: v5 열 왕복, v1 → v5, v4 → v5에서 카운트인만 0이 되고 다른 클릭 설정은 유지
+
+### Phase 8 (스키마 변경 없음, v5 그대로)
+
+처음부터 있던 열과 테이블을 이제 사용한다.
+- `song.start_offset_sec`: 마디 1 첫 박의 곡 시간(그리드 시작). 그 앞은 음수 박이다
+- `song.bpm_confidence`, `song.key_confidence`: 분석에서 적용한 값의 신뢰도. 손으로 고친 값이나 분석하지 않은 곡은 NULL이다
+- `chord_event`: 코드 타임라인. 표시용이며 재생에는 쓰지 않는다
+- `analysis_run`: 분석 기록. 시작·종료 시각, 상태(done/partial/failed/cancelled), 작업 목록, `analysis/<song-id>/result.json` 경로, 분석기 버전(JSON). 곡마다 최근 20개만 남긴다
+- `cue_point.section`, `cue_point.source`: 분석에서 온 큐는 `source = 'ai'`. 다시 적용하면 AI 큐만 바뀌고 사용자 큐는 남는다
+- 테스트: 위 값의 왕복과, 0 신뢰도와 NULL(값 없음)의 구분
+
+### Phase 9 (스키마 변경 없음, v5 그대로)
+
+- `media_file.kind = 'stem'`과 `media_file.source_media_id`: 스템 파일과 그 원본. 원본이 곡에서 지워졌으면 NULL이다. 스템이 원본보다 먼저 나와도 되도록, 모든 행을 넣은 뒤 원본 연결을 UPDATE로 쓴다
+- `track.ai_confidence`: 스템 트랙의 분리 신뢰도(0~1). AI가 만든 트랙이 아니면 NULL이다
+- 스템 파일 위치: `stems/<song-id>/<시각>/<name>.wav` (패키지 상대 경로)
+- 테스트: 스템 미디어와 원본 연결, 신뢰도 0과 NULL의 구분 왕복

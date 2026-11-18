@@ -151,6 +151,11 @@ AppState::AppState (AudioEngine& e, AudioDeviceController& d)
     engine.setRouting (routing);
     midi.onStatusChanged = [this] { sendChangeMessage(); };
     midi.start();
+    footswitch = std::make_unique<FootswitchInput> (createJuceMidiInputBackend());
+    footswitch->onAction = [this] (LiveAction a) { performLiveAction (a, true); };
+    footswitch->onPortsChanged = [this] { sendChangeMessage(); };
+    loadFootswitchSettings();
+    footswitch->start();
     device.addChangeListener (this);
     requestAllMedia();
     rebuildPlan();
@@ -161,6 +166,9 @@ AppState::~AppState()
 {
     stopTimer();
     closeProject();
+    footswitch->onAction = nullptr;
+    footswitch->onPortsChanged = nullptr;
+    footswitch->shutdown();
     midi.onStatusChanged = nullptr;
     midi.shutdown();   // releases every sounding note first
     device.removeChangeListener (this);
@@ -227,6 +235,9 @@ void AppState::selectSong (int index)
     position = 0.0;
     trackLevels.fill (0.0f);
     juce::Logger::writeToLog ("Song selected: " + songs[(size_t) index].title);
+    writePositionRecord (true);
+    if (mediaWindowed)
+        requestAllMedia();   // the next song starts decoding now, far ones leave RAM
     rebuildPlan();   // the engine swaps it in once the stop fade has finished
     sendChangeMessage();
 }
@@ -240,6 +251,8 @@ void AppState::setTransport (TransportState s)
         return;
     transport = s;
     lastTickMs = juce::Time::getMillisecondCounterHiRes();
+    updateKeepAwake();
+    writePositionRecord (true);
     sendChangeMessage();
 }
 
@@ -248,6 +261,13 @@ void AppState::play()
     auto* song = getCurrentSong();
     if (song == nullptr)
         return;
+    if (! isSongReady (currentSong))
+    {
+        // Never start a song without its audio (the MR would be missing on the PA).
+        juce::Logger::writeToLog ("Transport: PLAY refused, " + song->title + " is still loading");
+        sendChangeMessage();
+        return;
+    }
     emergency = false;
     if (position >= song->lengthSeconds)
         position = 0.0;
@@ -323,6 +343,7 @@ bool AppState::startOutputTest (TestSignal signal, int output)
 {
     if (! isEngineActive() || transport == TransportState::Playing)
         return false;
+    outputTestRun = true;
     EngineCommand c;
     c.type = EngineCommand::Type::StartTest;
     c.intValue = (int) signal;
@@ -466,7 +487,27 @@ void AppState::setMasterVolume (float db)
 {
     masterDb = juce::jlimit (-60.0f, 6.0f, db);
     engine.setMasterGain (juce::Decibels::decibelsToGain (masterDb, -60.0f));
+    markDirty();
     sendChangeMessage();
+}
+
+void AppState::setLimiterEnabled (bool on)
+{
+    if (liveMode || on == limiterOn)
+        return;   // never switched during a show: it moves the PA path by 1 ms
+    limiterOn = on;
+    engine.setLimiterEnabled (on);
+    juce::Logger::writeToLog (juce::String ("Main limiter ") + (on ? "ON" : "OFF"));
+    markDirty();
+    sendChangeMessage();
+}
+
+bool AppState::isPAClipLatched() const
+{
+    for (int o = 0; o < juce::jmin (routing.getNumOutputs(), AudioEngine::maxOutputs); ++o)
+        if (routing.getOutput (o).isPA && engine.isClipLatched (o))
+            return true;
+    return false;
 }
 
 void AppState::setTrackPan (int trackIndex, float pan)
@@ -489,14 +530,75 @@ double AppState::mediaSampleRate() const noexcept
     return isEngineActive() ? engine.getSampleRate() : 48000.0;
 }
 
-void AppState::requestAllMedia()
+std::int64_t AppState::mediaBudgetBytes()
+{
+    if (const auto env = juce::SystemStats::getEnvironmentVariable ("B4ND_MEDIA_BUDGET_MB", {}); env.isNotEmpty())
+        return (std::int64_t) env.getLargeIntValue() * 1024 * 1024;
+    const auto ramMb = (std::int64_t) juce::SystemStats::getMemorySizeInMegabytes();
+    return std::min<std::int64_t> ((std::int64_t) 12 * 1024, std::max<std::int64_t> (1024, ramMb / 2)) * 1024 * 1024;
+}
+
+std::int64_t AppState::estimateSetlistBytes()
 {
     const double sr = mediaSampleRate();
-    for (auto& song : songs)
+    std::int64_t total = 0;
+    std::set<juce::String> seen;   // a file used by two songs is decoded once
+    for (const auto& song : songs)
+        for (const auto& t : song.tracks)
+        {
+            if (t.mediaPath.isEmpty() || ! seen.insert (t.mediaPath).second)
+                continue;
+            if (t.media != nullptr && std::abs (t.mediaRate - sr) < 0.5)
+            {
+                total += MediaPool::bytesOf (*t.media);
+                continue;
+            }
+            auto it = mediaEstimates.find (t.mediaPath + "@" + juce::String ((int) sr));
+            if (it == mediaEstimates.end())
+                it = mediaEstimates.emplace (t.mediaPath + "@" + juce::String ((int) sr), mediaPool.estimateBytes (juce::File (t.mediaPath), sr)).first;
+            total += it->second;
+        }
+    return total;
+}
+
+void AppState::requestAllMedia()
+{
+    // Phase 13: everything in RAM when it fits (nothing is ever decoded during the show).
+    // Otherwise only the previous, current and next song: the next one is decoded while the
+    // current one plays, so it is ready when the band gets there.
+    const double sr = mediaSampleRate();
+    const auto budget = mediaBudgetBytes();
+    const auto need = estimateSetlistBytes();
+    const bool windowed = need > budget;
+    setlistBytesEstimate = need;
+    if (windowed != mediaWindowed)
+    {
+        mediaWindowed = windowed;
+        juce::Logger::writeToLog (juce::String ("Media: setlist needs ") + juce::String (need >> 20) + " MB, budget "
+                                  + juce::String (budget >> 20) + " MB -> "
+                                  + (windowed ? "only previous / current / next song in RAM" : "every song in RAM"));
+    }
+    bool released = false;
+    for (int si = 0; si < (int) songs.size(); ++si)
+    {
+        auto& song = songs[(size_t) si];
+        const bool wanted = ! windowed || std::abs (si - currentSong) <= 1;
         for (auto& t : song.tracks)
         {
             if (t.mediaPath.isEmpty())
                 continue;
+            if (! wanted)
+            {
+                if (t.media != nullptr || t.mediaStatus == TrackInfo::MediaStatus::Loading || t.mediaStatus == TrackInfo::MediaStatus::Ready)
+                {
+                    t.media.reset();   // the overview stays for drawing
+                    t.mediaStatus = TrackInfo::MediaStatus::Unloaded;
+                    released = true;
+                }
+                if (t.mediaStatus != TrackInfo::MediaStatus::Missing)
+                    t.mediaStatus = TrackInfo::MediaStatus::Unloaded;
+                continue;
+            }
             if (t.media != nullptr && std::abs (t.mediaRate - sr) < 0.5)
                 continue;
             const juce::File f (t.mediaPath);
@@ -516,6 +618,38 @@ void AppState::requestAllMedia()
                 }
             }
         }
+    }
+    if (released)
+        mediaPool.purgeUnused();   // only songs two or more away: no plan of the engine holds them
+}
+
+AppState::SongMedia AppState::getSongMedia (int index) const
+{
+    SongMedia m;
+    if (! juce::isPositiveAndBelow (index, (int) songs.size()))
+        return m;
+    for (const auto& t : songs[(size_t) index].tracks)
+    {
+        if (t.mediaPath.isEmpty())
+            continue;
+        ++m.tracks;
+        switch (t.mediaStatus)
+        {
+            case TrackInfo::MediaStatus::Ready:    ++m.ready; if (t.media != nullptr) m.bytes += MediaPool::bytesOf (*t.media); break;
+            case TrackInfo::MediaStatus::Loading:  ++m.loading; break;
+            case TrackInfo::MediaStatus::Missing:  ++m.missing; break;
+            case TrackInfo::MediaStatus::Error:    ++m.errors; break;
+            case TrackInfo::MediaStatus::Unloaded: ++m.unloaded; break;
+            case TrackInfo::MediaStatus::None:     break;
+        }
+    }
+    return m;
+}
+
+bool AppState::isSongReady (int index) const
+{
+    const auto m = getSongMedia (index);
+    return m.loading == 0 && m.unloaded == 0;
 }
 
 void AppState::applyFinishedMedia()
@@ -533,9 +667,9 @@ void AppState::applyFinishedMedia()
         for (size_t si = 0; si < songs.size(); ++si)
             for (auto& t : songs[si].tracks)
             {
-                if (t.mediaPath != f.path
+                if (t.mediaPath != f.path || t.mediaStatus == TrackInfo::MediaStatus::Unloaded
                     || (t.mediaStatus == TrackInfo::MediaStatus::Ready && std::abs (t.mediaRate - sr) < 0.5))
-                    continue;
+                    continue;   // (an unloaded song left the RAM window while it was decoding)
                 if (f.result.data != nullptr)
                 {
                     t.media = f.result.data;
@@ -630,9 +764,13 @@ AppState::MediaSummary AppState::getMediaSummary() const
                 case TrackInfo::MediaStatus::Missing: ++m.missing; break;
                 case TrackInfo::MediaStatus::Error:   ++m.errors;  break;
                 case TrackInfo::MediaStatus::Ready:   ++m.ready;   break;
+                case TrackInfo::MediaStatus::Unloaded: ++m.unloaded; break;
                 case TrackInfo::MediaStatus::None:    break;
             }
     m.ramBytes = mediaPool.getCachedBytes();
+    m.budgetBytes = mediaBudgetBytes();
+    m.windowed = mediaWindowed;
+    m.setlistBytes = setlistBytesEstimate;
     return m;
 }
 
@@ -672,6 +810,8 @@ static ModuleProfile sanitise (ModuleProfile p)
     p.clockOffsetMs = juce::jlimit (-50.0, 50.0, p.clockOffsetMs);
     p.gapMs = juce::jlimit (0, 500, p.gapMs);
     p.settleMs = juce::jlimit (0, 5000, p.settleMs);
+    p.returnInput = p.returnInput < 0 ? -1 : juce::jlimit (0, 63, p.returnInput);
+    p.returnGainDb = juce::jlimit (-60.0, 12.0, p.returnGainDb);
     if (p.deviceName.empty())
         p.deviceName = p.portName.empty() ? "Module" : p.portName;
     return p;
@@ -687,6 +827,7 @@ juce::String AppState::addModule (ModuleProfile p)
         p.id = newUuid();
     modules.push_back (sanitise (std::move (p)));
     midi.setModules (modules);
+    pushLineInputs();
     juce::Logger::writeToLog ("MIDI module added: " + juce::String::fromUTF8 (modules.back().deviceName.c_str()));
     markDirty();
     rebuildPlan();
@@ -703,7 +844,8 @@ juce::String AppState::updateModule (int index, const ModuleProfile& p)
     auto np = sanitise (p);
     np.id = modules[(size_t) index].id;
     modules[(size_t) index] = np;
-    midi.setModules (modules);   // reopens on a port change, sends the preset again on a preset change
+    midi.setModules (modules);
+    pushLineInputs();   // reopens on a port change, sends the preset again on a preset change
     markDirty();
     rebuildPlan();               // channel or delay may have changed
     sendChangeMessage();
@@ -719,11 +861,13 @@ juce::String AppState::removeModule (int index)
     const auto id = juce::String::fromUTF8 (modules[(size_t) index].id.c_str());
     midi.panic();
     modules.erase (modules.begin() + index);
+    returnMuted.fill (false);   // indices shift: never leave a mute on the wrong module
     for (auto& song : songs)
         for (auto& t : song.tracks)
             if (t.moduleId == id)
                 t.moduleId.clear();
     midi.setModules (modules);
+    pushLineInputs();
     markDirty();
     rebuildPlan();
     sendChangeMessage();
@@ -1129,6 +1273,86 @@ void AppState::pushMixerToEngine()
         engine.setTrackMute (i, t != nullptr && t->mute);
         engine.setTrackSolo (i, t != nullptr && t->solo);
     }
+    pushClickToEngine();
+}
+
+void AppState::pushLineInputs()
+{
+    for (int i = 0; i < AudioEngine::maxLineInputs; ++i)
+    {
+        if (i < (int) modules.size() && modules[(size_t) i].returnInput >= 0)
+        {
+            const auto& m = modules[(size_t) i];
+            engine.setLineInput (i, m.returnInput, m.returnStereo ? m.returnInput + 1 : -1,
+                                 juce::Decibels::decibelsToGain ((float) m.returnGainDb, -60.0f), returnMuted[(size_t) i]);
+        }
+        else
+        {
+            engine.setLineInput (i, -1, -1, 1.0f, false);
+        }
+    }
+}
+
+void AppState::setModuleReturnGain (int index, float db)
+{
+    if (! juce::isPositiveAndBelow (index, (int) modules.size()))
+        return;
+    modules[(size_t) index].returnGainDb = juce::jlimit (-60.0, 12.0, (double) db);
+    pushLineInputs();   // a fader: allowed while playing and in Live Mode, like track faders
+    markDirty();
+    sendChangeMessage();
+}
+
+void AppState::setModuleReturnMute (int index, bool mute)
+{
+    if (! juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs))
+        return;
+    returnMuted[(size_t) index] = mute;
+    pushLineInputs();
+    sendChangeMessage();
+}
+
+void AppState::pushClickToEngine()
+{
+    const auto c = getClickSettings();
+    engine.setClickSubdivision (c.subdivision);
+    engine.setClickAccent (c.accentFirst);
+    engine.setCountInBars (c.enabled ? c.countInBars : 0);
+}
+
+ClickSettingsData AppState::getClickSettings() const
+{
+    const auto* s = getCurrentSong();
+    return s != nullptr ? s->click : ClickSettingsData {};
+}
+
+ClickTone AppState::clickToneFromName (const std::string& n)
+{
+    if (n == "wood" || n == "woodblock") return ClickTone::Wood;
+    if (n == "stick") return ClickTone::Stick;
+    return ClickTone::Beep;
+}
+
+juce::String AppState::setClickSettings (const ClickSettingsData& in)
+{
+    if (liveMode)
+        return "Live Mode: the click cannot be changed during a show";
+    auto* s = currentSongMutable();
+    if (s == nullptr)
+        return "No song";
+    auto c = in;
+    c.countInBars = c.countInBars >= 4 ? 4 : c.countInBars >= 2 ? 2 : c.countInBars >= 1 ? 1 : 0;   // DB allows 0,1,2,4
+    c.subdivision = c.subdivision == 2 || c.subdivision == 4 ? c.subdivision : 1;
+    if (c.sound != "wood" && c.sound != "stick")
+        c.sound = "default";
+    const bool toneChanged = c.sound != s->click.sound;
+    s->click = c;
+    pushClickToEngine();
+    if (toneChanged)
+        rebuildPlan();   // picked up at the next stop if playing
+    markDirty();
+    sendChangeMessage();
+    return {};
 }
 
 void AppState::rebuildPlan()
@@ -1151,7 +1375,7 @@ void AppState::rebuildPlan()
             {
                 plan->hasClick = true;
                 plan->clickSlot = i;
-                plan->click = PlaybackPlan::makeDefaultClick (sr);
+                plan->click = PlaybackPlan::makeClick (clickToneFromName (song->click.sound), sr);
             }
             continue;
         }
@@ -1226,6 +1450,11 @@ void AppState::setLiveMode (bool shouldBeLive)
     if (shouldBeLive)
     {
         cancelMeasurement();
+        if (analyzer.isBusy())
+        {
+            analyzer.cancel();   // no analysis running on stage: it takes CPU from the audio
+            juce::Logger::writeToLog ("Analysis cancelled: entering Live Mode");
+        }
         plugins.closeAllEditors();   // no plugin windows on stage
         const auto ps = getPluginSummary();
         if (ps.problems > 0 || ps.notCertified > 0)
@@ -1235,6 +1464,7 @@ void AppState::setLiveMode (bool shouldBeLive)
     routing.setLocked (shouldBeLive);   // no routing edits during a show
     device.setAutoReconnectAllowed (! shouldBeLive);   // on stage, reconnecting is a deliberate action
     juce::Desktop::setScreenSaverEnabled (! shouldBeLive);
+    updateKeepAwake();
     juce::Logger::writeToLog (shouldBeLive ? "Entered LIVE MODE" : "Left LIVE MODE");
     sendChangeMessage();
 }
@@ -1487,7 +1717,17 @@ void AppState::timerCallback()
 {
     applyFinishedMedia();
     pollMeasurement();
+    pollAnalysis();
     engine.collectGarbage();
+    if (transport == TransportState::Playing)
+        writePositionRecord (false);   // every 10 s at most
+    if (mediaWindowed && ++purgeTicks >= 60)
+    {
+        // Songs that left the RAM window are freed here, on the message thread, once the
+        // engine has given back the plan that still used them (never on the audio thread).
+        purgeTicks = 0;
+        mediaPool.purgeUnused();
+    }
 
     // Plugins: unsaved changes (editor / presets) and failures in the audio thread.
     bool pluginEvent = false;
@@ -1544,6 +1784,13 @@ void AppState::timerCallback()
             outputLevels[(size_t) i] = engine.takeOutputPeak (i);
         for (int i = 0; i < (int) trackLevels.size(); ++i)
             trackLevels[(size_t) i] = engine.takeTrackPeak (i);
+        for (int i = 0; i < AudioEngine::maxLineInputs; ++i)
+            returnLevels[(size_t) i] = engine.takeLineInputPeak (i);
+        {
+            const float g = engine.takeLimiterGain();
+            const float db = g < 1.0f ? juce::Decibels::gainToDecibels (g, -60.0f) : 0.0f;
+            limiterGrDb = db < limiterGrDb ? db : juce::jmin (0.0f, limiterGrDb + 0.5f);   // fall back ~15 dB/s
+        }
 
         EngineEvent ev;
         while (engine.popEvent (ev))
@@ -1730,6 +1977,7 @@ ProjectData AppState::toProjectData() const
 
     const auto pkg = session.getPackage();
     std::map<juce::String, std::string> mediaIds;   // absolute path -> media id
+    std::map<std::string, juce::String> stemSources;   // stem media id -> source path
 
     SetlistData setlist;
     setlist.id = "setlist-main";
@@ -1742,16 +1990,25 @@ ProjectData AppState::toProjectData() const
         sd.title = u8 (s.title);
         sd.artist = u8 (s.artist);
         sd.key = u8 (s.key);
+        sd.click = s.click;
         sd.baseBpm = s.tempo.bpmAtBeat (0.0);
         sd.lengthSec = s.lengthSeconds;
         sd.tempoPoints = s.tempo.getTempoPoints();
         sd.timeSigPoints = s.tempo.getTimeSigPoints();
+        sd.gridOffsetSec = s.tempo.getOffsetSeconds();
+        sd.bpmConfidence = s.bpmConfidence;
+        sd.keyConfidence = s.keyConfidence;
+        sd.chords = s.chords;
+        sd.analysisRuns = s.analysisRuns;
         for (const auto& c : s.cues)
         {
             CueData cd;
             cd.id = newUuid();
             cd.name = u8 (c.name);
             cd.positionSec = c.seconds;
+            static const juce::StringArray sections { "intro", "verse", "pre_chorus", "chorus", "bridge", "solo", "outro", "custom" };
+            cd.section = sections.contains (c.section) ? u8 (c.section) : std::string ("custom");
+            cd.source = c.source == "ai" ? "ai" : "user";
             sd.cues.push_back (cd);
         }
         for (const auto& t : s.tracks)
@@ -1797,7 +2054,7 @@ ProjectData AppState::toProjectData() const
                 {
                     MediaRef m;
                     m.id = newUuid();
-                    m.kind = t.kind == TrackKind::Guide ? "guide" : "original";
+                    m.kind = t.kind == TrackKind::Guide ? "guide" : t.isStem() ? "stem" : "original";
                     m.path = session.isOpen() ? pkg.toStoredPath (u8 (t.mediaPath)) : u8 (t.mediaPath);
                     if (t.media != nullptr && t.mediaRate > 0.0)
                     {
@@ -1806,6 +2063,8 @@ ProjectData AppState::toProjectData() const
                     }
                     p.media.push_back (m);
                     it = mediaIds.emplace (t.mediaPath, m.id).first;
+                    if (t.isStem())
+                        stemSources[m.id] = t.stemSourcePath;
                 }
                 ClipData c;
                 c.id = newUuid();
@@ -1813,6 +2072,7 @@ ProjectData AppState::toProjectData() const
                 c.startSec = t.mediaStartSeconds;
                 td.clips.push_back (c);
             }
+            td.aiConfidence = t.aiConfidence >= 0.0f ? (double) t.aiConfidence : -1.0;
             sd.tracks.push_back (td);
         }
         if (s.tracks.empty() || std::none_of (s.tracks.begin(), s.tracks.end(), [] (const TrackInfo& t) { return t.kind == TrackKind::Click; }))
@@ -1820,8 +2080,14 @@ ProjectData AppState::toProjectData() const
         setlist.songIds.push_back (sd.id);
         p.songs.push_back (std::move (sd));
     }
+    for (auto& m : p.media)
+        if (auto it = stemSources.find (m.id); it != stemSources.end())
+            if (auto src = mediaIds.find (it->second); src != mediaIds.end())
+                m.sourceMediaId = src->second;   // empty when the original was removed from the song
     p.setlists.push_back (setlist);
     p.modules = modules;
+    p.masterVolumeDb = masterDb;
+    p.limiterOn = limiterOn;
     return p;
 }
 
@@ -1852,12 +2118,19 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         s.title = fromU8 (sd.title);
         s.artist = fromU8 (sd.artist);
         s.key = fromU8 (sd.key);
+        s.click = sd.click;
         s.lengthSeconds = sd.lengthSec > 0.0 ? sd.lengthSec : 180.0;
         s.tempo.setTempoPoints (sd.tempoPoints.empty() ? std::vector<TempoPoint> { { 0.0, sd.baseBpm > 0.0 ? sd.baseBpm : 120.0 } } : sd.tempoPoints);
         if (! sd.timeSigPoints.empty())
             s.tempo.setTimeSigPoints (sd.timeSigPoints);
+        s.tempo.setOffsetSeconds (sd.gridOffsetSec);
+        s.bpmConfidence = sd.bpmConfidence;
+        s.keyConfidence = sd.keyConfidence;
+        s.chords = sd.chords;
+        s.analysisRuns = sd.analysisRuns;
         for (const auto& c : sd.cues)
-            s.cues.push_back ({ fromU8 (c.name), c.positionSec });
+            s.cues.push_back ({ fromU8 (c.name), c.positionSec, c.section.empty() ? juce::String ("custom") : fromU8 (c.section),
+                                c.source == "ai" ? "ai" : "user" });
         for (const auto& td : sd.tracks)
         {
             TrackInfo t;
@@ -1891,6 +2164,14 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
                 t.midiChannel = juce::jlimit (0, 16, td.midiChannel);
                 if (! td.midiPath.empty())
                     t.midiPath = fromU8 (pkg.toAbsolutePath (td.midiPath));
+                if (td.aiConfidence >= 0.0 && t.midiPath.isNotEmpty())
+                {
+                    // Converted from a stem (Phase 10): the part is the file's name (bass.mid).
+                    t.aiPart = juce::File (t.midiPath).getFileNameWithoutExtension();
+                    t.aiConfidence = (float) td.aiConfidence;
+                    if (td.aiConfidence < 0.5)
+                        t.aiWarning = "low transcription confidence (" + juce::String (juce::roundToInt (td.aiConfidence * 100)) + "%)";
+                }
                 loadMidiFile (t, s);
             }
             if (! td.clips.empty())
@@ -1899,6 +2180,17 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
                     t.mediaPath = fromU8 (pkg.toAbsolutePath (m->path));
                     t.mediaStartSeconds = td.clips.front().startSec;
                     t.mediaStatus = TrackInfo::MediaStatus::Loading;
+                    if (m->kind == "stem")
+                    {
+                        t.stemName = juce::File (t.mediaPath).getFileNameWithoutExtension();
+                        if (const auto* src = p.findMedia (m->sourceMediaId))
+                            t.stemSourcePath = fromU8 (pkg.toAbsolutePath (src->path));
+                        t.aiConfidence = (float) td.aiConfidence;
+                        if (td.aiConfidence >= 0.0 && td.aiConfidence < 0.5)
+                            t.aiWarning = "low separation quality (" + juce::String (juce::roundToInt (td.aiConfidence * 100)) + "%)";
+                        if (t.stemName == "piano" || t.stemName == "guitar")
+                            t.aiWarning << (t.aiWarning.isEmpty() ? "" : "; ") << "check by ear";
+                    }
                 }
             s.tracks.push_back (std::move (t));
         }
@@ -1915,6 +2207,11 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         if ((int) modules.size() < MidiOutputService::maxSlots)
             modules.push_back (sanitise (mp));
     midi.setModules (modules);
+    pushLineInputs();
+    masterDb = juce::jlimit (-60.0f, 6.0f, (float) p.masterVolumeDb);
+    engine.setMasterGain (juce::Decibels::decibelsToGain (masterDb, -60.0f));
+    limiterOn = p.limiterOn;
+    engine.setLimiterEnabled (limiterOn);
     songs = std::move (loaded);
     currentSong = 0;
     position = 0.0;
@@ -2008,9 +2305,14 @@ juce::String AppState::openProject (const juce::File& folderOrDb)
     if (! missingOnOpen.isEmpty())
         juce::Logger::writeToLog ("MEDIA MISSING on open: " + missingOnOpen.joinIntoString (", "));
 
+    // Read where the last run was before opening the songs writes the record again.
+    const auto lastPosition = juce::StringArray::fromLines (getPositionRecordFile().loadFileAsString());
     applyProjectData (r.data, session.getFolder());
     lastBackupMs = juce::Time::getMillisecondCounterHiRes();
     rememberLastProject();
+    recovery = {};
+    if (staleLockOnOpen)
+        readRecoveryRecord (lastPosition);   // the last run crashed: where was it?
     return {};
 }
 

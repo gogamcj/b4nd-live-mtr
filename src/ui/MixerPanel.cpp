@@ -34,9 +34,18 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
     soloButton.setColour (juce::TextButton::buttonOnColourId, theme::play);
 
     addAndMakeVisible (meter);
-    meter.setProvider ([this] { return track >= 0 ? state.getTrackLevel (track) : state.getOutputLevel (0); });
+    meter.setProvider ([this] { return track >= 0 ? state.getTrackLevel (track)
+                                      : isReturn() ? state.getModuleReturnLevel (returnIndex()) : state.getOutputLevel (0); });
 
-    if (track >= 0)
+    if (isReturn())
+    {
+        // Module audio return (LINE IN): trim and mute, usable during a show.
+        fader.onValueChange = [this] { state.setModuleReturnGain (returnIndex(), (float) fader.getValue()); };
+        muteButton.onClick = [this] { state.setModuleReturnMute (returnIndex(), ! muteButton.getToggleState()); };
+        soloButton.setVisible (false);
+        pan.setVisible (false);
+    }
+    else if (track >= 0)
     {
         fader.onValueChange = [this] { state.setTrackVolume (track, (float) fader.getValue()); };
         muteButton.onClick = [this] { state.setTrackMute (track, ! muteButton.getToggleState()); };
@@ -47,9 +56,17 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
     {
         // Master: Main bus (PA) only. Click, guide and in-ear monitor are never affected.
         fader.onValueChange = [this] { state.setMasterVolume ((float) fader.getValue()); };
-        soloButton.setVisible (false);
-        muteButton.setVisible (false);
         pan.setVisible (false);
+        // M -> LIM (Main limiter on/off), S -> CLIP (latched over-0 dBFS warning, click clears).
+        muteButton.setButtonText ("LIM");
+        muteButton.setClickingTogglesState (false);
+        muteButton.setColour (juce::TextButton::buttonOnColourId, theme::ok.darker (0.3f));
+        muteButton.setTooltip ("PA limiter (-0.3 dBFS ceiling). Locked in Live Mode.");
+        muteButton.onClick = [this] { state.setLimiterEnabled (! state.isLimiterEnabled()); syncFromState(); };
+        soloButton.setButtonText ("CLIP");
+        soloButton.setColour (juce::TextButton::buttonOnColourId, theme::danger);
+        soloButton.setTooltip ("Lights when the PA mix went over 0 dBFS. Click to clear.");
+        soloButton.onClick = [this] { state.clearClipLatches(); };
     }
 
     syncFromState();
@@ -57,9 +74,21 @@ ChannelStrip::ChannelStrip (AppState& s, int trackIndex) : state (s), track (tra
 
 void ChannelStrip::syncFromState()
 {
+    if (isReturn())
+    {
+        const auto& mods = state.getModules();
+        if (juce::isPositiveAndBelow (returnIndex(), (int) mods.size()))
+            fader.setValue (mods[(size_t) returnIndex()].returnGainDb, juce::dontSendNotification);
+        muteButton.setToggleState (state.isModuleReturnMuted (returnIndex()), juce::dontSendNotification);
+        fader.setColour (juce::Slider::trackColourId, theme::trackExt);
+        return;
+    }
     if (track < 0)
     {
         fader.setValue (state.getMasterVolumeDb(), juce::dontSendNotification);
+        muteButton.setToggleState (state.isLimiterEnabled(), juce::dontSendNotification);
+        muteButton.setEnabled (! state.isLiveMode());
+        soloButton.setToggleState (state.isPAClipLatched(), juce::dontSendNotification);
         return;
     }
     const auto* song = state.getCurrentSong();
@@ -78,17 +107,34 @@ void ChannelStrip::syncFromState()
 void ChannelStrip::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().reduced (2, 0);
-    g.setColour (track < 0 ? theme::panelRaised : theme::panel.brighter (0.02f));
+    g.setColour (track == -1 ? theme::panelRaised : theme::panel.brighter (0.02f));
     g.fillRoundedRectangle (r.toFloat(), 4.0f);
 
     const auto* song = state.getCurrentSong();
     juce::String name = "MASTER", route = "MAIN BUS";
+    if (isReturn() && juce::isPositiveAndBelow (returnIndex(), (int) state.getModules().size()))
+    {
+        const auto& m = state.getModules()[(size_t) returnIndex()];
+        name = juce::String::fromUTF8 (m.deviceName.c_str()) + " RETURN";
+        route = "IN " + juce::String (m.returnInput + 1) + (m.returnStereo ? "/" + juce::String (m.returnInput + 2) : juce::String())
+                + " > MAIN";
+    }
+    if (track == -1)
+    {
+        const float gr = state.getLimiterReductionDb();
+        route = ! state.isLimiterEnabled() ? juce::String ("LIMITER OFF")
+                : gr < -0.05f ? "GR " + juce::String (gr, 1) + " dB" : juce::String ("LIMITER 0.0");
+    }
     juce::Colour c = theme::accent;
+    if (isReturn())
+        c = theme::trackExt;
     if (track >= 0 && song != nullptr && juce::isPositiveAndBelow (track, (int) song->tracks.size()))
     {
         const auto& t = song->tracks[(size_t) track];
         name = t.name;
         route = state.getTrackDestination (track);
+        if (t.isStem() || t.aiPart.isNotEmpty())
+            route = (t.aiWarning.isNotEmpty() ? "! " : "") + juce::String (t.isStem() ? "AI STEM\n" : "AI MIDI\n") + route;
         c = colourForTrackKind (t.kind);
     }
 
@@ -148,13 +194,28 @@ MixerPanel::~MixerPanel()
     state.removeChangeListener (this);
 }
 
+juce::String MixerPanel::returnSignature() const
+{
+    juce::String sig;
+    const auto& mods = state.getModules();
+    for (int i = 0; i < (int) mods.size() && i < AudioEngine::maxLineInputs; ++i)
+        if (mods[(size_t) i].returnInput >= 0)
+            sig << i << ":" << mods[(size_t) i].returnInput << (mods[(size_t) i].returnStereo ? "s" : "m") << ";";
+    return sig;
+}
+
 void MixerPanel::rebuildStrips()
 {
     strips.clear();
     builtForSong = state.getCurrentSongIndex();
+    builtReturns = returnSignature();
     if (const auto* song = state.getCurrentSong())
         for (int i = 0; i < (int) song->tracks.size(); ++i)
             stripHolder.addAndMakeVisible (strips.add (new ChannelStrip (state, i)));
+    const auto& mods = state.getModules();
+    for (int i = 0; i < (int) mods.size() && i < AudioEngine::maxLineInputs; ++i)
+        if (mods[(size_t) i].returnInput >= 0)
+            stripHolder.addAndMakeVisible (strips.add (new ChannelStrip (state, ChannelStrip::returnBase - i)));
     resized();
 }
 
@@ -175,7 +236,11 @@ void MixerPanel::changeListenerCallback (juce::ChangeBroadcaster*)
         rebuildOutputMeters();
 
     const auto* song = state.getCurrentSong();
-    if (builtForSong != state.getCurrentSongIndex() || (song != nullptr && (int) song->tracks.size() != strips.size()))
+    int trackStrips = 0;
+    for (auto* st : strips)
+        trackStrips += st->isReturn() ? 0 : 1;
+    if (builtForSong != state.getCurrentSongIndex() || builtReturns != returnSignature()
+        || (song != nullptr && (int) song->tracks.size() != trackStrips))
     {
         rebuildStrips();
         repaint();
@@ -189,6 +254,8 @@ void MixerPanel::timerCallback()
 {
     for (auto* s : strips) s->updateMeter();
     master->updateMeter();
+    master->syncFromState();   // limiter GR and the clip latch change all the time
+    master->repaint();
     for (auto* m : outputMeters) m->update();
 }
 

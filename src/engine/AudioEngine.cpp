@@ -42,6 +42,11 @@ void AudioEngine::prepare (double sr, int maxBlockSize, int numOutputs, int numI
     sampleClock.prepare (sampleRate);
     for (auto& p : peaks)
         p.store (0.0f);
+    limiter.prepare (sampleRate, 1.0, 80.0);
+    limiter.setCeilingDb (-0.3f);
+    limiterWasOn = limiterOn.load();
+    rmsState.fill (0.0f);
+    rmsCoef = (float) (1.0 - std::exp (-1.0 / (0.3 * sampleRate)));   // 300 ms
 
     for (auto& bus : busBuffers)
         for (auto& ch : bus)
@@ -145,10 +150,15 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
                 position.store (0, std::memory_order_relaxed);
             fadeAction = FadeAction::None;
             fadeGain = 1.0f;
+            if (t == EngineTransport::Stopped)
+                startCountIn();   // from stop only; a resume after pause starts at once
+            countingIn.store (countInLeft > 0, std::memory_order_relaxed);
             transport.store ((int) EngineTransport::Playing, std::memory_order_release);
             break;
 
         case EngineCommand::Type::Pause:
+            countInLeft = 0;
+            countingIn.store (false, std::memory_order_relaxed);
             if (t == EngineTransport::Playing)
             {
                 transport.store ((int) EngineTransport::Paused, std::memory_order_release);
@@ -157,7 +167,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             break;
 
         case EngineCommand::Type::Stop:
-            playAfterStop = false;
+            playAfterStop = false;   // a count-in keeps running (click only) until the fade ends
             if (fadeAction != FadeAction::Emergency)
                 fadeAction = FadeAction::Stop;
             break;
@@ -172,6 +182,8 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
                 playAfterStopPosition = target;
             releaseMidiNotes();      // a jump never leaves notes hanging
             probe.cancel();
+            if (countInLeft > 0)
+                startCountIn();      // count in again from the new place (its tempo may differ)
             midiExpectedPos = -1;
             instExpectedPos = -1;
         }
@@ -181,7 +193,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             playAfterStop = false;
             releaseMidiNotes();      // modules go silent immediately, before the audio fade
             probe.cancel();
-            fadeAction = FadeAction::Emergency;
+            fadeAction = FadeAction::Emergency;   // a count-in fades out like the rest; the song never starts
             emergencyLatched.store (true, std::memory_order_release);
             break;
 
@@ -282,6 +294,7 @@ void AudioEngine::runProbe (const float* const* inputs, int numInputs, float* co
     {
         // Leaves when sample `at` reaches the speakers, like any module note with 0 ms offset.
         const double nsPerSample = 1.0e9 / sampleRate;
+        // The in-ear path (no limiter), the same one the loopback measures.
         const auto due = chunkStartNs + (std::int64_t) (at * nsPerSample) + outputLatencyNs.load (std::memory_order_relaxed);
         const auto ch = (std::uint8_t) (probeChannel - 1);
         pushMidi (due, probePort, MidiBytes::make ((std::uint8_t) (0x90 | ch), (std::uint8_t) probeNote, 110));
@@ -298,6 +311,14 @@ void AudioEngine::publishProbe() noexcept
     probeValid.store (probe.getValidPings(), std::memory_order_relaxed);
     probePings.store (probe.getPingsDone(), std::memory_order_relaxed);
     probeIsMidi.store (probeMidi, std::memory_order_relaxed);
+}
+
+std::int64_t AudioEngine::paLatencyNs() const noexcept
+{
+    auto ns = outputLatencyNs.load (std::memory_order_relaxed);
+    if (limiterOn.load (std::memory_order_relaxed))
+        ns += (std::int64_t) (limiter.getLatencySamples() * 1.0e9 / sampleRate);
+    return ns;
 }
 
 ProbeStatus AudioEngine::getProbeStatus() const noexcept
@@ -724,7 +745,7 @@ void AudioEngine::renderMidi (int n) noexcept
     const std::int64_t pos = position.load (std::memory_order_relaxed);
     const bool reseek = pos != midiExpectedPos;
     const bool anySolo = anySoloActive();
-    const auto latency = outputLatencyNs.load (std::memory_order_relaxed);
+    const auto latency = paLatencyNs();
     const double nsPerSample = 1.0e9 / sampleRate;
 
     for (size_t ti = 0; ti < plan.midiTracks.size() && ti < (size_t) maxTracks; ++ti)
@@ -801,12 +822,14 @@ void AudioEngine::renderMidiClock (int n) noexcept
         // (Re)start on the next 16th note: Song Position Pointer counts 16ths (6 clocks each),
         // so the slave's first clock after Continue is exactly at that 16th.
         const double beat = plan.tempo.beatAtSeconds ((double) pos / sampleRate);
-        const auto firstTick = (std::int64_t) std::ceil (beat * 24.0 - 1e-6);
+        // Never before bar 1: in a lead-in (negative beats) the clock waits for the downbeat
+        // and sends Start there.
+        const auto firstTick = std::max<std::int64_t> (0, (std::int64_t) std::ceil (beat * 24.0 - 1e-6));
         clockNextTick = ((firstTick + 5) / 6) * 6;
         clockNeedsStart = true;
     }
 
-    const auto latency = outputLatencyNs.load (std::memory_order_relaxed);
+    const auto latency = paLatencyNs();
     const double nsPerSample = 1.0e9 / sampleRate;
     for (int guard = 0; guard < 64; ++guard)   // 24 PPQN at 300 BPM is 120 clocks/s: a few per block
     {
@@ -839,48 +862,61 @@ void AudioEngine::renderMidiClock (int n) noexcept
     clockExpectedPos = pos + n;
 }
 
+void AudioEngine::startClickVoice (int kind) noexcept
+{
+    clickVoiceKind = kind;
+    clickVoicePos = 0;
+}
+
+void AudioEngine::renderClickVoice (const PlaybackPlan& plan, float* out, int from, int to, float gain, float& peak) noexcept
+{
+    if (clickVoicePos < 0)
+        return;
+    const auto& snd = clickVoiceKind == 0 ? plan.click.accent : clickVoiceKind == 1 ? plan.click.normal : plan.click.sub;
+    for (int i = from; i < to && clickVoicePos < (int) snd.size(); ++i)
+    {
+        const float v = snd[(size_t) clickVoicePos++] * gain;
+        out[i] += v;
+        peak = std::max (peak, std::abs (v));
+    }
+    if (clickVoicePos >= (int) snd.size())
+        clickVoicePos = -1;
+}
+
+float AudioEngine::clickGain (const PlaybackPlan& plan) const noexcept
+{
+    if (plan.clickSlot < 0 || plan.clickSlot >= maxTracks)
+        return 1.0f;
+    const auto& p = trackParams[(size_t) plan.clickSlot];
+    return p.mute.load (std::memory_order_relaxed) ? 0.0f : p.gain.load (std::memory_order_relaxed);
+}
+
 void AudioEngine::renderClick (int n) noexcept
 {
     const auto& plan = *currentPlan;
     if (! plan.hasClick || plan.click.accent.empty() || plan.click.normal.empty())
         return;
 
-    float gain = 1.0f;
-    if (plan.clickSlot >= 0 && plan.clickSlot < maxTracks)
-    {
-        auto& p = trackParams[(size_t) plan.clickSlot];
-        gain = p.mute.load (std::memory_order_relaxed) ? 0.0f : p.gain.load (std::memory_order_relaxed);
-    }
+    const float gain = clickGain (plan);
+    const int sub = std::clamp (clickSubdivision.load (std::memory_order_relaxed), 1, 4);
+    const bool accentOn = clickAccentOn.load (std::memory_order_relaxed);
+    const bool hasSub = sub > 1 && ! plan.click.sub.empty();
 
     float* out = busBuffers[(size_t) BusKind::Click][0].data();
     const std::int64_t pos = position.load (std::memory_order_relaxed);
     float peak = 0.0f;
 
-    auto renderVoice = [&] (int from, int to)
-    {
-        if (clickVoicePos < 0)
-            return;
-        const auto& snd = clickVoiceAccent ? plan.click.accent : plan.click.normal;
-        for (int i = from; i < to && clickVoicePos < (int) snd.size(); ++i)
-        {
-            const float v = snd[(size_t) clickVoicePos++] * gain;
-            out[i] += v;
-            peak = std::max (peak, std::abs (v));
-        }
-        if (clickVoicePos >= (int) snd.size())
-            clickVoicePos = -1;
-    };
-
-    // Find beats whose sample position falls inside [pos, pos + n).
+    // Grid points (beats, or 8ths / 16ths) whose sample position falls inside [pos, pos + n).
     const double t0 = (double) pos / sampleRate;
     double beat = plan.tempo.beatAtSeconds (t0);
     auto bb = plan.tempo.barBeatAtBeat (beat);
+    double barStart = plan.tempo.beatAtBar (bb.bar);
     double unit = 4.0 / bb.denominator;
-    const double barStart = plan.tempo.beatAtBar (bb.bar);
-    double candidate = barStart + std::ceil ((beat - barStart) / unit - 1e-9) * unit;
+    double step = hasSub ? unit / sub : unit;
+    double candidate = barStart + std::ceil ((beat - barStart) / step - 1e-9) * step;
 
     int cursor = 0;
-    for (int guard = 0; guard < 64; ++guard)
+    for (int guard = 0; guard < 256; ++guard)
     {
         const auto s = (std::int64_t) std::llround (plan.tempo.secondsAtBeat (candidate) * sampleRate);
         if (s >= pos + n)
@@ -888,19 +924,133 @@ void AudioEngine::renderClick (int n) noexcept
         if (s >= pos)
         {
             const int offset = (int) (s - pos);
-            renderVoice (cursor, offset);   // finish the previous click up to the new one
+            renderClickVoice (plan, out, cursor, offset, gain, peak);   // finish the previous click up to the new one
             cursor = offset;
             const auto cb = plan.tempo.barBeatAtBeat (candidate + 1e-9);
-            clickVoiceAccent = cb.beatInBar == 0;
-            clickVoicePos = 0;
+            const double inBar = candidate - plan.tempo.beatAtBar (cb.bar);
+            const long gridIndex = std::lround (inBar / step);
+            const bool onBeat = ! hasSub || gridIndex % sub == 0;
+            startClickVoice (! onBeat ? 2 : (cb.beatInBar == 0 && accentOn) ? 0 : 1);
         }
-        // Next beat, never crossing a bar line where the time signature may change.
+        // Next grid point, never crossing a bar line where the time signature may change.
         bb = plan.tempo.barBeatAtBeat (candidate + 1e-9);
         unit = 4.0 / bb.denominator;
-        candidate = std::min (candidate + unit, plan.tempo.beatAtBar (bb.bar + 1));
+        step = hasSub ? unit / sub : unit;
+        candidate = std::min (candidate + step, plan.tempo.beatAtBar (bb.bar + 1));
     }
-    renderVoice (cursor, n);
+    renderClickVoice (plan, out, cursor, n, gain, peak);
 
+    if (plan.clickSlot >= 0 && plan.clickSlot < maxTracks)
+        atomicMax (trackParams[(size_t) plan.clickSlot].peak, peak);
+}
+
+void AudioEngine::setLineInput (int index, int inL, int inR, float linearGain, bool mute) noexcept
+{
+    if (index < 0 || index >= maxLineInputs)
+        return;
+    auto& li = lineInputs[(size_t) index];
+    li.gain.store (std::clamp (linearGain, 0.0f, 4.0f), std::memory_order_relaxed);
+    li.mute.store (mute, std::memory_order_relaxed);
+    li.inR.store (inR, std::memory_order_relaxed);
+    li.inL.store (inL, std::memory_order_relaxed);
+}
+
+float AudioEngine::takeLineInputPeak (int index) noexcept
+{
+    return index >= 0 && index < maxLineInputs ? lineInputs[(size_t) index].peak.exchange (0.0f, std::memory_order_relaxed) : 0.0f;
+}
+
+void AudioEngine::renderLineInputs (int n) noexcept
+{
+    float* ml = busBuffers[(size_t) BusKind::Main][0].data();
+    float* mr = busBuffers[(size_t) BusKind::Main][1].data();
+    const bool probing = probe.getState() == LatencyProbe::State::Running;
+    const float step = 1.0f / (float) std::max (1.0, 0.01 * sampleRate);   // 10 ms gain ramp
+    for (int k = 0; k < maxLineInputs; ++k)
+    {
+        auto& li = lineInputs[(size_t) k];
+        const int a = li.inL.load (std::memory_order_relaxed);
+        if (a < 0)
+        {
+            lineSmooth[(size_t) k] = 0.0f;
+            continue;
+        }
+        const int b = li.inR.load (std::memory_order_relaxed);
+        const float* inA = chunkInputs != nullptr && a < chunkNumInputs && chunkInputs[a] != nullptr ? chunkInputs[a] + chunkInputOffset : nullptr;
+        const float* inB = chunkInputs != nullptr && b >= 0 && b < chunkNumInputs && chunkInputs[b] != nullptr ? chunkInputs[b] + chunkInputOffset : inA;
+        if (inA == nullptr)
+            continue;
+        const float target = (probing || li.mute.load (std::memory_order_relaxed)) ? 0.0f : li.gain.load (std::memory_order_relaxed);
+        float g = lineSmooth[(size_t) k];
+        float peak = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            g = g < target ? std::min (target, g + step) : std::max (target, g - step);
+            float l = inA[i], r = inB[i];
+            if (! std::isfinite (l)) l = 0.0f;
+            if (! std::isfinite (r)) r = 0.0f;
+            ml[i] += l * g;
+            mr[i] += r * g;
+            peak = std::max ({ peak, std::abs (l * g), std::abs (r * g) });
+        }
+        lineSmooth[(size_t) k] = g;
+        atomicMax (li.peak, peak);
+    }
+}
+
+void AudioEngine::startCountIn() noexcept
+{
+    countInLeft = 0;
+    const int bars = std::clamp (countInBars.load (std::memory_order_relaxed), 0, 4);
+    if (bars == 0 || currentPlan == nullptr || ! currentPlanValid || ! currentPlan->hasClick)
+        return;
+    const auto& plan = *currentPlan;
+    // Tempo and metre where the song starts playing.
+    const double beat = plan.tempo.beatAtSeconds ((double) position.load (std::memory_order_relaxed) / sampleRate);
+    const auto bb = plan.tempo.barBeatAtBeat (beat);
+    const double bpm = std::max (20.0, plan.tempo.bpmAtBeat (beat));
+    countInBeatSamples = 60.0 / bpm * (4.0 / std::max (1, bb.denominator)) * sampleRate;
+    countInBeatsPerBar = std::max (1, bb.numerator);
+    countInLength = (std::int64_t) std::llround (countInBeatSamples * bars * countInBeatsPerBar);
+    // Line the count-in up with the song's bars: it ends on the next bar line, and the
+    // grid clicks between the start position and that bar line (a lead-in or pickup before
+    // bar 1, or a start in the middle of a bar) come from the song's own click.
+    const double posSec = (double) position.load (std::memory_order_relaxed) / sampleRate;
+    const double nextBarSec = plan.tempo.secondsAtBeat (plan.tempo.beatAtBar (bb.bar + 1));
+    const double thisBarSec = plan.tempo.secondsAtBeat (plan.tempo.beatAtBar (bb.bar));
+    double toBar = nextBarSec - posSec;
+    if (posSec - thisBarSec < 1.0e-6)
+        toBar = 0.0;   // already on a bar line
+    const auto shorten = (std::int64_t) std::llround (toBar * sampleRate);
+    if (shorten > 0 && shorten < countInLength)
+        countInLength -= shorten;
+    countInLeft = countInLength;
+    clickVoicePos = -1;
+}
+
+void AudioEngine::renderCountIn (int n) noexcept
+{
+    const auto& plan = *currentPlan;
+    if (plan.click.accent.empty() || plan.click.normal.empty())
+        return;
+    const float gain = clickGain (plan);
+    const bool accentOn = clickAccentOn.load (std::memory_order_relaxed);
+    float* out = busBuffers[(size_t) BusKind::Click][0].data();
+    float peak = 0.0f;
+    const std::int64_t done = countInLength - countInLeft;   // samples of count-in already played
+    int cursor = 0;
+    auto k = (std::int64_t) std::ceil ((double) done / countInBeatSamples - 1e-9);
+    for (int guard = 0; guard < 64; ++guard, ++k)
+    {
+        const auto s = (std::int64_t) std::llround ((double) k * countInBeatSamples);
+        if (s >= done + n || s >= countInLength)
+            break;
+        const int offset = (int) (s - done);
+        renderClickVoice (plan, out, cursor, offset, gain, peak);
+        cursor = offset;
+        startClickVoice (k % countInBeatsPerBar == 0 && accentOn ? 0 : 1);
+    }
+    renderClickVoice (plan, out, cursor, n, gain, peak);
     if (plan.clickSlot >= 0 && plan.clickSlot < maxTracks)
         atomicMax (trackParams[(size_t) plan.clickSlot].peak, peak);
 }
@@ -914,7 +1064,12 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
     const bool playing = (EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing;
     const std::int64_t pos = position.load (std::memory_order_relaxed);
 
-    if (playing && currentPlan != nullptr && currentPlanValid)
+    if (playing && currentPlan != nullptr && currentPlanValid && countInLeft > 0)
+    {
+        renderCountIn (n);   // only the click: the song waits at its start position
+        lastRenderEnd = pos;
+    }
+    else if (playing && currentPlan != nullptr && currentPlanValid)
     {
         if (lastRenderEnd != pos)
             clickVoicePos = -1;   // after a locate, never continue a click from somewhere else
@@ -925,6 +1080,8 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         renderInstruments (n);
         lastRenderEnd = pos + n;
     }
+
+    renderLineInputs (n);   // module returns: always live, into Main (so the in-ear MR mix and the limiter see them)
 
     // Monitor (in-ear) bus = its own tracks + click + guide + optional MR.
     {
@@ -951,6 +1108,30 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         for (auto& ch : busBuffers[(size_t) BusKind::Main])
             for (int i = 0; i < n; ++i)
                 ch[(size_t) i] *= mg;
+
+        // Clip warning: the Main mix itself went over 0 dBFS (with the limiter on this is what
+        // the limiter caught; the PA still never sees it).
+        float* ml = busBuffers[(size_t) BusKind::Main][0].data();
+        float* mr = busBuffers[(size_t) BusKind::Main][1].data();
+        bool over = false;
+        for (int i = 0; i < n && ! over; ++i)
+            over = std::abs (ml[i]) >= 1.0f || std::abs (mr[i]) >= 1.0f;
+        if (over)
+            mainOverLatch = true;
+
+        const bool on = limiterOn.load (std::memory_order_relaxed);
+        if (on != limiterWasOn)
+        {
+            limiter.reset();   // a switch is a 1 ms jump in the PA path: only happens on request
+            limiterWasOn = on;
+        }
+        if (on)
+        {
+            limiter.process (ml, mr, n);
+            const float g = limiter.takeMinGain();
+            if (g < limiterGain.load (std::memory_order_relaxed))
+                limiterGain.store (g, std::memory_order_relaxed);
+        }
     }
 
     // Bus -> physical outputs.
@@ -1053,16 +1234,26 @@ void AudioEngine::process (const float* const* inputs, int numInputs, float* con
     float* chunkPtrs[maxOutputs];
     for (int offset = 0; offset < numSamples;)
     {
-        const int n = std::min (maxBlock, numSamples - offset);
+        int n = std::min (maxBlock, numSamples - offset);
+        if (countInLeft > 0)
+            n = (int) std::min<std::int64_t> (n, countInLeft);   // the song starts exactly where the count-in ends
         for (int ch = 0; ch < numOutputs; ++ch)
             chunkPtrs[ch] = outputs[ch] != nullptr ? outputs[ch] + offset : nullptr;
 
         chunkStartNs = blockNs + (std::int64_t) ((double) offset * blockNsPerSample);
+        chunkInputs = inputs;
+        chunkNumInputs = numInputs;
+        chunkInputOffset = offset;
         renderChunk (chunkPtrs, numOutputs, n);
         runProbe (inputs, numInputs, chunkPtrs, numOutputs, offset, n);
 
         // Transport advances per chunk so tracks and click stay sample-aligned.
-        if ((EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing)
+        if (countInLeft > 0 && (EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing)
+        {
+            countInLeft -= n;
+            countingIn.store (countInLeft > 0, std::memory_order_relaxed);
+        }
+        else if ((EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing)
         {
             auto pos = position.load (std::memory_order_relaxed) + n;
             if (songLength > 0 && pos >= songLength)
@@ -1100,6 +1291,8 @@ void AudioEngine::process (const float* const* inputs, int numInputs, float* con
             testOutput.store (-1, std::memory_order_release);
             transport.store ((int) EngineTransport::Stopped, std::memory_order_release);
             clickVoicePos = -1;
+            countInLeft = 0;
+            countingIn.store (false, std::memory_order_relaxed);
             releaseMidiNotes();
             if (wasEmergency)
                 pushEvent (EngineEvent::Type::EmergencyComplete);
@@ -1122,10 +1315,23 @@ void AudioEngine::process (const float* const* inputs, int numInputs, float* con
         if (outputs[ch] == nullptr)
             continue;
         float peak = 0.0f;
+        float ms = rmsState[(size_t) ch];
         for (int i = 0; i < numSamples; ++i)
-            peak = std::max (peak, std::abs (outputs[ch][i]));
+        {
+            const float v = outputs[ch][i];
+            peak = std::max (peak, std::abs (v));
+            ms += rmsCoef * (v * v - ms);
+        }
+        rmsState[(size_t) ch] = std::isfinite (ms) ? ms : 0.0f;
+        rmsTelemetry[(size_t) ch].store (std::sqrt (rmsState[(size_t) ch]), std::memory_order_relaxed);
         atomicMax (peaks[(size_t) ch], peak);
+        // Latch: the output itself reached full scale, or it carries a Main mix that went over.
+        const int bus = routes[(size_t) ch].bus.load (std::memory_order_relaxed);
+        if (peak >= 1.0f || (mainOverLatch && bus == (int) BusKind::Main))
+            clipLatch[(size_t) ch].store (true, std::memory_order_relaxed);
     }
+
+    mainOverLatch = false;
 
     // 6. Timing / dropout detection.
     const auto flags = xruns.onCallback (startNs, nowNs(), numSamples);
@@ -1141,6 +1347,51 @@ void AudioEngine::process (const float* const* inputs, int numInputs, float* con
 
 ClickSound PlaybackPlan::makeDefaultClick (double sampleRate)
 {
+    return makeClick (ClickTone::Beep, sampleRate);
+}
+
+ClickSound PlaybackPlan::makeClick (ClickTone tone, double sampleRate)
+{
+    auto normalise = [] (std::vector<float> v, float peakWanted)
+    {
+        float pk = 0.0f;
+        for (float x : v) pk = std::max (pk, std::abs (x));
+        if (pk > 0.0f)
+            for (auto& x : v) x *= peakWanted / pk;
+        return v;
+    };
+    auto wood = [sampleRate] (double freq)
+    {
+        const int len = (int) (0.04 * sampleRate);
+        std::vector<float> v ((size_t) len);
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / sampleRate;
+            const double a = std::min (1.0, i / (0.0003 * sampleRate));
+            v[(size_t) i] = (float) (a * (std::exp (-t * 90.0) * std::sin (twoPi * freq * t)
+                                          + 0.5 * std::exp (-t * 140.0) * std::sin (twoPi * freq * 2.71 * t)));
+        }
+        return v;
+    };
+    auto stick = [sampleRate] (double centre, std::uint32_t seed)
+    {
+        const int len = (int) (0.025 * sampleRate);
+        std::vector<float> v ((size_t) len);
+        // Two-pole resonator excited by a short noise burst.
+        const double r = 0.995, w = twoPi * centre / sampleRate;
+        double y1 = 0.0, y2 = 0.0;
+        std::uint32_t st = seed;
+        for (int i = 0; i < len; ++i)
+        {
+            st = st * 1664525u + 1013904223u;
+            const double noise = i < (int) (0.002 * sampleRate) ? ((double) (st >> 9) / (double) 0x7fffff - 1.0) : 0.0;
+            const double y = noise + 2.0 * r * std::cos (w) * y1 - r * r * y2;
+            y2 = y1; y1 = y;
+            v[(size_t) i] = (float) (y * std::exp (-(i / sampleRate) * 120.0));
+        }
+        return v;
+    };
+
     auto burst = [sampleRate] (double freq, float level)
     {
         const int len = (int) (0.03 * sampleRate);   // 30 ms
@@ -1154,8 +1405,24 @@ ClickSound PlaybackPlan::makeDefaultClick (double sampleRate)
         return v;
     };
     ClickSound c;
-    c.accent = burst (1800.0, 0.7f);
-    c.normal = burst (1200.0, 0.5f);
+    switch (tone)
+    {
+        case ClickTone::Wood:
+            c.accent = normalise (wood (1250.0), 0.7f);
+            c.normal = normalise (wood (900.0), 0.5f);
+            c.sub = normalise (wood (900.0), 0.3f);
+            break;
+        case ClickTone::Stick:
+            c.accent = normalise (stick (3200.0, 11u), 0.7f);
+            c.normal = normalise (stick (2400.0, 23u), 0.5f);
+            c.sub = normalise (stick (2400.0, 37u), 0.3f);
+            break;
+        case ClickTone::Beep:
+            c.accent = normalise (burst (1800.0, 1.0f), 0.7f);
+            c.normal = normalise (burst (1200.0, 1.0f), 0.5f);
+            c.sub = normalise (burst (1200.0, 1.0f), 0.3f);
+            break;
+    }
     return c;
 }
 

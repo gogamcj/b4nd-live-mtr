@@ -1,5 +1,9 @@
 #include "ui/SidePanel.h"
+#include "ui/ShowCheckPanel.h"
 #include "core/TimeFormat.h"
+#include "ui/AnalysisPanel.h"
+#include "ui/FootswitchPanel.h"
+#include "ui/SetlistPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -21,10 +25,44 @@ SidePanel::SidePanel (AppState& s) : state (s)
     {
         auto* b = aiButtons.add (new juce::TextButton (name));
         b->setWantsKeyboardFocus (false);
-        b->setEnabled (false);   // AI engine arrives in Phase 8-10
-        b->setTooltip ("Available from Phase 8 (AI analyzer). Disabled in Live Mode.");
         addAndMakeVisible (b);
     }
+    aiButtons[0]->setTooltip ("Adds an audio file to the current song as a new audio track (or drop it on the timeline)");
+    aiButtons[0]->onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Import a song (audio file)", juce::File(), "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg");
+        juce::Component::SafePointer<SidePanel> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe == nullptr || fc.getResult() == juce::File())
+                                      return;
+                                  if (auto err = safe->state.addAudioFile (fc.getResult()); err.isNotEmpty())
+                                      juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Import", err);
+                              });
+    };
+    for (int i = 1; i <= 3; ++i)
+    {
+        aiButtons[i]->setTooltip ("AI analysis of the current song: tempo, bars, key, chords, sections (Ctrl+Shift+A). "
+                                  "Results are drafts you check before applying.");
+        aiButtons[i]->onClick = [this] { showAnalysisWindow (state); };
+    }
+    aiButtons[4]->setTooltip ("Separate the song into vocals / drums / bass / guitar / piano / other (Demucs). "
+                              "The stems are added as muted tracks; the original stays.");
+    aiButtons[4]->onClick = [this]
+    {
+        showAnalysisWindow (state);
+        if (auto* p = getAnalysisWindowContent())
+            p->preselectStems();
+    };
+    aiButtons[5]->setTooltip ("Convert the stem tracks to MIDI (Basic Pitch; drums: kick / snare / hi-hat). "
+                              "The parts are added as muted MIDI tracks.");
+    aiButtons[5]->onClick = [this]
+    {
+        showAnalysisWindow (state);
+        if (auto* p = getAnalysisWindowContent())
+            p->preselectMidi();
+    };
 
     newButton.onClick  = [this] { projectCommands::newProject (state); };
     openButton.onClick = [this] { projectCommands::openProject (state); };
@@ -36,7 +74,13 @@ SidePanel::SidePanel (AppState& s) : state (s)
     modulesButton.setTooltip ("External MIDI sound modules: ports, channels, presets, status (Ctrl+M)");
     pluginsButton.onClick = [this] { showPluginWindow (state); };
     pluginsButton.setTooltip ("VST3 plugins: scan, Live Certified status, which plugin each VSTi track plays (Ctrl+P)");
-    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton })
+    setlistButton.onClick = [this] { showSetlistWindow (state); };
+    setlistButton.setTooltip ("Setlist: order, add / delete songs, start times, total, which songs are in RAM (Ctrl+L)");
+    showCheckButton.onClick = [this] { showShowCheckWindow (state, onEnterLive); };
+    showCheckButton.setTooltip ("Pre-show check: audio device, output test, audio files, RAM, MIDI modules, VSTi, footswitch, power plan (Ctrl+K)");
+    footswitchButton.onClick = [this] { showFootswitchWindow (state); };
+    footswitchButton.setTooltip ("Footswitch / MIDI control: inputs, pedal mapping, MIDI Learn (Ctrl+F)");
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton, &setlistButton, &showCheckButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -62,6 +106,8 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
         repaint();
     }
     const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
+    for (int i = 0; i <= 5 && i < aiButtons.size(); ++i)
+        aiButtons[i]->setEnabled (! state.isLiveMode());
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);
     saveButton.setButtonText (state.isDirty() ? "SAVE *" : "SAVE");
@@ -74,6 +120,19 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
             modulesButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
         else
             modulesButton.removeColour (juce::TextButton::buttonColourId);
+    }
+
+    {
+        const auto& fp = state.getFootswitch().getPorts();
+        int lost = 0;
+        for (const auto& p : fp)
+            lost += p.status != FootswitchInput::PortState::Status::Open ? 1 : 0;
+        footswitchButton.setButtonText (fp.empty() ? juce::String ("FOOTSWITCH")
+                                        : lost > 0 ? "FOOTSWITCH - NOT CONNECTED" : "FOOTSWITCH - READY");
+        if (lost > 0)
+            footswitchButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
+        else
+            footswitchButton.removeColour (juce::TextButton::buttonColourId);
     }
 
     {
@@ -136,6 +195,19 @@ void SidePanel::paintListBoxItem (int row, juce::Graphics& g, int width, int hei
     g.drawText (juce::String (song.tempo.bpmAtBeat (0.0), 0) + " BPM  " + song.key + "  "
                     + formatSeconds (song.lengthSeconds, false),
                 text, juce::Justification::topLeft);
+    // audio not ready for this song: loading, out of RAM, missing
+    const auto m = state.getSongMedia (row);
+    juce::String flag;
+    juce::Colour fc = theme::textDim;
+    if (m.missing + m.errors > 0) { flag = "MISSING"; fc = theme::danger; }
+    else if (m.loading > 0)      { flag = "LOADING"; fc = theme::warn; }
+    else if (m.unloaded > 0)     { flag = "NOT IN RAM"; }
+    if (flag.isNotEmpty())
+    {
+        g.setColour (fc);
+        g.setFont (theme::font (10.0f, true));
+        g.drawText (flag, text, juce::Justification::topRight);
+    }
 }
 
 void SidePanel::listBoxItemClicked (int row, const juce::MouseEvent&)
@@ -159,7 +231,7 @@ void SidePanel::paint (juce::Graphics& g)
     };
 
     header (songHeader, "SETLIST");
-    header (aiHeader, state.isLiveMode() ? "AI ANALYSIS  (locked in Live Mode)" : "AI ANALYSIS  (Phase 8+)");
+    header (aiHeader, state.isLiveMode() ? "AI ANALYSIS  (locked in Live Mode)" : "AI ANALYSIS");
 
     g.setColour (theme::textDim);
     g.setFont (theme::font (11.0f));
@@ -182,7 +254,10 @@ void SidePanel::resized()
     const int n = aiButtons.size();
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
-    totalArea = r.removeFromBottom (26);
+    totalArea = r.removeFromBottom (30);
+    setlistButton.setBounds (totalArea.removeFromRight (110).reduced (4, 3));
+    showCheckButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
+    footswitchButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     pluginsButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     songList.setBounds (r.reduced (0, 4));

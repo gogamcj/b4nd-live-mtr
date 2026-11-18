@@ -18,6 +18,18 @@ bool MediaDecoder::canRead (const juce::File& file) const
     return formats.findFormatForFileExtension (file.getFileExtension()) != nullptr;
 }
 
+std::int64_t MediaDecoder::estimateBytes (const juce::File& file, double targetSampleRate)
+{
+    if (! file.existsAsFile() || targetSampleRate <= 0.0)
+        return 0;
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        return 0;
+    const int channels = juce::jlimit (1, 2, (int) reader->numChannels);
+    const double frames = (double) reader->lengthInSamples * targetSampleRate / reader->sampleRate;
+    return (std::int64_t) (frames * channels * (double) sizeof (float));
+}
+
 MediaDecodeResult MediaDecoder::decode (const juce::File& file, double targetSampleRate, const std::atomic<bool>* cancel)
 {
     MediaDecodeResult r;

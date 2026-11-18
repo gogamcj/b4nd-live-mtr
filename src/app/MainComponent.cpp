@@ -1,6 +1,11 @@
 #include "app/MainComponent.h"
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
+#include "ui/AnalysisPanel.h"
+#include "ui/MidiEditorPanel.h"
+#include "ui/FootswitchPanel.h"
+#include "ui/SetlistPanel.h"
+#include "ui/ShowCheckPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
@@ -20,6 +25,7 @@ MainComponent::MainComponent (AppState& s)
 
     transportBar.onLiveModeClicked = [this] { toggleLiveMode(); };
     liveView.onExitClicked = [this] { toggleLiveMode(); };
+    sidePanel.onEnterLive = [this] { toggleLiveMode (true); };
     statusBar.onAudioSettingsRequested = [this] { showAudioSettingsWindow (state); };
 
     setWantsKeyboardFocus (true);
@@ -32,9 +38,21 @@ MainComponent::~MainComponent()
     state.removeChangeListener (this);
 }
 
-void MainComponent::toggleLiveMode()
+void MainComponent::toggleLiveMode (bool skipCheck)
 {
-    state.setLiveMode (! state.isLiveMode());
+    if (state.isLiveMode())
+    {
+        state.setLiveMode (false);
+        return;
+    }
+    if (! skipCheck && AppState::hasBlockers (state.runShowCheck()))
+    {
+        juce::Logger::writeToLog ("LIVE MODE not entered: the show check has red items");
+        showShowCheckWindow (state, [this] { state.setLiveMode (true); });
+        return;
+    }
+    closeShowCheckWindow();
+    state.setLiveMode (true);
 }
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -82,6 +100,22 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress (',', juce::ModifierKeys::commandModifier, 0)) { showAudioSettingsWindow (state); return true; }
     if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { showModuleWindow (state); return true; }
     if (key == juce::KeyPress ('p', juce::ModifierKeys::commandModifier, 0)) { showPluginWindow (state); return true; }
+    if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { showFootswitchWindow (state); return true; }
+    if (key == juce::KeyPress ('l', juce::ModifierKeys::commandModifier, 0)) { showSetlistWindow (state); return true; }
+    if (key == juce::KeyPress ('k', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) showShowCheckWindow (state, [this] { toggleLiveMode (true); }); return true; }
+    if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { if (! state.isLiveMode()) showAnalysisWindow (state); return true; }
+    if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier, 0))
+    {
+        // MIDI editor on the first MIDI track that has notes (or double-click a MIDI lane)
+        if (const auto* s = state.getCurrentSong(); s != nullptr && ! state.isLiveMode())
+            for (int i = 0; i < (int) s->tracks.size(); ++i)
+                if (s->tracks[(size_t) i].midiEvents != nullptr)
+                {
+                    showMidiEditor (state, i);
+                    break;
+                }
+        return true;
+    }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { projectCommands::save (state); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { projectCommands::saveAs (state); return true; }
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) projectCommands::openProject (state); return true; }

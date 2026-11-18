@@ -64,6 +64,53 @@ MidiImport importMidiData (const void* data, size_t size)
     return r;
 }
 
+juce::String writeMidiFile (const juce::File& file, const std::vector<MidiTickEvent>& events, double bpm,
+                            const juce::String& trackName)
+{
+    juce::MidiMessageSequence meta, seq;
+    if (trackName.isNotEmpty())
+        meta.addEvent (juce::MidiMessage::textMetaEvent (3, trackName), 0.0);
+    meta.addEvent (juce::MidiMessage::tempoMetaEvent (juce::roundToInt (60'000'000.0 / juce::jlimit (10.0, 400.0, bpm > 0.0 ? bpm : 120.0))), 0.0);
+    for (const auto& e : events)
+    {
+        const int len = midiMessageLength (e.msg.data[0]);
+        if (len == 0 || e.msg.size < len)
+            continue;
+        seq.addEvent (juce::MidiMessage (e.msg.data, len, (double) e.tick));   // keeps the given order at equal ticks
+    }
+    juce::MidiFile mf;
+    mf.setTicksPerQuarterNote (midiPpq);
+    mf.addTrack (meta);
+    mf.addTrack (seq);
+
+    if (file.isDirectory())
+        return "Cannot write " + file.getFullPathName() + ": a folder has that name";
+    if (! file.getParentDirectory().createDirectory())
+        return "Cannot create the folder " + file.getParentDirectory().getFullPathName();
+    const auto tmp = file.getSiblingFile (file.getFileName() + ".tmp");
+    tmp.deleteFile();   // a leftover from a crash: FileOutputStream would append to it
+    {
+        juce::FileOutputStream out (tmp);
+        if (! out.openedOk() || ! mf.writeTo (out, 1))
+        {
+            tmp.deleteFile();
+            return "Cannot write " + file.getFullPathName();
+        }
+        out.flush();
+        if (out.getStatus().failed())
+        {
+            tmp.deleteFile();
+            return "Cannot write " + file.getFullPathName() + ": " + out.getStatus().getErrorMessage();
+        }
+    }
+    if (! tmp.moveFileTo (file))
+    {
+        tmp.deleteFile();
+        return "Cannot replace " + file.getFullPathName();
+    }
+    return {};
+}
+
 MidiImport importMidiFile (const juce::File& f)
 {
     if (! f.existsAsFile())

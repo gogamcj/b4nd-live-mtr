@@ -92,10 +92,13 @@ struct InstrumentTrackRuntime
     ChaseIndex chase;
 };
 
+/** Click voices. Built on the message thread; the engine only reads them. */
+enum class ClickTone : int { Beep, Wood, Stick };
 struct ClickSound
 {
     std::vector<float> accent;   // first beat of the bar
-    std::vector<float> normal;
+    std::vector<float> normal;   // other beats
+    std::vector<float> sub;      // 8th / 16th subdivisions (quieter)
 };
 
 /**
@@ -116,6 +119,9 @@ struct PlaybackPlan
 
     /** A short synthetic click (sine burst with exponential decay). */
     static ClickSound makeDefaultClick (double sampleRate);
+    /** Beep: sine bursts. Wood: woodblock-like (two detuned partials, fast decay). Stick: noise
+        tick through a band-pass, like a drumstick rim. Peaks: accent 0.7, normal 0.5, sub 0.3. */
+    static ClickSound makeClick (ClickTone, double sampleRate);
 };
 
 } // namespace b4nd

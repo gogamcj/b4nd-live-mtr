@@ -1,5 +1,6 @@
 #include "ui/TimelineView.h"
 #include "midi/MidiFileImport.h"
+#include "ui/MidiEditorPanel.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -22,7 +23,7 @@ void TimelineView::changeListenerCallback (juce::ChangeBroadcaster*)
 
 juce::Rectangle<int> TimelineView::laneArea() const
 {
-    return getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedTop (rulerHeight + cueHeight);
+    return getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedTop (topHeight());
 }
 
 int TimelineView::trackHeight() const
@@ -112,15 +113,49 @@ void TimelineView::paint (juce::Graphics& g)
         const float x0 = xForSeconds (song->cues[i].seconds);
         const float x1 = i + 1 < song->cues.size() ? xForSeconds (song->cues[i + 1].seconds) : xForSeconds (song->lengthSeconds);
         auto box = juce::Rectangle<float> (x0, (float) cues.getY() + 2.0f, juce::jmax (2.0f, x1 - x0 - 2.0f), (float) cueHeight - 4.0f);
-        g.setColour (theme::accent.withAlpha (i % 2 == 0 ? 0.22f : 0.14f));
+        const bool ai = song->cues[i].source == "ai";   // analysis draft: violet, marked "AI"
+        g.setColour ((ai ? theme::trackVsti : theme::accent).withAlpha (i % 2 == 0 ? 0.24f : 0.15f));
         g.fillRoundedRectangle (box, 3.0f);
         g.setColour (theme::text);
         g.setFont (theme::font (11.0f, true));
-        g.drawFittedText (song->cues[i].name, box.toNearestInt().reduced (5, 0), juce::Justification::centredLeft, 1);
+        g.drawFittedText (song->cues[i].name + (ai ? "  AI" : ""), box.toNearestInt().reduced (5, 0), juce::Justification::centredLeft, 1);
+    }
+
+    // --- chord strip (analysis draft: shown, never played) ---
+    if (const int ch = chordHeight(); ch > 0)
+    {
+        auto strip = juce::Rectangle<int> (lanes.getX(), rulerHeight + cueHeight, lanes.getWidth(), ch);
+        g.setColour (theme::panelInset.darker (0.2f));
+        g.fillRect (strip);
+        g.setFont (theme::mono (10.0f, true));
+        float lastTextEnd = -1.0e9f;
+        for (const auto& c : song->chords)
+        {
+            const float x0 = xForSeconds (c.startSec), x1 = xForSeconds (c.endSec);
+            if (x1 < (float) strip.getX() || x0 > (float) strip.getRight())
+                continue;
+            const auto name = juce::String::fromUTF8 (c.chord.c_str());
+            const bool sure = c.confidence < 0.0 || c.confidence >= 0.7;
+            g.setColour (theme::outline);
+            g.drawVerticalLine ((int) x0, (float) strip.getY() + 2.0f, (float) strip.getBottom() - 2.0f);
+            if (name == "N" || x0 < lastTextEnd)
+                continue;   // no label where it would overlap the previous one
+            g.setColour (sure ? theme::textDim : theme::warn);
+            g.drawText (name, (int) x0 + 3, strip.getY(), juce::jmax (24, (int) (x1 - x0) - 4), ch, juce::Justification::centredLeft);
+            lastTextEnd = x0 + 6.0f + (float) name.length() * 7.0f;
+        }
+    }
+
+    // Lead-in before bar 1 (the music starts later than the file): shaded on the ruler.
+    if (const double off = song->tempo.getOffsetSeconds(); off > 0.0)
+    {
+        const float x = xForSeconds (off);
+        g.setColour (theme::background.withAlpha (0.45f));
+        g.fillRect (juce::Rectangle<float> ((float) lanes.getX(), 0.0f, juce::jmax (0.0f, x - (float) lanes.getX()), (float) rulerHeight));
     }
 
     // --- header column top-left corner ---
-    auto corner = juce::Rectangle<int> (0, 0, headerWidth, rulerHeight + cueHeight);
+    auto corner = juce::Rectangle<int> (0, 0, headerWidth, topHeight());
     g.setColour (theme::panel);
     g.fillRect (corner);
     g.setColour (theme::textDim);
@@ -155,6 +190,28 @@ void TimelineView::paint (juce::Graphics& g)
         auto badge = hr.removeFromLeft (kindW).withHeight (14).translated (0, 2);
         g.drawRoundedRectangle (badge.toFloat(), 3.0f, 1.0f);
         g.drawText (kind, badge, juce::Justification::centred);
+        if (t.isStem() || t.aiPart.isNotEmpty())
+        {
+            // AI stem / AI MIDI: violet badge with its confidence, "!" when it needs a listen (docs/07).
+            const juce::String ai = "AI " + (t.aiConfidence >= 0.0f ? juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
+                                                                    : juce::String());
+            const int aiW = (int) juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), ai) + 10;
+            hr.removeFromLeft (3);
+            auto b = hr.removeFromLeft (aiW).withHeight (14).translated (0, 2);
+            g.setColour (theme::trackVsti);
+            g.fillRoundedRectangle (b.toFloat(), 3.0f);
+            g.setColour (theme::background);
+            g.drawText (ai, b, juce::Justification::centred);
+            if (t.aiWarning.isNotEmpty())
+            {
+                hr.removeFromLeft (3);
+                auto w = hr.removeFromLeft (14).withHeight (14).translated (0, 2);
+                g.setColour (theme::warn);
+                g.fillRoundedRectangle (w.toFloat(), 3.0f);
+                g.setColour (theme::background);
+                g.drawText ("!", w, juce::Justification::centred);
+            }
+        }
         g.setColour (theme::textDim);
         g.setFont (theme::font (10.0f));
         g.drawFittedText (" > " + state.getTrackDestination ((int) i), hr.withHeight (18), juce::Justification::centredLeft, 1);
@@ -202,6 +259,7 @@ void TimelineView::paint (juce::Graphics& g)
                 case TrackInfo::MediaStatus::Loading: label = "LOADING  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
                 case TrackInfo::MediaStatus::Missing: label = "MISSING FILE  " + t.mediaPath; c = theme::danger; break;
                 case TrackInfo::MediaStatus::Error:   label = "LOAD ERROR  " + t.mediaError; c = theme::danger; break;
+                case TrackInfo::MediaStatus::Unloaded: label = "NOT IN RAM (loads when the song is next)  " + juce::File (t.mediaPath).getFileName(); c = theme::textDim; break;
                 case TrackInfo::MediaStatus::Ready:   break;
             }
             auto box = lane.reduced (2, 3).toFloat();
@@ -249,7 +307,7 @@ void TimelineView::paint (juce::Graphics& g)
                 }
             }
 
-            if (isExtMidi && t.midiEvents != nullptr && box.getWidth() > 4.0f)
+            if ((isExtMidi || t.kind == TrackKind::MidiVsti) && t.midiEvents != nullptr && box.getWidth() > 4.0f)
             {
                 // Note blocks: pitch range of the file mapped to the lane height.
                 int lo = 127, hi = 0;
@@ -346,7 +404,7 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (e.x >= headerWidth && e.y < rulerHeight + cueHeight)
+    if (e.x >= headerWidth && e.y < topHeight())
     {
         // jump to the cue segment that was clicked
         const double t = secondsForX ((float) e.x);
@@ -359,9 +417,9 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (e.x < headerWidth && e.y >= rulerHeight + cueHeight)
+    if (e.x < headerWidth && e.y >= topHeight())
     {
-        const int track = (e.y - (rulerHeight + cueHeight)) / trackHeight();
+        const int track = (e.y - (topHeight())) / trackHeight();
         if (! juce::isPositiveAndBelow (track, (int) song->tracks.size()))
             return;
         const int msLeft = headerWidth - 8 - 44;
@@ -372,10 +430,27 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
     }
 }
 
+void TimelineView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const auto* song = state.getCurrentSong();
+    const int track = trackAtY (e.y);
+    if (song == nullptr || track < 0 || state.isLiveMode())
+        return;
+    const auto& t = song->tracks[(size_t) track];
+    if (t.kind != TrackKind::MidiVsti && t.kind != TrackKind::MidiExternal)
+        return;
+    if (t.midiEvents == nullptr)
+    {
+        showNotice (t.name + ": no MIDI yet. Drop a .mid file on it, or convert a stem with Audio to MIDI.", false);
+        return;
+    }
+    showMidiEditor (state, track);
+}
+
 int TimelineView::trackAtY (int y) const
 {
     const auto* song = state.getCurrentSong();
-    const int top = rulerHeight + cueHeight;
+    const int top = topHeight();
     if (song == nullptr || y < top)
         return -1;
     const int t = (y - top) / trackHeight();

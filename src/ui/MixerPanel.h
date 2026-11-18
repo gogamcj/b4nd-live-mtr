@@ -9,7 +9,10 @@ namespace b4nd
 class ChannelStrip : public juce::Component
 {
 public:
-    ChannelStrip (AppState&, int trackIndex);   // trackIndex < 0 = master
+    ChannelStrip (AppState&, int trackIndex);   // trackIndex -1 = master, <= returnBase = module return
+    static constexpr int returnBase = -100;     // strip index for module return k: returnBase - k
+    bool isReturn() const noexcept { return track <= returnBase; }
+    int returnIndex() const noexcept { return returnBase - track; }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -45,6 +48,8 @@ private:
 
     AppState& state;
     int builtForSong = -1;
+    juce::String builtReturns;
+    juce::String returnSignature() const;
     juce::OwnedArray<ChannelStrip> strips;
     std::unique_ptr<ChannelStrip> master;
     juce::OwnedArray<LevelMeter> outputMeters;

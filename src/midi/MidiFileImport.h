@@ -31,4 +31,13 @@ MidiImport importMidiData (const void* data, size_t size);
 
 bool isMidiFile (const juce::File&);
 
+/**
+    Writes tick events (midiPpq) as a format 1 Standard MIDI File: a tempo track (the song's
+    first tempo, so other programs open it at the right speed) and one track with the events.
+    Written to a temporary file first and then moved into place: a failed write never leaves a
+    half-written file. Returns an empty string, or the reason.
+*/
+juce::String writeMidiFile (const juce::File&, const std::vector<MidiTickEvent>& events, double bpm,
+                            const juce::String& trackName);
+
 } // namespace b4nd

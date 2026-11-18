@@ -176,3 +176,45 @@ TEST_CASE ("Latency: module test notes leave on time and the module delay is mea
     CHECK (ons == 5);
     CHECK (offs == 5);
 }
+
+TEST_CASE ("Module return: LINE IN reaches the PA while stopped, ramps on mute, is muted during a measurement")
+{
+    ProbeRig r;
+    r.engine.setLineInput (0, 1, -1, 1.0f, false);   // module audio on IN2 (mono)
+    for (int i = 0; i < block; ++i) r.i1[(size_t) i] = 0.4f;
+    std::size_t allocs = 0;
+    {
+        b4ndtest::AllocationGuard g;
+        for (int b = 0; b < 10; ++b) r.process();
+        allocs = g.count();
+    }
+    CHECK (allocs == 0);
+    CHECK_NEAR (r.o0.back(), 0.4f, 1.0e-4f);   // Main mono to the PA, transport stopped
+    CHECK (r.engine.takeLineInputPeak (0) > 0.39f);
+    CHECK (r.maxClickOut == 0.0f);             // not in the in-ear mix (monitor MR is off by default)
+
+    // Mute: a 10 ms ramp, no click.
+    r.engine.setLineInput (0, 1, -1, 1.0f, true);
+    r.process();
+    CHECK (r.o0[0] > 0.3f);
+    CHECK (r.o0.back() < r.o0[0]);
+    for (int b = 0; b < 4; ++b) r.process();
+    CHECK (std::abs (r.o0.back()) < 1.0e-6f);
+
+    // Unmuted again, then a loopback measurement on the same input: the return goes silent
+    // so the test tick can never loop into the PA.
+    r.engine.setLineInput (0, 1, -1, 1.0f, false);
+    for (int b = 0; b < 10; ++b) r.process();
+    CHECK (r.o0.back() > 0.39f);
+    r.post (AudioEngine::makeProbeCommand (false, 1, 1));
+    for (int b = 0; b < 10; ++b) r.process();
+    CHECK (std::abs (r.o0.back()) < 1.0e-6f);
+    r.post ([] { EngineCommand c; c.type = EngineCommand::Type::StopProbe; return c; }());
+    for (int b = 0; b < 10; ++b) r.process();
+    CHECK (r.o0.back() > 0.39f);
+
+    // Off: nothing at all.
+    r.engine.setLineInput (0, -1, -1, 1.0f, false);
+    r.process();
+    CHECK (r.o0.back() == 0.0f);
+}

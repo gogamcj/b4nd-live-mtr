@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 #include "core/TempoMap.h"
+#include <cmath>
 
 using namespace b4nd;
 
@@ -101,4 +102,31 @@ TEST_CASE ("TempoMap: invalid time signatures rejected")
     CHECK (! m.setTimeSigPoints ({ { 0, 4, 3 } }));
     CHECK (! m.setTimeSigPoints ({ { -1, 4, 4 } }));
     CHECK (m.setTimeSigPoints ({ { 0, 7, 8 } }));
+}
+
+TEST_CASE ("TempoMap: offset moves bar 1 to the first downbeat")
+{
+    TempoMap m;
+    CHECK (m.setTempoPoints ({ { 0.0, 120.0 }, { 16.0, 60.0 } }));
+    CHECK (m.setOffsetSeconds (0.75));
+    CHECK_NEAR (m.secondsAtBeat (0.0), 0.75, 1e-12);
+    CHECK_NEAR (m.secondsAtBeat (16.0), 8.75, 1e-12);
+    CHECK_NEAR (m.secondsAtBeat (17.0), 9.75, 1e-12);
+    CHECK_NEAR (m.beatAtSeconds (9.75), 17.0, 1e-12);
+    CHECK_NEAR (m.beatAtSeconds (0.75), 0.0, 1e-12);
+
+    // Before the offset: negative beats at the first tempo, bar -1 in the first signature.
+    CHECK_NEAR (m.beatAtSeconds (0.25), -1.0, 1e-12);
+    CHECK_NEAR (m.secondsAtBeat (-1.0), 0.25, 1e-12);
+    const auto bb = m.barBeatAtBeat (-1.0);
+    CHECK (bb.bar == -1);
+    CHECK (bb.beatInBar == 3);
+    CHECK_NEAR (m.beatAtBar (-1), -4.0, 1e-12);
+
+    for (double s = 0.0; s < 20.0; s += 0.173)
+        CHECK_NEAR (m.secondsAtBeat (m.beatAtSeconds (s)), s, 1e-9);
+
+    CHECK (! m.setOffsetSeconds (-0.1));
+    CHECK (! m.setOffsetSeconds (std::nan ("")));
+    CHECK_NEAR (m.getOffsetSeconds(), 0.75, 0.0);
 }

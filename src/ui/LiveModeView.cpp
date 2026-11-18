@@ -92,6 +92,8 @@ void LiveModeView::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void LiveModeView::timerCallback()
 {
+    if (const double age = juce::Time::getMillisecondCounterHiRes() - state.getLastFootswitchMs(); age > 2400.0 && age < 3000.0)
+        repaint (statusArea);   // the pedal action display ends
     mainMeterL.update();
     mainMeterR.update();
     clickMeter.update();
@@ -132,7 +134,16 @@ void LiveModeView::paint (juce::Graphics& g)
     nextArea.removeFromTop (28 + 38);   // leave room for the exit button
     g.setColour (theme::textDim);
     g.setFont (theme::font (16.0f, true));
-    g.drawText ("NEXT", nextArea.removeFromTop (22), juce::Justification::centredRight);
+    {
+        // The next song's audio must be in RAM before the band gets there.
+        const int ni = state.getCurrentSongIndex() + 1;
+        const auto nm = state.getSongMedia (ni);
+        const bool bad = next != nullptr && nm.missing + nm.errors > 0;
+        const bool loading = next != nullptr && ! bad && ! state.isSongReady (ni);
+        g.setColour (bad ? theme::danger : loading ? theme::warn : theme::textDim);
+        g.drawText (bad ? "NEXT  -  AUDIO MISSING" : loading ? "NEXT  -  LOADING " + juce::String (nm.ready) + "/" + juce::String (nm.tracks) : juce::String ("NEXT"),
+                    nextArea.removeFromTop (22), juce::Justification::centredRight);
+    }
     g.setColour (next ? theme::text.withAlpha (0.8f) : theme::textFaint);
     g.setFont (theme::font (26.0f, true));
     g.drawFittedText (next ? next->title : juce::String ("(end of setlist)"), nextArea, juce::Justification::topRight, 2);
@@ -183,7 +194,7 @@ void LiveModeView::paint (juce::Graphics& g)
     auto st = statusArea;
     auto pill = [&] (const juce::String& text, juce::Colour c)
     {
-        auto r = st.removeFromLeft (juce::jmin (300, st.getWidth() / 4)).reduced (4, 4);
+        auto r = st.removeFromLeft (juce::jmin (300, statusArea.getWidth() / 5)).reduced (4, 4);
         g.setColour (c.withAlpha (0.15f));
         g.fillRoundedRectangle (r.toFloat(), 6.0f);
         g.setColour (c);
@@ -235,8 +246,27 @@ void LiveModeView::paint (juce::Graphics& g)
         else
             pill ("VSTi: " + juce::String (ps.ready) + " READY", theme::ok);
     }
+    {
+        // Footswitch: the last press stays visible for a moment, a lost pedal is red.
+        const auto& ports = state.getFootswitch().getPorts();
+        const auto lastText = state.getLastFootswitchText();
+        const bool recent = lastText.isNotEmpty() && juce::Time::getMillisecondCounterHiRes() - state.getLastFootswitchMs() < 2500.0;
+        int lost = 0;
+        for (const auto& fp : ports)
+            lost += fp.status != FootswitchInput::PortState::Status::Open ? 1 : 0;
+        if (recent)
+            pill ("PEDAL: " + lastText.toUpperCase(), lastText.contains ("refused") ? theme::warn : theme::accent);
+        else if (ports.empty())
+            pill ("PEDAL: NONE", theme::textDim);
+        else if (lost > 0)
+            pill ("PEDAL LOST: " + ports.front().port.name.toUpperCase(), theme::danger);
+        else
+            pill ("PEDAL: " + ports.front().port.name.toUpperCase(), theme::ok);
+    }
     if (state.isEmergencyStopped())
         pill ("EMERGENCY STOPPED", theme::danger);
+    else if (! state.isSongReady (state.getCurrentSongIndex()))
+        pill ("LOADING SONG AUDIO", theme::warn);
     else
         pill (state.getTransportState() == TransportState::Playing ? "PLAYING" : "READY",
               state.getTransportState() == TransportState::Playing ? theme::play : theme::accent);

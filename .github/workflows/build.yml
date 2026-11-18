@@ -35,6 +35,18 @@ jobs:
           Write-Host "ASIO SDK root: $root"
           "B4ND_ASIO_SDK_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Analyzer (Python) unit tests
+        shell: pwsh
+        run: |
+          python -m pip install --quiet numpy scipy soundfile pyinstaller onnxruntime
+          cd analyzer
+          $env:B4ND_REQUIRE_ONNX = "1"
+          python -m unittest discover -s tests -t . -v
+
       - name: Configure
         shell: pwsh
         run: |
@@ -48,7 +60,141 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Unit tests (core + realtime engine)
+        env:
+          B4ND_REQUIRE_ANALYZER: '1'
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Demucs (CPU PyTorch) for stem separation
+        shell: pwsh
+        run: |
+          python -m pip install --quiet torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet demucs==4.0.1
+          python -c "import demucs, torch; print('demucs', demucs.__version__, 'torch', torch.__version__)"
+
+      - name: Standalone analyzer (PyInstaller, no Python needed on the band PC)
+        shell: pwsh
+        run: |
+          $dir = "build/src/app/B4ND_LIVE_MTR_artefacts/Release"
+          pyinstaller --noconfirm --onedir --name b4nd-analyzer --distpath "$dir" --workpath build/pyinstaller `
+            --specpath build/pyinstaller --paths analyzer --exclude-module tkinter `
+            --collect-submodules demucs --collect-data demucs --hidden-import yaml --collect-binaries onnxruntime `
+            --add-data "$PWD/analyzer/b4nd_analyzer/models;b4nd_analyzer/models" analyzer/pyinstaller_entry.py
+          # The model ships with the analyzer: the band PC separates without internet.
+          python analyzer/tools/fetch_demucs_model.py "$dir/b4nd-analyzer/models"
+          & "$dir/b4nd-analyzer/b4nd-analyzer.exe" info | Tee-Object -Variable info
+          if ($LASTEXITCODE -ne 0) { throw "standalone analyzer does not run" }
+          if (-not ("$info" -match '"available": true')) { throw "stems not available in the standalone analyzer" }
+          if (-not ("$info" -match '"pitched": true')) { throw "Basic Pitch not available in the standalone analyzer" }
+
+      - name: AI analysis end to end (standalone analyzer, apply, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $env:PYTHONPATH = "$PWD/analyzer"
+          python -m b4nd_analyzer synth --out "$PWD/ai-song.wav" --truth "$PWD/ai-truth.json" --bpm 128 --lead-in 0.6
+          Remove-Item Env:PYTHONPATH
+          $q = { param($s) '"' + $s + '"' }
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-analysis.png','--analysis',
+                 '--media', (& $q "$PWD/ai-song.wav"), '--save-as', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "analysis run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis started: .* using Standalone: " -Quiet)) { throw "standalone analyzer not used" }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*: 128\.0\d BPM .* bar 1 at 0\.6\d\d s, 4/4, A minor" -Quiet)) { throw "wrong analysis result" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to " -Quiet)) { throw "analysis not applied" }
+          if (-not (Test-Path "ai-test.b4nd/analysis")) { throw "analysis folder not in the package" }
+
+      - name: Stems end to end (standalone analyzer with Demucs, bundled model, apply, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $env:TORCH_HOME = "$PWD/no-torch-cache"   # must use the bundled model, not the download cache
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-stems.png','--analysis',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--analyze-tasks', 'stems', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "stem run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy|Stems" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*6 stems \(htdemucs_6s" -Quiet)) { throw "no stems from Demucs" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to .*stems \(" -Quiet)) { throw "stems not applied" }
+          $stems = Get-ChildItem -Recurse "ai-test.b4nd/stems" -Filter *.wav
+          $stems | ForEach-Object { "$($_.FullName) $($_.Length)" }
+          if ($stems.Count -lt 3) { throw "stem files missing" }
+          if (Test-Path "no-torch-cache/hub/checkpoints") { throw "the model was downloaded instead of the bundled one used" }
+
+      - name: Audio to MIDI end to end (standalone analyzer, stems -> MIDI tracks)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-midi.png','--analysis',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--analyze-tasks', 'midi', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "MIDI run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy|MIDI" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*MIDI: .*bass [1-9]" -Quiet)) { throw "no bass notes" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to .*MIDI parts \(" -Quiet)) { throw "MIDI not applied" }
+          $mids = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter *.mid
+          $mids | ForEach-Object { "$($_.FullName) $($_.Length)" }
+          if ($mids.Count -lt 3) { throw "MIDI files missing" }
+
+      - name: MIDI editor end to end (edit the AI bass part, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-midi-editor.png','--size','1600x960',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--midi-edit', '"Bass (MIDI)"',
+                 '--midi-ops', 'grid:240,all,quantize,transpose:12,add:0:40:480:90,save')
+          if ($p.ExitCode -ne 0) { throw "MIDI edit run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "MIDI edit" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "MIDI edit saved: Bass \(MIDI\) \([1-9]" -Quiet)) { throw "edit not saved" }
+          $edits = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter bass.mid | Where-Object { $_.DirectoryName -match "edit-" }
+          if ($edits.Count -lt 1) { throw "edited bass.mid missing" }
+
+      - name: Setlist (order, RAM window)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          New-Item -ItemType Directory -Force setlist-test | Out-Null
+          foreach ($i in 1..4) { python tools/make-test-wav.py "$PWD/setlist-test/s$i.wav" --rate 44100 --seconds 20 }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" -ErrorAction SilentlyContinue | Remove-Item
+          Push-Location setlist-test
+          $p = Start-Process -FilePath (Resolve-Path "../$exe") -PassThru -Wait -ArgumentList @('--screenshot','../screenshot-setlist.png','--setlist',
+                 '--save-as', (& $q "$PWD/win.b4nd"),
+                 '--setlist-ops', 'select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,add:Four,select:4,media:s4.wav,move:4:1,wait:30')
+          Pop-Location
+          if ($p.ExitCode -ne 0) { throw "setlist run failed: $($p.ExitCode)" }
+          $env:B4ND_MEDIA_BUDGET_MB = "26"
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-setlist-window.png','--setlist',
+                 '--project', (& $q "$PWD/setlist-test/win.b4nd"), '--setlist-ops', 'select:1,wait:30,select:4,play,wait:30')
+          Remove-Item Env:B4ND_MEDIA_BUDGET_MB
+          if ($p.ExitCode -ne 0) { throw "setlist window run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Setlist|Media:|PLAY" | ForEach-Object { $_.Line }
+          foreach ($want in @("Setlist: moved .Four. from 4 to 1", "only previous / current / next song in RAM", "PLAY refused, .* is still loading")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
+
+      - name: Footswitch (mapping, refusal while playing, double press)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" -ErrorAction SilentlyContinue | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-footswitch.png','--footswitch',
+                 '--footswitch-press', 'cc:65:127@0,cc:65:0@100,cc:64:127@400,cc:64:0@500,cc:65:127@600,cc:68:127@1000,cc:68:0@1100,cc:68:127@1300')
+          if ($p.ExitCode -ne 0) { throw "footswitch run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Footswitch" | ForEach-Object { $_.Line }
+          foreach ($want in @("Footswitch: NEXT SONG \(CC 65\)$", "Footswitch: PLAY / PAUSE \(CC 64\)",
+                              "Footswitch: NEXT SONG \(CC 65\) refused: stop the song first", "Footswitch: EMERGENCY STOP \(CC 68\)")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
 
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
@@ -116,13 +262,69 @@ jobs:
           if (-not ($logs | Select-String -Pattern "Plugin B4ND Test Slow \(B4ND Test\): NOT CERTIFIED" -Quiet)) { throw "slow plugin certified" }
           if (-not ($logs | Select-String -Pattern "Plugins: 2 loaded, 0 not available" -Quiet)) { throw "VSTi tracks not reloaded from the project" }
 
+      - name: Show check, sleep blocking, crash recovery, short soak
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          $logdir = "$env:APPDATA/B4ND LIVE MTR/logs"
+          New-Item -ItemType Directory -Force show-test | Out-Null
+          foreach ($i in 1..3) { python tools/make-test-wav.py "$PWD/show-test/s$i.wav" --rate 48000 --seconds 30 }
+          Push-Location show-test
+          $p = Start-Process -FilePath (Resolve-Path "../$exe") -PassThru -Wait -ArgumentList @('--screenshot','build.png',
+                 '--save-as', (& $q "$PWD/show.b4nd"), '--setlist-ops', 'select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30')
+          Pop-Location
+          if ($p.ExitCode -ne 0) { throw "build run failed: $($p.ExitCode)" }
+          $proj = & $q "$PWD/show-test/show.b4nd"
+          # 1. no audio device on the runner: LIVE MODE is refused, the check window opens
+          Get-ChildItem $logdir -ErrorAction SilentlyContinue | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-show-check.png','--project',$proj,'--show-check','--try-live')
+          if ($p.ExitCode -ne 0) { throw "show check run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Show check|LIVE MODE" | ForEach-Object { $_.Line }
+          foreach ($want in @("Show check: STOP Audio device", "Show check: (OK|CHECK) Windows power plan: ", "LIVE MODE not entered: the show check has red items")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
+          # 2. Live Mode (forced, as for a rehearsal) blocks sleep and display off through SetThreadExecutionState
+          Get-ChildItem $logdir | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-live-awake.png','--live','--project',$proj)
+          if ($p.ExitCode -ne 0) { throw "live run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          if (-not ($logs | Select-String -Pattern "Power: sleep and display off blocked" -Quiet)) { throw "sleep not blocked" }
+          # 3. killed while playing song 3: the next open goes back there
+          Remove-Item "$env:APPDATA/B4ND LIVE MTR/last-position.txt" -ErrorAction SilentlyContinue
+          $k = Start-Process -FilePath $exe -PassThru -ArgumentList @('--screenshot','killed.png','--project',$proj,'--song','2','--at','5','--play','60')
+          Start-Sleep -Seconds 20
+          Stop-Process -Id $k.Id -Force
+          Get-Content "$env:APPDATA/B4ND LIVE MTR/last-position.txt"
+          Get-ChildItem $logdir | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','recovered.png','--project',$proj,'--recover')
+          if ($p.ExitCode -ne 0) { throw "recovery run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Recovery" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Recovery: back to .* at 1[5-9]\.[0-9] s" -Quiet)) { throw "not recovered" }
+          # 4. 4 minute soak without an audio device (virtual transport): memory of song loading / unloading
+          Get-ChildItem $logdir | Remove-Item
+          $env:B4ND_MEDIA_BUDGET_MB = "26"
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-soak.png','--project',$proj,
+                 '--soak','4','--soak-song-seconds','15','--soak-csv','soak-windows.csv','--soak-ignore-dropouts')
+          Remove-Item Env:B4ND_MEDIA_BUDGET_MB
+          Get-Content soak-windows.csv
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Soak" | ForEach-Object { $_.Line }
+          if ($p.ExitCode -ne 0) { throw "soak failed: $($p.ExitCode)" }
+          if (-not ($logs | Select-String -Pattern "Soak result: PASS" -Quiet)) { throw "soak did not pass" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: B4ND-LIVE-MTR-windows-x64${{ matrix.asio == 'on' && '-asio' || '' }}
           path: |
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd_plugin_scanner.exe
+            build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd-analyzer/
+            build/src/app/B4ND_LIVE_MTR_artefacts/Release/analyzer/
             screenshot-*.png
+            soak-windows.csv
             tools/make-test-wav.py
             tools/make-test-mid.py
 
@@ -139,6 +341,16 @@ jobs:
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
             libxrender-dev libgl1-mesa-dev libjack-jackd2-dev jackd2 xvfb alsa-utils
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Analyzer (Python) unit tests
+        run: |
+          # numpy + scipy (+ onnxruntime for Basic Pitch): the WAV fallback reader (no soundfile) is what this job checks.
+          python -m pip install --quiet numpy scipy onnxruntime
+          cd analyzer && B4ND_REQUIRE_ONNX=1 python -m unittest discover -s tests -t . -v
+
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
@@ -146,7 +358,191 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Unit tests (core + realtime engine)
+        env:
+          B4ND_REQUIRE_ANALYZER: '1'
         run: ctest --test-dir build --output-on-failure
+
+      - name: AI analysis end to end (analyse, apply, save, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          PYTHONPATH=analyzer python -m b4nd_analyzer synth --out ai-song.wav --truth ai-truth.json --bpm 128 --lead-in 0.6
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis.png --analysis --media ai-song.wav \
+            --save-as ai-test.b4nd --analyze --apply-analysis | tee analysis.txt
+          grep -q "analysis: done" analysis.txt
+          grep -Eq "analysis result: 128\.0[0-9]+ BPM .*bar 1 at 0\.6[0-9]+ s, 4/4" analysis.txt
+          grep -q "analysis apply: ok" analysis.txt
+          grep -q "project save: ok" analysis.txt
+          test -f ai-test.b4nd/analysis/*/result.json
+          # Reopened: the grid start, chords and AI cues come back from the database.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee analysis-reopen.txt
+          grep -Eq "analysis: 128\.0[0-9]+ BPM \(1 tempo points\), bar 1 at 0\.6[0-9]+ s, 4/4, key A minor, [0-9]+ cues \(6 ai\), 3[0-9] chords, 1 runs \(last: done\)" analysis-reopen.txt
+          # No analyzer: a clear failure, exit code 1, the song untouched.
+          if xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis-missing.png --media ai-song.wav \
+               --save-as ai-missing.b4nd --analyzer /nonexistent/b4nd-analyzer --analyze | tee analysis-missing.txt; then
+            echo "expected a failure without an analyzer"; exit 1
+          fi
+          grep -q "analysis: FAILED.*NOT FOUND" analysis-missing.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch/hub/checkpoints
+          key: demucs-htdemucs_6s-v1
+
+      - name: Stems with real Demucs (CPU) - analyzer tests and app end to end
+        run: |
+          set -o pipefail
+          python -m pip install --quiet torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet demucs==4.0.1
+          (cd analyzer && B4ND_TEST_DEMUCS=1 python -m unittest tests.test_stems -v)
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems.png --analysis --project ai-test.b4nd \
+            --analyze --analyze-tasks stems --apply-analysis | tee stems.txt
+          grep -q "analysis: done" stems.txt
+          grep -Eq "analysis stems: .*model htdemucs_6s" stems.txt
+          grep -q "analysis apply: ok" stems.txt
+          grep -q "project save: ok" stems.txt
+          ls -la ai-test.b4nd/stems/*/*
+          # Reopened: the stems are muted tracks next to the untouched original, and marked as AI.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee stems-reopen.txt
+          grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' stems-reopen.txt
+          # The synthetic song has drums, bass and a pad: Demucs puts the pad in "other"; vocals,
+          # guitar and piano come out empty and get no track.
+          grep -Eq 'track "Bass \(stem\)" AUDIO 0.0 dB MUTE media=bass.wav STEM of ai-song.wav ai=[0-9]+%' stems-reopen.txt
+          grep -Eq 'track "Drums \(stem\)" AUDIO 0.0 dB MUTE media=drums.wav STEM of ai-song.wav' stems-reopen.txt
+          grep -Eq 'track "Other \(stem\)" AUDIO 0.0 dB MUTE media=other.wav STEM of ai-song.wav' stems-reopen.txt
+          if grep -q 'track "Vocals (stem)"' stems-reopen.txt; then echo "an empty stem got a track"; exit 1; fi
+          grep -q "missing media: 0" stems-reopen.txt
+
+      - name: Audio to MIDI end to end (Demucs stems -> Basic Pitch / drums -> MIDI tracks, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi.png --analysis --project ai-test.b4nd \
+            --analyze --analyze-tasks midi --apply-analysis | tee midi.txt
+          grep -q "analysis: done" midi.txt
+          grep -Eq "analysis midi: .*bass [1-9][0-9]* notes" midi.txt
+          grep -Eq "analysis midi: .*drums [1-9][0-9]* notes" midi.txt
+          grep -q "analysis apply: ok" midi.txt
+          ls -la ai-test.b4nd/midi/*/*
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee midi-reopen.txt
+          grep -Eq 'track "Bass \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI bass notes=[1-9][0-9]* ai=[0-9]+%' midi-reopen.txt
+          grep -Eq 'track "Drums \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI drums notes=[1-9][0-9]*' midi-reopen.txt
+          grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' midi-reopen.txt
+
+      - name: MIDI editor end to end (edit the AI bass part, save, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          before=$(grep -oE 'track "Bass \(MIDI\)" .* notes=[0-9]+' midi-reopen.txt | grep -oE '[0-9]+$')
+          # Quantize to 1/16, transpose up an octave, delete the first note and undo that,
+          # add one note at bar 1, save. The editor's own functions, as the buttons use them.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" \
+            --midi-ops "grid:240,all,quantize,transpose:12,first,delete,undo,add:0:40:480:90,save" | tee edit.txt
+          grep -q 'midi edit: opened "Bass (MIDI)"' edit.txt
+          grep -q "midi edit: delete -> 1 deleted" edit.txt
+          grep -q "midi edit: save -> ok" edit.txt
+          grep -q "project save: ok" edit.txt
+          ls -la ai-test.b4nd/midi/*/edit-*/bass.mid
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" | tee edit-reopen.txt
+          # Reopened: one note more, the added note first, still the AI bass part, played from the edit.
+          grep -Eq "track \"Bass \(MIDI\)\" VSTi 0.0 dB MUTE AI MIDI bass notes=$((before + 1)) " edit-reopen.txt
+          grep -Eq "midi edit: opened \"Bass \(MIDI\)\": $((before + 1)) notes, 0 selected, first 0:40:90:480 " edit-reopen.txt
+          grep -Eq 'midi edit: track "Bass \(MIDI\)" plays edit-[0-9]{8}-[0-9]{6}' edit-reopen.txt
+          # Every other note start is on the 1/16 grid (240 ticks) after the quantize.
+          python3 - <<'PY'
+          import struct, glob
+          f = sorted(glob.glob("ai-test.b4nd/midi/*/edit-*/bass.mid"))[-1]
+          d = open(f, "rb").read()
+          assert d[:4] == b"MThd" and struct.unpack(">H", d[12:14])[0] == 960
+          pos, starts = 14, []
+          while pos < len(d):
+              n = struct.unpack(">I", d[pos + 4:pos + 8])[0]
+              trk, i, t, run = d[pos + 8:pos + 8 + n], 0, 0, 0
+              while i < len(trk):
+                  v = 0
+                  while True:
+                      b = trk[i]; i += 1; v = (v << 7) | (b & 0x7F)
+                      if b < 0x80: break
+                  t += v
+                  st = trk[i]
+                  if st == 0xFF:
+                      l = trk[i + 2]; i += 3 + l; continue
+                  if st >= 0x80: run = st; i += 1
+                  ln = 1 if (run & 0xF0) in (0xC0, 0xD0) else 2
+                  if (run & 0xF0) == 0x90 and trk[i + 1] > 0: starts.append(t)
+                  i += ln
+              pos += 8 + n
+          off = [s for s in starts if s % 240]
+          print(f, len(starts), "note starts,", len(off), "off the grid")
+          assert len(starts) > 10 and not off
+          PY
+          # Locks: no save while playing; in Live Mode no edit and no save; the draft survives both.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-editor-locks.png --size 1600x960 \
+            --project ai-test.b4nd --midi-edit "Bass (MIDI)" \
+            --midi-ops "all,transpose:1,play,try-save,stop,live,transpose:1,try-save,live,try-save" | tee locks.txt
+          grep -q "midi edit: try-save -> refused: Stop playback to save MIDI edits" locks.txt
+          grep -q "midi edit: live -> Live Mode on" locks.txt
+          grep -q "midi edit: try-save -> refused: Live Mode: MIDI cannot be edited during a show" locks.txt
+          grep -q "midi edit: try-save -> saved" locks.txt
+          # The transpose in Live Mode did nothing: the first notes moved up 1 semitone, not 2.
+          first=$(grep -oE "opened .*first [0-9]+:[0-9]+" locks.txt | grep -oE "[0-9]+$")
+          grep -Eq "try-save -> saved; .* first 0:$((first + 1)):" locks.txt
+
+      - name: Setlist end to end (order, save / reopen, RAM window, no play while loading)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p setlist-test && cd setlist-test
+          for i in 1 2 3 4; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 44100 --seconds 20; done
+          rm -rf win.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-setlist-build.png --save-as win.b4nd \
+            --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,add:Four,select:4,media:s4.wav,move:4:1,rename:1:Encore:B4ND,wait:30" \
+            | tee build.txt
+          grep -q "setlist op move:4:1: ok" build.txt
+          grep -q 'setlist: 4 songs, .*media all in RAM' build.txt
+          grep -q "project save: ok" build.txt
+          # Reopened with a RAM budget for three of the four songs: the order is kept, only
+          # previous / current / next are in RAM, a far song is loaded when selected and cannot
+          # play before its audio is there.
+          B4ND_MEDIA_BUDGET_MB=26 xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-setlist.png --setlist \
+            --project win.b4nd --setlist-ops "select:1,wait:30,select:4,play,wait:30,play,stop" | tee window.txt
+          grep -q '  01 "Encore" / "B4ND" starts 0:00' window.txt
+          grep -q 'media WINDOWED (budget 26 MB' window.txt
+          grep -q "setlist op select:4: ok; current 4, not playing" window.txt
+          grep -q "setlist op play: ok; current 4, not playing" window.txt     # refused: still loading
+          grep -Eq '  02 ".*" / ".*" starts .*audio 1 tracks: 0 ready, 0 loading, 1 not in RAM' window.txt
+          grep -Eq '  04 ".*" / ".*" starts .*audio 1 tracks: 1 ready' window.txt
+          grep -q "setlist op wait:30: ok; current 4, not playing" window.txt
+          test "$(grep -c 'setlist op play: ok; current 4, playing' window.txt)" = 1
+
+      - name: Footswitch end to end (mapping, bounce, double press, refusals, learn)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          rm -f "$HOME/.config/B4ND LIVE MTR/footswitch.json"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-footswitch.png --footswitch \
+            --footswitch-press "cc:65:127@0,cc:65:0@20,cc:65:127@30,cc:65:0@200,cc:64:127@400,cc:64:0@500,cc:65:127@600,cc:65:0@700,cc:67:127@800,cc:68:127@1000,cc:68:0@1100,cc:68:127@1300,learn:2,note:70:90@2500,cc:65:127@3000" \
+            | tee fs.txt
+          grep -q 'footswitch: cc:65:127@0 -> NEXT SONG (CC 65); song 2 ' fs.txt
+          grep -q 'footswitch: cc:65:127@30 -> no press; song 2 ' fs.txt                      # bounce
+          grep -q 'footswitch: cc:64:127@400 -> PLAY / PAUSE (CC 64); song 2 .*, playing' fs.txt
+          grep -q 'footswitch: cc:65:127@600 -> NEXT SONG (CC 65) refused: stop the song first; song 2 .*, playing' fs.txt
+          grep -q 'footswitch: cc:68:127@1000 -> first of two presses; .*, playing' fs.txt
+          grep -q 'footswitch: cc:68:127@1300 -> EMERGENCY STOP (CC 68); .*EMERGENCY STOPPED' fs.txt
+          grep -q 'footswitch: learn row 2: waiting' fs.txt
+          grep -q 'footswitch binding: note 70 ch 1 port "" -> next_song' fs.txt
+          grep -q 'footswitch: cc:65:127@3000 -> press, no action' fs.txt
+          test -s "$HOME/.config/B4ND LIVE MTR/footswitch.json"
+          # the learned mapping is kept for the next start
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-footswitch-live.png --live --size 1600x960 \
+            --footswitch-press "note:70:90@0" | tee fs2.txt
+          grep -q 'footswitch: note:70:90@0 -> NEXT SONG (Note 70); song 2 ' fs2.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |
@@ -208,6 +604,58 @@ jobs:
           gt "$(peak play2.txt 2)" 0.05
           grep -q "DSP overloads 0" play8.txt
           grep -q "DSP overloads 0" play2.txt
+
+      - name: Click count-in test (JACK dummy, 2 outputs)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndcount
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          python3 tools/make-test-wav.py count-backing.wav --rate 44100 --seconds 20
+          jackd -n b4ndcount -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          # During a one-bar count-in only the click plays: the MR (PA) stays silent.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-countin.png --with-audio \
+            --media count-backing.wav --count-in 1 --play 1.5 | tee countin.txt
+          # After the count-in the MR plays.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-countin-after.png --with-audio \
+            --media count-backing.wav --count-in 1 --play 4 | tee countin-after.txt
+          pkill -f "jackd -n b4ndcount" || true
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          grep -q "click: count-in 1" countin.txt
+          lt "$(peak countin.txt 1)" 0.001
+          gt "$(peak countin.txt 2)" 0.3
+          gt "$(peak countin-after.txt 1)" 0.3
+
+      - name: Module audio return test (JACK dummy, in-ear output patched into IN1)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndret
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          jackd -n b4ndret -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          run() {
+            xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot "$1.png" --with-audio --module "$2" --play 4 | tee "$1.txt" &
+            RUN=$!
+            for i in $(seq 1 40); do
+              OUT=$(jack_lsp | grep -v '^system' | grep ':out_2$' || true)
+              IN=$(jack_lsp | grep -v '^system' | grep ':in_1$' || true)
+              if [ -n "$OUT" ] && [ -n "$IN" ]; then jack_connect "$OUT" "$IN"; break; fi
+              sleep 0.25
+            done
+            wait $RUN
+          }
+          # The click leaves on OUT2, comes back on IN1: with a module return on IN1 it reaches
+          # the PA (OUT1) through the Main bus; without one the PA stays silent.
+          run screenshot-return "Synth+ret1"
+          run screenshot-noreturn "Synth"
+          pkill -f "jackd -n b4ndret" || true
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          gt "$(peak screenshot-return.txt 1)" 0.3
+          lt "$(peak screenshot-noreturn.txt 1)" 0.001
 
       - name: Latency measurement test (JACK dummy, in-ear output patched into an input)
         run: |
@@ -368,3 +816,80 @@ jobs:
           assert any(m[0] == 0xB0 and m[1] == 123 for m in msgs), "All Notes Off missing after stop"
           PY
           fi
+
+      - name: Show check and crash recovery (Live Mode refused with missing audio, kill -9 then resume)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p show-test && cd show-test
+          for i in 1 2 3; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 48000 --seconds 30; done
+          rm -rf show.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot build.png --save-as "$PWD/show.b4nd" \
+            --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30" | tee build.txt
+          grep -q "project save: ok" build.txt
+          export JACK_DEFAULT_SERVER=b4ndshow
+          jackd -n b4ndshow -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          # everything there and the device running: LIVE MODE goes on
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ok.png --with-audio --project "$PWD/show.b4nd" --try-live | tee ok.txt
+          grep -q "show check: OK    Audio device: " ok.txt
+          grep -q "show check: ready" ok.txt
+          grep -q "try live: Live Mode on" ok.txt
+          # an audio file gone: red item, LIVE MODE refused, the check window opens instead
+          mv s2.wav s2.hidden
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-show-check.png --with-audio \
+            --project "$PWD/show.b4nd" --show-check --try-live | tee missing.txt
+          mv s2.hidden s2.wav
+          grep -q "show check: STOP  Audio files: 1 missing in 1 song" missing.txt
+          grep -q "try live: refused, show check window open" missing.txt
+          pkill -f "jackd -n b4ndshow" || true
+          # no audio device: refused too
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot nodev.png --project "$PWD/show.b4nd" --try-live | tee nodev.txt
+          grep -q "show check: STOP  Audio device: Not running" nodev.txt
+          grep -q "try live: refused" nodev.txt
+          # crash in the middle of song 3: kill -9 while playing, the next open offers to go back there
+          rm -f "$HOME/.config/B4ND LIVE MTR/last-position.txt"
+          Xvfb :97 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          XVFB=$!
+          sleep 1
+          DISPLAY=:97 "$APP" --screenshot killed.png --project "$PWD/show.b4nd" --song 2 --at 5 --play 60 > killed.txt 2>&1 &
+          APPPID=$!
+          sleep 20
+          kill -9 $APPPID
+          kill $XVFB || true
+          cat "$HOME/.config/B4ND LIVE MTR/last-position.txt"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot recovered.png --project "$PWD/show.b4nd" --recover | tee rec.txt
+          grep -q "previous session closed cleanly: NO" rec.txt
+          grep -Eq 'recovery: the last run stopped in song 3 ".*" at 1[5-9]\.[0-9] s' rec.txt
+          grep -Eq 'recovery: restored, song 3 at 1[5-9]\.[0-9] s' rec.txt
+          # after a clean close there is nothing to offer
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot clean.png --project "$PWD/show.b4nd" | tee clean.txt
+          grep -q "previous session closed cleanly: yes" clean.txt
+          grep -q "recovery: none" clean.txt
+
+      - name: Soak test (12 min, setlist looped, RAM window, JACK dummy 8 outputs)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p soak-test && cd soak-test
+          for i in 1 2 3 4 5; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 48000 --seconds 30; done
+          rm -rf soak.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot build.png --save-as "$PWD/soak.b4nd" \
+            --setlist-ops "add:Four,add:Five,select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,select:4,media:s4.wav,select:5,media:s5.wav,wait:30" | tee build.txt
+          grep -q "setlist: 5 songs" build.txt
+          export JACK_DEFAULT_SERVER=b4ndsoak
+          jackd -n b4ndsoak -d dummy -r 48000 -p 256 -P 8 -C 2 &
+          sleep 3
+          # Budget for three of the five songs: every song change also decodes one song and frees
+          # another, so a leak in loading / unloading shows up as growth.
+          # Dropouts are counted and logged but not judged here: the dummy JACK driver on a shared
+          # cloud machine is not real time (late callbacks happen in the middle of songs, without
+          # any song change). Zero dropouts is checked on the band PC (docs/10 §4).
+          B4ND_MEDIA_BUDGET_MB=40 xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-soak.png --size 1600x960 \
+            --with-audio --project "$PWD/soak.b4nd" --soak 12 --soak-song-seconds 20 --soak-csv ../soak.csv --soak-ignore-dropouts | tee soak.txt
+          pkill -f "jackd -n b4ndsoak" || true
+          cat ../soak.csv
+          grep -q "soak: 12.0 min, 5 songs, next song every 20 s, engine active" soak.txt
+          # only part of the setlist was in RAM at any time (5 songs are about 55 MB)
+          python3 -c "import csv,sys; m=max(int(r['media_ram_mb']) for r in csv.DictReader(open('../soak.csv'))); print('max media in RAM', m, 'MB'); sys.exit(m >= 50)"
+          grep -Eq "soak result: PASS, .* ([3-9][0-9]) songs played" soak.txt
