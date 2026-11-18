@@ -1,6 +1,8 @@
 #include "TestHarness.h"
 #include "core/MidiNoteEdit.h"
 
+#include <algorithm>
+
 using namespace b4nd;
 
 namespace
