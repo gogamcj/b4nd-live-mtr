@@ -40,7 +40,7 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     list.setColour (juce::ListBox::backgroundColourId, theme::panelInset);
     addAndMakeVisible (list);
 
-    for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit })
+    for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit, &clockOffsetEdit })
     {
         addAndMakeVisible (*e);
         e->setFont (theme::font (13.0f));
@@ -49,6 +49,10 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     for (auto* e : { &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &gapEdit, &settleEdit })
         e->setInputRestrictions (4, "0123456789");
     delayEdit.setInputRestrictions (6, "0123456789.");
+    clockOffsetEdit.setInputRestrictions (6, "-0123456789.");
+    clockToggle.setTooltip ("MIDI Clock (24 per beat) with Start / Stop / Continue / Song Position, following the song's tempo map. "
+                            "For arpeggiators, drum machines and delays that sync to the song.");
+    clockOffsetEdit.setTooltip ("Clock sent this many ms earlier (positive) or later (negative) than the music");
     msbEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
     lsbEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
     programEdit.setTextToShowWhenEmpty ("-", theme::textFaint);
@@ -67,8 +71,22 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     for (auto* c : { &portBox, &channelBox, &orderBox })
         addAndMakeVisible (*c);
     addAndMakeVisible (sustainToggle);
+    addAndMakeVisible (clockToggle);
 
-    for (auto* b : { &addButton, &removeButton, &applyButton, &testButton, &recallButton, &refreshButton })
+    addAndMakeVisible (measureInBox);
+    measureInBox.setTooltip ("The audio input the module's output is cabled into");
+    measureButton.setTooltip ("Sends test notes and listens on the chosen input; writes the measured delay into Delay ms. "
+                              "Measure the loopback in Audio Settings first for the best accuracy.");
+    measureButton.onClick = [this]
+    {
+        if (editing < 0)
+            return;
+        const auto err = state.startModuleMeasurement (editing, measureInBox.getSelectedItemIndex());
+        message = err.isEmpty() ? state.getMeasurement().message : err;
+        messageIsError = err.isNotEmpty();
+        repaint();
+    };
+    for (auto* b : { &addButton, &removeButton, &applyButton, &testButton, &recallButton, &refreshButton, &measureButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -139,10 +157,12 @@ void ModulePanel::refreshEnablement()
     applyButton.setEnabled (canEdit && has);
     for (auto* c : std::initializer_list<juce::Component*> { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit,
                                                              &delayEdit, &gapEdit, &settleEdit, &portBox, &channelBox, &orderBox,
-                                                             &sustainToggle })
+                                                             &sustainToggle, &clockToggle, &clockOffsetEdit })
         c->setEnabled (canEdit && has);
     testButton.setEnabled (has);
     recallButton.setEnabled (has);
+    measureButton.setEnabled (canEdit && has && ! state.getMeasurement().running && state.getDevice().getNumInputs() > 0);
+    measureInBox.setEnabled (canEdit && has && ! state.getMeasurement().running);
     for (auto& r : trackRows)
     {
         r.module->setEnabled (canEdit);
@@ -180,7 +200,7 @@ void ModulePanel::loadEditor()
     portBox.clear (juce::dontSendNotification);
     if (editing < 0)
     {
-        for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit })
+        for (auto* e : { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit, &delayEdit, &gapEdit, &settleEdit, &clockOffsetEdit })
             e->clear();
         refreshEnablement();
         repaint();
@@ -203,6 +223,8 @@ void ModulePanel::loadEditor()
             order = i + 1;
     orderBox.setSelectedId (order, juce::dontSendNotification);
     sustainToggle.setToggleState (p.sustainEnabled, juce::dontSendNotification);
+    clockToggle.setToggleState (p.clockOut, juce::dontSendNotification);
+    clockOffsetEdit.setText (juce::String (p.clockOffsetMs, 1), false);
 
     portBox.addItem ("(no port)", 1);
     int selected = 1;
@@ -245,6 +267,8 @@ void ModulePanel::applyEditor()
     p.channel = channelBox.getSelectedId() > 0 ? channelBox.getSelectedId() : 1;
     p.sendOrder = sendOrders[juce::jlimit (0, (int) std::size (sendOrders) - 1, orderBox.getSelectedId() - 1)];
     p.sustainEnabled = sustainToggle.getToggleState();
+    p.clockOut = clockToggle.getToggleState();
+    p.clockOffsetMs = clockOffsetEdit.getText().getDoubleValue();
     const int portId = portBox.getSelectedId();
     if (portId == 1)
     {
@@ -339,6 +363,33 @@ void ModulePanel::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void ModulePanel::timerCallback()
 {
+    // Inputs of the running device (they change when the device does).
+    const int numIns = state.getDevice().getNumInputs();
+    if (measureInBox.getNumItems() != numIns)
+    {
+        const int prev = measureInBox.getSelectedItemIndex();
+        measureInBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < numIns; ++i)
+            measureInBox.addItem ("IN " + juce::String (i + 1), i + 1);
+        if (numIns > 0)
+            measureInBox.setSelectedItemIndex (juce::jlimit (0, numIns - 1, juce::jmax (0, prev)), juce::dontSendNotification);
+    }
+    // A module measurement finished: show the result and the new delay value.
+    const auto& m = state.getMeasurement();
+    if (m.midi && wasMeasuring && ! m.running)
+    {
+        message = m.message;
+        messageIsError = ! m.ok;
+        if (m.ok && m.moduleIndex == editing)
+            loadEditor();             // show the new Delay ms
+    }
+    else if (m.midi && m.running)
+    {
+        message = m.message + "  (" + juce::String (m.pingsDone) + " / " + juce::String (m.pings) + ")";
+        messageIsError = false;
+    }
+    wasMeasuring = m.midi && m.running;
+
     list.repaint();
     repaint (statusArea);
     repaint (lockArea);
@@ -380,6 +431,8 @@ void ModulePanel::paintListBoxItem (int row, juce::Graphics& g, int width, int h
         sub << "   PC " << p.program;
     if (p.delayOffsetMs > 0.0)
         sub << "   -" << juce::String (p.delayOffsetMs, 1) << " ms";
+    if (p.clockOut)
+        sub << "   CLOCK";
     g.drawFittedText (sub, r, juce::Justification::centredLeft, 1);
 }
 
@@ -416,6 +469,8 @@ void ModulePanel::paint (juce::Graphics& g)
     label (orderBox, "Send order");
     label (gapEdit, "Gap ms");
     label (settleEdit, "Settle ms");
+    label (clockOffsetEdit, "Clock ms");
+    label (measureInBox, "Measure on");
 
     // Status line
     auto st = statusArea;
@@ -536,6 +591,18 @@ void ModulePanel::resized()
     gapEdit.setBounds (row (colB).withWidth (70));
     settleEdit.setBounds (row (colB).withWidth (70));
     sustainToggle.setBounds (row (colA).withX (colA.getX() - 4).withWidth (220));
+    {
+        auto cr = row (colB);
+        clockOffsetEdit.setBounds (cr.removeFromLeft (70));
+        cr.removeFromLeft (10);
+        clockToggle.setBounds (cr);
+    }
+    {
+        auto mr = row (colB);
+        measureInBox.setBounds (mr.removeFromLeft (90));
+        mr.removeFromLeft (6);
+        measureButton.setBounds (mr);
+    }
 
     tracksHeader = tracks.removeFromTop (26);
     tracks.removeFromTop (6);

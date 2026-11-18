@@ -6,6 +6,7 @@
 
 #include "core/Midi.h"
 #include "core/OutputRouting.h"
+#include "core/MidiChase.h"
 #include "core/TempoMap.h"
 
 namespace b4nd
@@ -52,6 +53,14 @@ struct MidiTrackRuntime
     int port = 0;                          // MIDI output port index (see AudioEngine::maxMidiPorts)
     double sendEarlyMs = 0.0;              // module latency + track offset: positive = send earlier
     std::vector<MidiSampleEvent> events;   // sorted by sample
+    ChaseIndex chase;                      // ChaseIndex::build (events): state after a locate
+};
+
+/** A MIDI port that receives MIDI Clock (24 PPQN) and transport messages (docs/04 §5). */
+struct MidiClockRuntime
+{
+    int port = 0;
+    double sendEarlyMs = 0.0;   // clock offset: positive = earlier
 };
 
 /**
@@ -68,6 +77,9 @@ public:
     virtual ~InstrumentProcessor() = default;
     virtual bool render (float* outL, float* outR, int numSamples,
                          const MidiBytes* msgs, const int* offsets, int count) noexcept = 0;
+    /** Delay between MIDI in and sound out (look-ahead instruments). The engine feeds MIDI this
+        much earlier so the sound lines up with the audio tracks (PDC). Any thread. */
+    virtual int getLatencySamples() const noexcept { return 0; }
 };
 
 /** A MIDI track that plays a software instrument into a bus. */
@@ -76,7 +88,8 @@ struct InstrumentTrackRuntime
     int slot = 0;                          // engine track parameter slot (volume / pan / mute / solo)
     BusKind bus = BusKind::Main;
     std::shared_ptr<InstrumentProcessor> instrument;
-    std::vector<MidiSampleEvent> events;   // sorted by sample
+    std::vector<MidiSampleEvent> events;
+    ChaseIndex chase;
 };
 
 struct ClickSound
@@ -95,6 +108,7 @@ struct PlaybackPlan
     TempoMap tempo;
     std::vector<TrackRuntime> tracks;
     std::vector<MidiTrackRuntime> midiTracks;
+    std::vector<MidiClockRuntime> midiClocks;
     std::vector<InstrumentTrackRuntime> instrumentTracks;
     bool hasClick = false;
     int clickSlot = -1;

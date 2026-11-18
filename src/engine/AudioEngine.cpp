@@ -39,6 +39,7 @@ void AudioEngine::prepare (double sr, int maxBlockSize, int numOutputs, int numI
     numIns = std::max (0, numInputs);
 
     xruns.prepare (sampleRate, 1.5, 0.8, 1'000'000, 0.25);   // 250 ms start-up warm-up
+    sampleClock.prepare (sampleRate);
     for (auto& p : peaks)
         p.store (0.0f);
 
@@ -139,6 +140,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             }
             emergencyLatched.store (false, std::memory_order_release);
             testSignal.store ((int) TestSignal::None, std::memory_order_release);
+            probe.cancel();   // a measurement never plays into a song
             if (songLength > 0 && position.load (std::memory_order_relaxed) >= songLength)
                 position.store (0, std::memory_order_relaxed);
             fadeAction = FadeAction::None;
@@ -169,6 +171,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             if (playAfterStop)
                 playAfterStopPosition = target;
             releaseMidiNotes();      // a jump never leaves notes hanging
+            probe.cancel();
             midiExpectedPos = -1;
             instExpectedPos = -1;
         }
@@ -177,6 +180,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
         case EngineCommand::Type::EmergencyStop:
             playAfterStop = false;
             releaseMidiNotes();      // modules go silent immediately, before the audio fade
+            probe.cancel();
             fadeAction = FadeAction::Emergency;
             emergencyLatched.store (true, std::memory_order_release);
             break;
@@ -191,6 +195,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
                 pushEvent (EngineEvent::Type::CommandRejected);
                 break;
             }
+            probe.cancel();
             testGain = std::pow (10.0f, std::clamp (c.value, -60.0f, -6.0f) / 20.0f);   // never louder than -6 dBFS
             emergencyLatched.store (false, std::memory_order_release);
             testOutput.store (c.output, std::memory_order_release);
@@ -204,7 +209,109 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
             testSignal.store ((int) TestSignal::None, std::memory_order_release);
             testOutput.store (-1, std::memory_order_release);
             break;
+
+        case EngineCommand::Type::StartProbe:
+            startProbe (c);
+            break;
+
+        case EngineCommand::Type::StopProbe:
+            probe.cancel();
+            publishProbe();
+            break;
     }
+}
+
+EngineCommand AudioEngine::makeProbeCommand (bool midi, int output, int input, int port, int channel, int note, int pings)
+{
+    EngineCommand c;
+    c.type = EngineCommand::Type::StartProbe;
+    c.output = output;
+    c.samples = input;
+    c.intValue = (midi ? 1 : 0) | ((port & 0xff) << 8) | ((channel & 0x1f) << 16) | ((note & 0x7f) << 24);
+    c.value = (float) pings;
+    return c;
+}
+
+void AudioEngine::startProbe (const EngineCommand& c) noexcept
+{
+    probeMidi = (c.intValue & 1) != 0;
+    probePort = (c.intValue >> 8) & 0xff;
+    probeChannel = std::clamp ((c.intValue >> 16) & 0x1f, 1, 16);
+    probeNote = (c.intValue >> 24) & 0x7f;
+    probeIn = (int) c.samples;
+    probeOut = c.output;
+
+    LatencyProbe::Settings s;
+    s.sampleRate = sampleRate;
+    s.pings = (int) c.value;
+    s.writeBurst = ! probeMidi;
+    s.level = 0.25f;                          // -12 dBFS, a short tick
+    s.maxSpreadSec = probeMidi ? 0.003 : 0.001;   // modules jitter; a cable does not
+    probe.start (s);
+    probeRun.fetch_add (1, std::memory_order_relaxed);
+
+    const auto t = (EngineTransport) transport.load (std::memory_order_relaxed);
+    const bool busy = t == EngineTransport::Playing || fadeAction != FadeAction::None
+                      || testSignal.load (std::memory_order_relaxed) != (int) TestSignal::None
+                      || emergencyLatched.load (std::memory_order_relaxed);
+    const bool badInput = probeIn < 0 || probeIn >= numIns;
+    const bool badOutput = ! probeMidi
+                           && (probeOut < 0 || probeOut >= std::min (numOuts, maxOutputs)
+                               || routes[(size_t) probeOut].isPA.load (std::memory_order_relaxed));   // never tick the PA
+    const bool badPort = probeMidi && (probePort < 0 || probePort >= maxMidiPorts);
+    if (busy || badInput || badOutput || badPort)
+    {
+        probe.abort (LatencyProbe::Failure::BadSetup);
+        publishProbe();
+        pushEvent (EngineEvent::Type::CommandRejected);
+        return;
+    }
+    publishProbe();
+}
+
+void AudioEngine::runProbe (const float* const* inputs, int numInputs, float* const* chunk, int numOutputs,
+                            int offset, int n) noexcept
+{
+    if (probe.getState() != LatencyProbe::State::Running)
+        return;
+    const float* in = inputs != nullptr && probeIn >= 0 && probeIn < numInputs && inputs[probeIn] != nullptr
+                          ? inputs[probeIn] + offset : nullptr;
+    float* out = ! probeMidi && probeOut >= 0 && probeOut < numOutputs ? chunk[probeOut] : nullptr;
+    const int at = probe.process (in, out, n);
+    if (probeMidi && at >= 0)
+    {
+        // Leaves when sample `at` reaches the speakers, like any module note with 0 ms offset.
+        const double nsPerSample = 1.0e9 / sampleRate;
+        const auto due = chunkStartNs + (std::int64_t) (at * nsPerSample) + outputLatencyNs.load (std::memory_order_relaxed);
+        const auto ch = (std::uint8_t) (probeChannel - 1);
+        pushMidi (due, probePort, MidiBytes::make ((std::uint8_t) (0x90 | ch), (std::uint8_t) probeNote, 110));
+        pushMidi (due + 150'000'000, probePort, MidiBytes::make ((std::uint8_t) (0x80 | ch), (std::uint8_t) probeNote, 0));
+    }
+}
+
+void AudioEngine::publishProbe() noexcept
+{
+    probeState.store ((int) probe.getState(), std::memory_order_relaxed);
+    probeFailure.store ((int) probe.getFailure(), std::memory_order_relaxed);
+    probeDelay.store (probe.getDelaySamples(), std::memory_order_relaxed);
+    probeSpread.store (probe.getSpreadSamples(), std::memory_order_relaxed);
+    probeValid.store (probe.getValidPings(), std::memory_order_relaxed);
+    probePings.store (probe.getPingsDone(), std::memory_order_relaxed);
+    probeIsMidi.store (probeMidi, std::memory_order_relaxed);
+}
+
+ProbeStatus AudioEngine::getProbeStatus() const noexcept
+{
+    ProbeStatus s;
+    s.state = (LatencyProbe::State) probeState.load (std::memory_order_relaxed);
+    s.failure = (LatencyProbe::Failure) probeFailure.load (std::memory_order_relaxed);
+    s.delaySamples = probeDelay.load (std::memory_order_relaxed);
+    s.spreadSamples = probeSpread.load (std::memory_order_relaxed);
+    s.validPings = probeValid.load (std::memory_order_relaxed);
+    s.pingsDone = probePings.load (std::memory_order_relaxed);
+    s.midi = probeIsMidi.load (std::memory_order_relaxed);
+    s.runId = probeRun.load (std::memory_order_relaxed);
+    return s;
 }
 
 float AudioEngine::nextNoise() noexcept
@@ -472,7 +579,11 @@ void AudioEngine::releaseMidiNotes() noexcept
         });
         activeNotesTelemetry[(size_t) port].store (0, std::memory_order_relaxed);
     }
+    stopMidiClock();
     releaseInstrumentNotes();
+    // Whatever plays next (resume, new position) starts with a chase of the state there.
+    midiExpectedPos = -1;
+    instExpectedPos = -1;
 }
 
 void AudioEngine::releaseInstrumentNotes() noexcept
@@ -532,8 +643,22 @@ void AudioEngine::renderInstruments (int n) noexcept
                               || (anySolo && ! p.solo.load (std::memory_order_relaxed));
         auto& notes = instNotes[ti];
 
+        // PDC: an instrument whose sound comes out L samples late gets its MIDI L samples early.
+        // Events between the jump point and pos + L right after a locate are fed at once.
+        const auto lat = (std::int64_t) std::clamp (t.instrument->getLatencySamples(), 0, (int) sampleRate);
+
         int count = 0;
-        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        if (reseek && pos > 0 && fadeAction == FadeAction::None)   // never while stopping
+            chaser.chase (t.chase, pos, ! silenced, (std::int64_t) (chaseMinRemainingSec * sampleRate), [&] (const MidiBytes& m)
+            {
+                if (count >= maxInstrumentEvents)
+                    return;
+                instMsgs[(size_t) count] = m;
+                instOffsets[(size_t) count] = 0;
+                notes.observe (m);
+                ++count;
+            });
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n + lat)
         {
             const auto& e = t.events[cursor++];
             if (silenced && e.msg.isNoteOn())
@@ -546,7 +671,7 @@ void AudioEngine::renderInstruments (int n) noexcept
                 continue;
             }
             instMsgs[(size_t) count] = e.msg;
-            instOffsets[(size_t) count] = (int) std::clamp<std::int64_t> (e.sample - pos, 0, n - 1);
+            instOffsets[(size_t) count] = (int) std::clamp<std::int64_t> (e.sample - lat - pos, 0, n - 1);
             notes.observe (e.msg);
             ++count;
         }
@@ -615,8 +740,20 @@ void AudioEngine::renderMidi (int n) noexcept
                               && (trackParams[(size_t) t.slot].mute.load (std::memory_order_relaxed)
                                   || (anySolo && ! trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed)));
         const auto early = (std::int64_t) (t.sendEarlyMs * 1.0e6);
+        // Lookahead: a module slower than the output latency needs its notes before this block is
+        // even due, so events up to (early - latency) ahead are queued now (docs/04 §4).
+        const auto aheadSamples = early > latency ? (std::int64_t) ((double) (early - latency) / nsPerSample) + 1 : 0;
 
-        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        if (reseek && pos > 0 && fadeAction == FadeAction::None)   // never while stopping
+        {
+            // Locate chase: program / controllers as they were at pos, and held long notes again
+            // (not on a muted track). Sent at the start of this block.
+            const auto due = std::max (chunkStartNs, chunkStartNs + latency - early);
+            chaser.chase (t.chase, pos, ! silenced, (std::int64_t) (chaseMinRemainingSec * sampleRate),
+                          [&] (const MidiBytes& m) { pushMidi (due, t.port, m); });
+        }
+
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n + aheadSamples)
         {
             const auto& e = t.events[cursor++];
             if (silenced && e.msg.isNoteOn())
@@ -632,6 +769,74 @@ void AudioEngine::renderMidi (int n) noexcept
     for (const auto& t : plan.midiTracks)
         if (t.port >= 0 && t.port < maxMidiPorts)
             activeNotesTelemetry[(size_t) t.port].store (midiNotes[(size_t) t.port].activeCount(), std::memory_order_relaxed);
+}
+
+void AudioEngine::stopMidiClock() noexcept
+{
+    // Every stop / pause / locate / song change goes through here: slaves stop, and the next
+    // render restarts them with Song Position + Continue at the new position.
+    if (clockRunning && currentPlan != nullptr)
+    {
+        const auto now = nowNs();
+        for (const auto& c : currentPlan->midiClocks)
+            pushMidi (now, c.port, MidiBytes::make (0xfc));
+    }
+    clockRunning = false;
+    clockNeedsStart = false;
+    clockNextTick = -1;
+    clockExpectedPos = -1;
+}
+
+void AudioEngine::renderMidiClock (int n) noexcept
+{
+    const auto& plan = *currentPlan;
+    if (plan.midiClocks.empty())
+        return;
+
+    const std::int64_t pos = position.load (std::memory_order_relaxed);
+    if (pos != clockExpectedPos && clockNextTick >= 0)
+        stopMidiClock();   // the position jumped without a locate command (loop / song change)
+    if (clockNextTick < 0)
+    {
+        // (Re)start on the next 16th note: Song Position Pointer counts 16ths (6 clocks each),
+        // so the slave's first clock after Continue is exactly at that 16th.
+        const double beat = plan.tempo.beatAtSeconds ((double) pos / sampleRate);
+        const auto firstTick = (std::int64_t) std::ceil (beat * 24.0 - 1e-6);
+        clockNextTick = ((firstTick + 5) / 6) * 6;
+        clockNeedsStart = true;
+    }
+
+    const auto latency = outputLatencyNs.load (std::memory_order_relaxed);
+    const double nsPerSample = 1.0e9 / sampleRate;
+    for (int guard = 0; guard < 64; ++guard)   // 24 PPQN at 300 BPM is 120 clocks/s: a few per block
+    {
+        const auto s = (std::int64_t) std::llround (plan.tempo.secondsAtBeat ((double) clockNextTick / 24.0) * sampleRate);
+        if (s >= pos + n)
+            break;
+        const auto base = chunkStartNs + (std::int64_t) ((double) std::max<std::int64_t> (0, s - pos) * nsPerSample) + latency;
+        for (const auto& c : plan.midiClocks)
+        {
+            const auto due = std::max (chunkStartNs, base - (std::int64_t) (c.sendEarlyMs * 1.0e6));
+            if (clockNeedsStart)
+            {
+                if (clockNextTick == 0)
+                {
+                    pushMidi (due, c.port, MidiBytes::make (0xfa));   // Start
+                }
+                else
+                {
+                    const auto spp = std::min<std::int64_t> (clockNextTick / 6, 16383);
+                    pushMidi (due, c.port, MidiBytes::make (0xf2, (std::uint8_t) (spp & 0x7f), (std::uint8_t) ((spp >> 7) & 0x7f)));
+                    pushMidi (due, c.port, MidiBytes::make (0xfb));   // Continue
+                }
+            }
+            pushMidi (due, c.port, MidiBytes::make (0xf8));
+        }
+        clockNeedsStart = false;
+        clockRunning = true;
+        ++clockNextTick;
+    }
+    clockExpectedPos = pos + n;
 }
 
 void AudioEngine::renderClick (int n) noexcept
@@ -716,6 +921,7 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         renderTracks (n);
         renderClick (n);
         renderMidi (n);
+        renderMidiClock (n);
         renderInstruments (n);
         lastRenderEnd = pos + n;
     }
@@ -773,10 +979,24 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
     renderTest (outputs, numOutputs, 0, n);
 }
 
-void AudioEngine::process (const float* const*, int, float* const* outputs, int numOutputs, int numSamples) noexcept
+void AudioEngine::process (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples) noexcept
 {
-    const auto startNs = nowNs();
+    const auto startNs = timeSource != nullptr ? timeSource() : nowNs();
     callbacks.fetch_add (1, std::memory_order_relaxed);
+    // MIDI timing reference: when this block's first sample was really due, without the
+    // callback's own scheduling jitter (docs/04 §4).
+    std::int64_t blockNs = startNs;
+    double blockNsPerSample = 1.0e9 / sampleRate;
+    if (clockSmoothing.load (std::memory_order_relaxed) && numSamples > 0)
+    {
+        blockNs = sampleClock.onCallback (startNs, numSamples);
+        blockNsPerSample = sampleClock.getNsPerSample();
+        clockRelocks.store (sampleClock.getRelockCount(), std::memory_order_relaxed);
+    }
+    else
+    {
+        sampleClock.reset();
+    }
 
     for (int ch = 0; ch < numOutputs; ++ch)
         if (outputs[ch] != nullptr)
@@ -837,8 +1057,9 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
         for (int ch = 0; ch < numOutputs; ++ch)
             chunkPtrs[ch] = outputs[ch] != nullptr ? outputs[ch] + offset : nullptr;
 
-        chunkStartNs = startNs + (std::int64_t) ((double) offset * 1.0e9 / sampleRate);
+        chunkStartNs = blockNs + (std::int64_t) ((double) offset * blockNsPerSample);
         renderChunk (chunkPtrs, numOutputs, n);
+        runProbe (inputs, numInputs, chunkPtrs, numOutputs, offset, n);
 
         // Transport advances per chunk so tracks and click stay sample-aligned.
         if ((EngineTransport) transport.load (std::memory_order_relaxed) == EngineTransport::Playing)
@@ -855,6 +1076,9 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
         }
         offset += n;
     }
+
+    if (probe.getState() != LatencyProbe::State::Idle)
+        publishProbe();
 
     // 4. Fades (stop / emergency) applied to every output.
     if (fadeAction != FadeAction::None)

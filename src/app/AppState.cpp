@@ -669,6 +669,7 @@ static ModuleProfile sanitise (ModuleProfile p)
     p.volumeCc = juce::jlimit (0, 127, p.volumeCc);
     p.panCc = juce::jlimit (0, 127, p.panCc);
     p.delayOffsetMs = juce::jlimit (0.0, 200.0, p.delayOffsetMs);
+    p.clockOffsetMs = juce::jlimit (-50.0, 50.0, p.clockOffsetMs);
     p.gapMs = juce::jlimit (0, 500, p.gapMs);
     p.settleMs = juce::jlimit (0, 5000, p.settleMs);
     if (p.deviceName.empty())
@@ -1170,6 +1171,7 @@ void AppState::rebuildPlan()
                 mt.events.erase (std::remove_if (mt.events.begin(), mt.events.end(),
                                                  [] (const MidiSampleEvent& e) { return e.msg.isController (64); }),
                                  mt.events.end());
+            mt.chase = ChaseIndex::build (mt.events);
             plan->midiTracks.push_back (std::move (mt));
             continue;
         }
@@ -1183,6 +1185,7 @@ void AppState::rebuildPlan()
             it.instrument = t.instrument;
             const int ch = juce::jlimit (1, 16, t.midiChannel > 0 ? t.midiChannel : 1) - 1;
             it.events = toSampleEvents (*t.midiEvents, song->tempo, sr, ch);
+            it.chase = ChaseIndex::build (it.events);
             plan->instrumentTracks.push_back (std::move (it));
             continue;
         }
@@ -1198,6 +1201,18 @@ void AppState::rebuildPlan()
         plan->tracks.push_back (std::move (rt));
     }
 
+    // MIDI Clock to every module that asks for it (one clock per port, even if shared).
+    std::vector<std::string> clockPorts;
+    for (int m = 0; m < (int) modules.size() && m < AudioEngine::maxMidiPorts; ++m)
+    {
+        const auto& mp = modules[(size_t) m];
+        const auto key = mp.portIdentifier.empty() ? mp.portName : mp.portIdentifier;
+        if (! mp.clockOut || std::find (clockPorts.begin(), clockPorts.end(), key) != clockPorts.end())
+            continue;
+        clockPorts.push_back (key);
+        plan->midiClocks.push_back ({ m, mp.clockOffsetMs });
+    }
+
     pushMixerToEngine();
     engine.collectGarbage();
     engine.setPlan (std::move (plan), sr);
@@ -1210,6 +1225,7 @@ void AppState::setLiveMode (bool shouldBeLive)
     liveMode = shouldBeLive;
     if (shouldBeLive)
     {
+        cancelMeasurement();
         plugins.closeAllEditors();   // no plugin windows on stage
         const auto ps = getPluginSummary();
         if (ps.problems > 0 || ps.notCertified > 0)
@@ -1278,9 +1294,199 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
     sendChangeMessage();
 }
 
+// --- latency measurement -------------------------------------------------------------
+
+juce::String AppState::deviceKey() const
+{
+    return device.getDeviceName() + "|" + juce::String (device.getSampleRate()) + "|" + juce::String (device.getBufferSize());
+}
+
+double AppState::getRoundTripMs() const
+{
+    return roundTripMs >= 0.0 && roundTripKey == deviceKey() ? roundTripMs : -1.0;
+}
+
+int AppState::defaultLoopbackOutput() const
+{
+    const int n = std::min (routing.getNumOutputs(), device.getNumOutputs());
+    for (int o = 0; o < n; ++o)
+    {
+        const auto& out = routing.getOutput (o);
+        if (! out.isPA && out.source.has_value() && isInEarOnlyBus (out.source->kind))
+            return o;
+    }
+    for (int o = 0; o < n; ++o)
+        if (! routing.getOutput (o).isPA)
+            return o;
+    return -1;
+}
+
+juce::String AppState::guardMeasurement() const
+{
+    if (liveMode)
+        return "Live Mode: measurements are off during a show";
+    if (! isEngineActive())
+        return "No audio device running";
+    if (transport != TransportState::Stopped)
+        return "Stop playback first";
+    if (measurement.running)
+        return "A measurement is already running";
+    if (device.getNumInputs() <= 0)
+        return "The audio device has no inputs open (use the ASIO driver)";
+    return {};
+}
+
+juce::String AppState::startLoopbackMeasurement (int input, int output)
+{
+    if (auto g = guardMeasurement(); g.isNotEmpty())
+        return g;
+    if (output < 0)
+        output = defaultLoopbackOutput();
+    if (output < 0 || output >= routing.getNumOutputs())
+        return "No in-ear (non-PA) output to send the test tick to";
+    if (routing.getOutput (output).isPA)
+        return "Never on a PA output: pick an in-ear output";
+    if (! juce::isPositiveAndBelow (input, device.getNumInputs()))
+        return "No such input";
+    measurement = {};
+    measurement.running = true;
+    measurement.input = input;
+    measurement.output = output;
+    measurement.message = "Measuring OUT " + juce::String (output + 1) + " -> IN " + juce::String (input + 1) + "...";
+    measurementRun = engine.getProbeStatus().runId + 1;
+    engine.postCommand (AudioEngine::makeProbeCommand (false, output, input));
+    juce::Logger::writeToLog ("Latency: loopback measurement OUT " + juce::String (output + 1) + " -> IN " + juce::String (input + 1));
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::startModuleMeasurement (int moduleIndex, int input)
+{
+    if (auto g = guardMeasurement(); g.isNotEmpty())
+        return g;
+    if (! juce::isPositiveAndBelow (moduleIndex, (int) modules.size()) || moduleIndex >= AudioEngine::maxMidiPorts)
+        return "No such module";
+    if (getModuleStatus (moduleIndex) != MidiOutputService::PortStatus::Ready)
+        return "The module's MIDI port is not ready";
+    if (! juce::isPositiveAndBelow (input, device.getNumInputs()))
+        return "No such input";
+    const auto& m = modules[(size_t) moduleIndex];
+    measurement = {};
+    measurement.running = true;
+    measurement.midi = true;
+    measurement.moduleIndex = moduleIndex;
+    measurement.input = input;
+    measurement.message = "Measuring " + juce::String (m.deviceName) + " on IN " + juce::String (input + 1) + "...";
+    measurementRun = engine.getProbeStatus().runId + 1;
+    // A short, sharp sound is best: note 60 on the module's channel (drum channel 10: a snare).
+    const int note = m.channel == 10 ? 38 : 60;
+    engine.postCommand (AudioEngine::makeProbeCommand (true, -1, input, moduleIndex, m.channel, note));
+    juce::Logger::writeToLog ("Latency: module measurement " + juce::String (m.deviceName) + " on IN " + juce::String (input + 1));
+    sendChangeMessage();
+    return {};
+}
+
+void AppState::cancelMeasurement()
+{
+    if (! measurement.running)
+        return;
+    post (EngineCommand::Type::StopProbe);
+}
+
+static juce::String probeFailureText (LatencyProbe::Failure f)
+{
+    switch (f)
+    {
+        case LatencyProbe::Failure::NoSignal:  return "nothing heard on the input (check the cable and the input gain)";
+        case LatencyProbe::Failure::Noisy:     return "the input is too noisy or never goes quiet";
+        case LatencyProbe::Failure::Unstable:  return "the results did not agree (jitter or a bad connection)";
+        case LatencyProbe::Failure::Cancelled: return "cancelled";
+        case LatencyProbe::Failure::BadSetup:  return "could not start (playing, a test running, or a wrong channel)";
+        case LatencyProbe::Failure::None:      break;
+    }
+    return "failed";
+}
+
+void AppState::pollMeasurement()
+{
+    if (! measurement.running)
+        return;
+    const auto st = engine.getProbeStatus();
+    if (st.runId < measurementRun)
+        return;   // the engine has not picked the command up yet
+    if (! isEngineActive())
+    {
+        measurement.running = false;
+        measurement.finished = true;
+        measurement.message = "Measurement stopped: the audio device stopped";
+        sendChangeMessage();
+        return;
+    }
+    if (measurement.pingsDone != st.pingsDone)
+    {
+        measurement.pingsDone = st.pingsDone;
+        sendChangeMessage();
+    }
+    if (st.state == LatencyProbe::State::Running || st.state == LatencyProbe::State::Idle)
+        return;
+
+    measurement.running = false;
+    measurement.finished = true;
+    const double sr = engine.getSampleRate();
+    if (st.state != LatencyProbe::State::Done || sr <= 0.0)
+    {
+        measurement.ok = false;
+        measurement.message = "Measurement failed: " + probeFailureText (st.failure);
+        juce::Logger::writeToLog ("Latency: " + measurement.message);
+        sendChangeMessage();
+        return;
+    }
+
+    const double ms = st.delaySamples * 1000.0 / sr;
+    const double spreadMs = st.spreadSamples * 1000.0 / sr;
+    measurement.ok = true;
+    if (! measurement.midi)
+    {
+        roundTripMs = ms;
+        roundTripKey = deviceKey();
+        measurement.resultMs = ms;
+        const double reported = device.getOutputLatencyMs() + device.getInputLatencyMs();
+        measurement.message = "Round trip " + juce::String (ms, 2) + " ms (driver reports " + juce::String (reported, 2)
+                              + " ms, " + juce::String (st.validPings) + " pings, spread " + juce::String (spreadMs, 2) + " ms)";
+    }
+    else
+    {
+        // The module note left when its sample reached the speakers; its sound then came back
+        // through the input. Module delay = measured - (output + input latency).
+        double rt = getRoundTripMs();
+        const bool measuredRt = rt >= 0.0;
+        if (! measuredRt)
+            rt = device.getOutputLatencyMs() + device.getInputLatencyMs();
+        const double moduleMs = juce::jlimit (0.0, 200.0, ms - rt);
+        measurement.resultMs = moduleMs;
+        juce::String applied;
+        if (juce::isPositiveAndBelow (measurement.moduleIndex, (int) modules.size()))
+        {
+            auto p = modules[(size_t) measurement.moduleIndex];
+            const double before = p.delayOffsetMs;
+            p.delayOffsetMs = std::round (moduleMs * 10.0) / 10.0;
+            const auto err = updateModule (measurement.moduleIndex, p);
+            applied = err.isEmpty() ? " - MIDI delay offset set to " + juce::String (p.delayOffsetMs, 1) + " ms (was "
+                                          + juce::String (before, 1) + " ms)"
+                                    : " - not saved: " + err;
+        }
+        measurement.message = "Module delay " + juce::String (moduleMs, 1) + " ms (spread " + juce::String (spreadMs, 2) + " ms, "
+                              + (measuredRt ? "measured round trip" : "driver-reported latency, measure the loopback for better accuracy")
+                              + ")" + applied;
+    }
+    juce::Logger::writeToLog ("Latency: " + measurement.message);
+    sendChangeMessage();
+}
+
 void AppState::timerCallback()
 {
     applyFinishedMedia();
+    pollMeasurement();
     engine.collectGarbage();
 
     // Plugins: unsaved changes (editor / presets) and failures in the audio thread.

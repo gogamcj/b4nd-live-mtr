@@ -84,6 +84,7 @@ ProjectData sampleProject()
     mod.id = "mod-integra"; mod.deviceName = "INTEGRA-7 현악"; mod.portName = "UM-ONE"; mod.portIdentifier = "\\\\?\\usb#um-one";
     mod.channel = 3; mod.bankMsb = 87; mod.bankLsb = -1; mod.program = 41; mod.volume = 90; mod.pan = -1;
     mod.delayOffsetMs = 4.5; mod.sendOrder = "lsb,msb,pc"; mod.gapMs = 30; mod.settleMs = 400; mod.sustainEnabled = false;
+    mod.clockOut = true; mod.clockOffsetMs = -2.5;
     ModuleProfile plain;
     plain.id = "mod-plain"; plain.deviceName = "GM"; plain.portName = "Port 2";
     p.modules = { mod, plain };
@@ -167,7 +168,7 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             || m.channel != n.channel || m.bankMsb != n.bankMsb || m.bankLsb != n.bankLsb || m.program != n.program
             || m.volumeCc != n.volumeCc || m.volume != n.volume || m.panCc != n.panCc || m.pan != n.pan
             || m.sustainEnabled != n.sustainEnabled || m.delayOffsetMs != n.delayOffsetMs || m.sendOrder != n.sendOrder
-            || m.gapMs != n.gapMs || m.settleMs != n.settleMs)
+            || m.gapMs != n.gapMs || m.settleMs != n.settleMs || m.clockOut != n.clockOut || m.clockOffsetMs != n.clockOffsetMs)
             return false;
     }
     if (a.setlists[0].songIds != b.setlists[0].songIds || a.setlists[0].venue != b.setlists[0].venue)
@@ -426,7 +427,8 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
     sqlite3* raw = nullptr;
     sqlite3_open (file.c_str(), &raw);
     CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; ALTER TABLE plugin_slot DROP COLUMN state_blob;"
-                              " ALTER TABLE plugin_slot DROP COLUMN description_xml; UPDATE schema_version SET version = 1;",
+                              " ALTER TABLE plugin_slot DROP COLUMN description_xml; ALTER TABLE module_profile DROP COLUMN clock_out;"
+                              " ALTER TABLE module_profile DROP COLUMN clock_offset_ms; UPDATE schema_version SET version = 1;",
                          nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close (raw);
 

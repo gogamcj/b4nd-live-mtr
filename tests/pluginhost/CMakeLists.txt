@@ -18,5 +18,5 @@ target_compile_definitions(b4nd_pluginhost_tests PRIVATE
 target_link_libraries(b4nd_pluginhost_tests PRIVATE b4nd_engine juce::juce_audio_processors
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 add_dependencies(b4nd_pluginhost_tests b4nd_plugin_scanner
-    b4nd_test_synth_VST3 b4nd_test_crash_VST3 b4nd_test_slow_VST3 b4nd_test_badstate_VST3)
+    b4nd_test_synth_VST3 b4nd_test_crash_VST3 b4nd_test_latency_VST3 b4nd_test_slow_VST3 b4nd_test_badstate_VST3)
 add_test(NAME b4nd_pluginhost_tests COMMAND b4nd_pluginhost_tests)

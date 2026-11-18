@@ -30,14 +30,15 @@ private:
     AppState& state;
     AudioDeviceController& device;
 
-    juce::ComboBox typeBox, deviceBox, rateBox, bufferBox, outputBox;
+    juce::ComboBox typeBox, deviceBox, rateBox, bufferBox, outputBox, inputBox;
+    juce::TextButton measureButton { "Measure Round Trip" }, cancelMeasureButton { "Cancel" };
     juce::TextButton openButton { "Open" }, panelButton { "Driver Panel" }, reconnectButton { "Reconnect" },
                      closeButton { "Close Device" };
     juce::TextButton toneButton { "Tone 1 kHz" }, identifyButton { "Identify (N beeps)" },
                      busCheckButton { "Click / Guide Check" }, walkButton { "Walk All Outputs" },
                      stopTestButton { "STOP TEST" };
 
-    juce::Rectangle<int> deviceHeader, infoArea, testHeader, testInfoArea, lockArea;
+    juce::Rectangle<int> deviceHeader, infoArea, testHeader, testInfoArea, latencyHeader, latencyInfoArea, lockArea;
     bool updating = false;
 };
 

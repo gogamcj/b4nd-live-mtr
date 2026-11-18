@@ -99,7 +99,8 @@ private:
 };
 
 // Schema v2 = docs/08 plus `clip` (audio regions), track.destination_label (v1)
-// module_profile.midi_port_id (v2), plugin_slot.state_blob / description_xml (v3).
+// module_profile.midi_port_id (v2), plugin_slot.state_blob / description_xml (v3),
+// module_profile.clock_out / clock_offset_ms (v4).
 const char* const schemaV1 = R"SQL(
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 
@@ -191,7 +192,8 @@ CREATE TABLE module_profile (
   sustain_enabled INTEGER DEFAULT 1, delay_offset_ms REAL DEFAULT 0,
   send_order TEXT DEFAULT 'msb,lsb,pc', gap_ms INTEGER DEFAULT 20, settle_ms INTEGER DEFAULT 200,
   audio_input_channel INTEGER,
-  midi_port_id TEXT
+  midi_port_id TEXT,
+  clock_out INTEGER DEFAULT 0, clock_offset_ms REAL DEFAULT 0
 );
 
 CREATE TABLE track (
@@ -258,7 +260,7 @@ INSERT INTO bus (id, kind, name, channels) VALUES
   ('bus-main', 'main', 'Main', 2), ('bus-click', 'click', 'Click', 1), ('bus-guide', 'guide', 'Guide', 1),
   ('bus-extra', 'extra', 'Extra', 2), ('bus-monitor', 'monitor', 'Monitor', 2), ('bus-aux', 'aux', 'Aux', 2);
 
-INSERT INTO schema_version (version) VALUES (3);
+INSERT INTO schema_version (version) VALUES (4);
 )SQL";
 
 std::string busId (const std::string& kind) { return "bus-" + kind; }
@@ -389,6 +391,8 @@ DbResult ProjectDatabase::migrate()
         { 1, "ALTER TABLE module_profile ADD COLUMN midi_port_id TEXT; UPDATE schema_version SET version = 2;" },
         { 2, "ALTER TABLE plugin_slot ADD COLUMN state_blob BLOB; ALTER TABLE plugin_slot ADD COLUMN description_xml TEXT;"
              " UPDATE schema_version SET version = 3;" },
+        { 3, "ALTER TABLE module_profile ADD COLUMN clock_out INTEGER DEFAULT 0;"
+             " ALTER TABLE module_profile ADD COLUMN clock_offset_ms REAL DEFAULT 0; UPDATE schema_version SET version = 4;" },
     };
     for (const auto& st : steps)
     {
@@ -487,8 +491,8 @@ DbResult ProjectDatabase::save (const ProjectData& p)
 
     {
         Stmt m (db, "INSERT INTO module_profile (id, device_name, midi_port, midi_port_id, midi_channel, bank_msb, bank_lsb, program,"
-                    " volume_cc, volume_value, pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    " volume_cc, volume_value, pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms,"
+                    " clock_out, clock_offset_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
         auto optional = [&m] (int i, int v) { if (v < 0) m.bindNull (i); else m.bind (i, v); };
         for (const auto& mp : p.modules)
         {
@@ -501,7 +505,7 @@ DbResult ProjectDatabase::save (const ProjectData& p)
             m.bind (11, mp.panCc);
             optional (12, mp.pan);
             if (! m.bind (13, mp.sustainEnabled).bind (14, mp.delayOffsetMs).bind (15, mp.sendOrder)
-                     .bind (16, mp.gapMs).bind (17, mp.settleMs).run())
+                     .bind (16, mp.gapMs).bind (17, mp.settleMs).bind (18, mp.clockOut).bind (19, mp.clockOffsetMs).run())
                 return fail ("Saving module " + mp.deviceName);
         }
     }
@@ -638,7 +642,8 @@ DbResult ProjectDatabase::load (ProjectData& out)
 
     {
         Stmt m (db, "SELECT id, device_name, midi_port, midi_port_id, midi_channel, bank_msb, bank_lsb, program, volume_cc, volume_value,"
-                    " pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms FROM module_profile ORDER BY rowid");
+                    " pan_cc, pan_value, sustain_enabled, delay_offset_ms, send_order, gap_ms, settle_ms, clock_out, clock_offset_ms"
+                    " FROM module_profile ORDER BY rowid");
         auto optional = [&m] (int c) { return m.isNull (c) ? -1 : m.integer (c); };
         while (m.next())
         {
@@ -648,6 +653,7 @@ DbResult ProjectDatabase::load (ProjectData& out)
             mp.volumeCc = m.integer (8); mp.volume = optional (9); mp.panCc = m.integer (10); mp.pan = optional (11);
             mp.sustainEnabled = m.integer (12) != 0; mp.delayOffsetMs = m.real (13); mp.sendOrder = m.text (14);
             mp.gapMs = m.integer (15); mp.settleMs = m.integer (16);
+            mp.clockOut = m.integer (17) != 0; mp.clockOffsetMs = m.real (18);
             p.modules.push_back (std::move (mp));
         }
     }

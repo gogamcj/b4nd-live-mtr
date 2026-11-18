@@ -34,6 +34,7 @@ public:
 
     bool render (float* outL, float* outR, int numSamples,
                  const MidiBytes* msgs, const int* offsets, int count) noexcept override;
+    int getLatencySamples() const noexcept override { return latency.load (std::memory_order_relaxed); }
 
     juce::AudioPluginInstance& getPlugin() noexcept { return *plugin; }
     bool hasFailed() const noexcept { return failed.load (std::memory_order_relaxed); }
@@ -61,10 +62,14 @@ private:
     std::atomic<int> failureCode { 0 };
     std::atomic<float> load { 0.0f };
     std::atomic<bool> changed { false };
+    std::atomic<int> latency { 0 };   // reported by the plugin, clamped (PDC)
+    void updateLatency() noexcept;
 
     void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override { changed.store (true); }
     void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails& d) override
     {
+        if (d.latencyChanged)
+            updateLatency();
         if (d.programChanged || d.nonParameterStateChanged || d.parameterInfoChanged)
             changed.store (true);
     }

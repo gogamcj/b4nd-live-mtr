@@ -53,6 +53,12 @@ public:
         sampleRate = sr;
         for (auto& v : voices)
             v = {};
+       #if B4ND_TEST_VARIANT == 4
+        // A look-ahead instrument: its sound comes out 480 samples (10 ms at 48 kHz) after the MIDI.
+        setLatencySamples (latency);
+        delayLine.assign ((size_t) (2 * latency), 0.0f);
+        delayPos = 0;
+       #endif
     }
     void releaseResources() override {}
 
@@ -69,6 +75,19 @@ public:
             handle (meta.getMessage());
         }
         render (buffer, pos, n);
+       #if B4ND_TEST_VARIANT == 4
+        for (int i = 0; i < n; ++i)
+        {
+            for (int ch = 0; ch < 2 && ch < buffer.getNumChannels(); ++ch)
+            {
+                auto& slot = delayLine[(size_t) (2 * delayPos + ch)];
+                const float in = buffer.getSample (ch, i);
+                buffer.setSample (ch, i, slot);
+                slot = in;
+            }
+            delayPos = (delayPos + 1) % latency;
+        }
+       #endif
        #if B4ND_TEST_VARIANT == 2
         // 1.5x the block duration: can never keep up in real time.
         std::this_thread::sleep_for (std::chrono::microseconds ((long long) (1.5e6 * n / sampleRate)));
@@ -96,6 +115,11 @@ public:
     }
 
 private:
+   #if B4ND_TEST_VARIANT == 4
+    static constexpr int latency = 480;
+    std::vector<float> delayLine;
+    int delayPos = 0;
+   #endif
     struct Voice
     {
         int note = -1;

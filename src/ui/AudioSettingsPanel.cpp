@@ -6,10 +6,10 @@ namespace b4nd
 
 AudioSettingsPanel::AudioSettingsPanel (AppState& s) : state (s), device (s.getDevice())
 {
-    for (auto* c : { &typeBox, &deviceBox, &rateBox, &bufferBox, &outputBox })
+    for (auto* c : { &typeBox, &deviceBox, &rateBox, &bufferBox, &outputBox, &inputBox })
         addAndMakeVisible (*c);
     for (auto* b : { &openButton, &panelButton, &reconnectButton, &closeButton, &toneButton, &identifyButton,
-                     &busCheckButton, &walkButton, &stopTestButton })
+                     &busCheckButton, &walkButton, &stopTestButton, &measureButton, &cancelMeasureButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -53,6 +53,15 @@ AudioSettingsPanel::AudioSettingsPanel (AppState& s) : state (s), device (s.getD
     walkButton.onClick     = [test] { test (TestSignal::WalkOutputs); };
     stopTestButton.onClick = [this] { state.stopOutputTest(); };
 
+    measureButton.onClick = [this]
+    {
+        const auto err = state.startLoopbackMeasurement (inputBox.getSelectedItemIndex());
+        if (err.isNotEmpty())
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Latency measurement", err);
+    };
+    cancelMeasureButton.onClick = [this] { state.cancelMeasurement(); };
+    measureButton.setTooltip ("Cable the in-ear output back into an input first. Sends short ticks at -12 dBFS, never to the PA.");
+
     toneButton.setTooltip ("1 kHz sine at -20 dBFS on the selected output only");
     identifyButton.setTooltip ("Output N plays N beeps, so you can tell cables apart at the desk");
     busCheckButton.setTooltip ("Click pattern on CLICK outputs, noise bursts on GUIDE outputs. PA outputs stay silent.");
@@ -63,7 +72,7 @@ AudioSettingsPanel::AudioSettingsPanel (AppState& s) : state (s), device (s.getD
     refreshTypes();
     refreshDeviceDetails();
     startTimerHz (4);
-    setSize (680, 600);
+    setSize (680, 680);
 }
 
 AudioSettingsPanel::~AudioSettingsPanel()
@@ -141,6 +150,14 @@ void AudioSettingsPanel::refreshDeviceDetails()
         outputBox.addItem (label, i + 1);
     }
     outputBox.setSelectedItemIndex (juce::jlimit (0, juce::jmax (0, numOut - 1), prevOut < 0 ? 2 : prevOut), juce::dontSendNotification);
+
+    const int prevIn = inputBox.getSelectedItemIndex();
+    inputBox.clear (juce::dontSendNotification);
+    const auto inNames = device.getInputChannelNames();
+    for (int i = 0; i < device.getNumInputs(); ++i)
+        inputBox.addItem ("IN " + juce::String (i + 1) + (i < inNames.size() ? "   (" + inNames[i] + ")" : juce::String()), i + 1);
+    if (device.getNumInputs() > 0)
+        inputBox.setSelectedItemIndex (juce::jlimit (0, device.getNumInputs() - 1, juce::jmax (0, prevIn)), juce::dontSendNotification);
     updating = false;
 
     refreshEnablement();
@@ -163,6 +180,13 @@ void AudioSettingsPanel::refreshEnablement()
     for (auto* b : { &toneButton, &identifyButton, &busCheckButton, &walkButton })
         b->setEnabled (canTest);
     stopTestButton.setEnabled (running);
+
+    const bool measuring = state.getMeasurement().running;
+    const bool canMeasure = canTest && ! state.isLiveMode() && ! measuring && device.getNumInputs() > 0
+                            && state.defaultLoopbackOutput() >= 0;
+    measureButton.setEnabled (canMeasure);
+    inputBox.setEnabled (! measuring && device.getNumInputs() > 0);
+    cancelMeasureButton.setEnabled (measuring);
 }
 
 void AudioSettingsPanel::changeListenerCallback (juce::ChangeBroadcaster* source)
@@ -183,6 +207,7 @@ void AudioSettingsPanel::timerCallback()
     refreshEnablement();
     repaint (infoArea);
     repaint (testInfoArea);
+    repaint (latencyInfoArea);
     repaint (lockArea);
 }
 
@@ -200,6 +225,7 @@ void AudioSettingsPanel::paint (juce::Graphics& g)
     };
     header (deviceHeader, "AUDIO DEVICE  (ASIO preferred)");
     header (testHeader, "OUTPUT TEST  (before the show)");
+    header (latencyHeader, "LATENCY  (loopback: in-ear output cabled into an input)");
 
     auto label = [&g] (int x, int y, const juce::String& t)
     {
@@ -212,6 +238,37 @@ void AudioSettingsPanel::paint (juce::Graphics& g)
     label (16, rateBox.getY(), "Sample rate");
     label (16, bufferBox.getY(), "Buffer size");
     label (16, outputBox.getY(), "Output");
+    label (16, inputBox.getY(), "Input");
+
+    {
+        auto li = latencyInfoArea;
+        const auto& m = state.getMeasurement();
+        const int out = state.defaultLoopbackOutput();
+        g.setFont (theme::font (12.0f, true));
+        juce::String line;
+        if (m.running && ! m.midi)
+        {
+            g.setColour (theme::warn);
+            line = m.message + "  (" + juce::String (m.pingsDone) + " / " + juce::String (m.pings) + ")";
+        }
+        else if (m.finished && ! m.midi)
+        {
+            g.setColour (m.ok ? theme::ok : theme::danger);
+            line = m.message;
+        }
+        else
+        {
+            g.setColour (theme::text);
+            const auto rt = state.getRoundTripMs();
+            line = rt >= 0.0 ? "Measured round trip: " + juce::String (rt, 2) + " ms" : juce::String ("Round trip not measured for these settings.");
+        }
+        g.drawFittedText (line, li.removeFromTop (34), juce::Justification::topLeft, 2);
+        g.setColour (theme::textDim);
+        g.setFont (theme::font (11.5f));
+        g.drawFittedText ((out >= 0 ? "Ticks go to OUT " + juce::String (out + 1) + " (in-ear). " : juce::String ("No in-ear output to tick. "))
+                              + "The result is used when measuring a MIDI module's delay (MIDI MODULES > Measure Delay).",
+                          li, juce::Justification::topLeft, 2);
+    }
 
     // Device info
     auto info = infoArea;
@@ -327,6 +384,17 @@ void AudioSettingsPanel::resized()
     }
     r.removeFromTop (8);
     testInfoArea = r.removeFromTop (64);
+    r.removeFromTop (6);
+
+    latencyHeader = r.removeFromTop (26);
+    r.removeFromTop (8);
+    auto inRow = row();
+    cancelMeasureButton.setBounds (inRow.removeFromRight (80));
+    inRow.removeFromRight (6);
+    measureButton.setBounds (inRow.removeFromRight (160));
+    inRow.removeFromRight (6);
+    inputBox.setBounds (inRow);
+    latencyInfoArea = r.removeFromTop (64);
     lockArea = r.removeFromBottom (24);
 }
 

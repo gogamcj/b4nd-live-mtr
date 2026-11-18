@@ -72,6 +72,7 @@ public:
     int getNumOutputs() const;
     int getNumInputs() const;
     juce::StringArray getOutputChannelNames() const;
+    juce::StringArray getInputChannelNames() const;
     double getOutputLatencyMs() const;
     double getInputLatencyMs() const;
     int getDriverXrunCount() const;        // -1 = not reported by this driver

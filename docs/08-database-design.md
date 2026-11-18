@@ -205,3 +205,9 @@ CREATE TABLE analysis_run (
 - VSTi 트랙은 `track.plugin_slot_id`로 슬롯 하나를 가리키고, `.mid` 경로와 채널은 v2의 열을 그대로 쓴다
 - 플러그인이 없는 PC에서 열고 저장해도 읽어 온 상태를 그대로 다시 저장한다
 - v1/v2 파일은 트랜잭션 하나로 v3까지 올린다
+
+### 스키마 v4 (Phase 6)
+
+- `module_profile`에 `clock_out INTEGER DEFAULT 0`(이 포트로 MIDI Clock을 보낼지)과 `clock_offset_ms REAL DEFAULT 0`(클럭만 앞당기거나 늦추는 값, ±50 ms로 제한)을 추가했다
+- 지연 측정 결과는 기존 `delay_offset_ms`에 들어간다. 루프백 왕복 지연은 장치·샘플레이트·버퍼 크기에 따라 달라지므로 프로젝트에 저장하지 않는다 (앱을 켤 때마다 다시 잰다)
+- v1–v3 파일은 트랜잭션 하나로 v4까지 올린다. 테스트: v4 열 왕복, v1 파일에서 올린 뒤 기본값

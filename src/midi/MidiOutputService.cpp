@@ -434,6 +434,15 @@ void MidiOutputService::run()
                     dropped.fetch_add (1, std::memory_order_relaxed);
                     continue;
                 }
+                if (e.msg.isController (123))
+                {
+                    // The engine released this channel (stop, locate, song change). Notes it queued
+                    // ahead of time must not start after the release: drop them.
+                    const int port = (int) e.port, ch = e.msg.channel();
+                    pending.erase (std::remove_if (pending.begin(), pending.end(), [port, ch] (const Pending& p)
+                                   { return p.slot == port && p.msg.isNoteOn() && p.msg.channel() == ch; }),
+                                   pending.end());
+                }
                 pending.push_back ({ e.dueNs, seqCounter++, (int) e.port, e.msg });
                 added = true;
             }

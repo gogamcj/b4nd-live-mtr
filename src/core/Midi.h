@@ -21,6 +21,7 @@ struct MidiBytes
 
     static MidiBytes make (std::uint8_t a, std::uint8_t b, std::uint8_t c) noexcept { return { { a, b, c }, 3 }; }
     static MidiBytes make (std::uint8_t a, std::uint8_t b) noexcept { return { { a, b, 0 }, 2 }; }
+    static MidiBytes make (std::uint8_t a) noexcept { return { { a, 0, 0 }, 1 }; }   // system realtime
 
     std::uint8_t status() const noexcept   { return (std::uint8_t) (data[0] & 0xf0); }
     int channel() const noexcept           { return data[0] & 0x0f; }
@@ -104,6 +105,8 @@ struct ModuleProfile
     int panCc = 10, pan = 64;        // pan -1 = do not send
     bool sustainEnabled = true;
     double delayOffsetMs = 0.0;      // module latency compensation (positive = module is slow, send earlier)
+    bool clockOut = false;           // send MIDI Clock + Start/Stop/Continue/Song Position to this port
+    double clockOffsetMs = 0.0;      // clock sent this much earlier (positive) or later (negative)
     std::string sendOrder = "msb,lsb,pc";
     int gapMs = 20;                  // between bank / program messages
     int settleMs = 200;              // after the last message before "Ready"

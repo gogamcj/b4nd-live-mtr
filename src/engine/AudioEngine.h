@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+#include "core/LatencyProbe.h"
+#include "core/SampleClock.h"
 #include "core/OutputRouting.h"
 #include "core/SpscQueue.h"
 #include "core/XrunDetector.h"
@@ -42,7 +44,9 @@ struct EngineCommand
         EmergencyStop,
         SetSongLength,   // samples (0 = unlimited)
         StartTest,       // intValue = TestSignal, output = target output, value = level dB
-        StopTest
+        StopTest,
+        StartProbe,      // latency measurement, see AudioEngine::makeProbeCommand
+        StopProbe
     };
 
     Type type = Type::Stop;
@@ -76,6 +80,16 @@ struct EngineEvent
     float load = 0.0f;
 };
 
+/** Latency measurement progress and result (docs/04 §4). */
+struct ProbeStatus
+{
+    LatencyProbe::State state = LatencyProbe::State::Idle;
+    LatencyProbe::Failure failure = LatencyProbe::Failure::None;
+    int delaySamples = -1, spreadSamples = 0, validPings = 0, pingsDone = 0;
+    bool midi = false;
+    std::uint32_t runId = 0;   // increments with every start
+};
+
 /**
     Realtime audio engine core (docs/03). JUCE-independent so it can be unit-tested
     without an audio device.
@@ -93,6 +107,8 @@ public:
     static constexpr int numBusKinds = 6;   // BusKind values
     static constexpr int maxMidiPorts = 16;
     static constexpr int midiQueueSize = 16384;
+    /** Held notes are restarted after a locate only if at least this much of them is left. */
+    static constexpr double chaseMinRemainingSec = 0.25;
 
     /** The clock used for MidiOutEvent::dueNs (std::chrono::steady_clock). */
     static std::int64_t clockNs() noexcept;
@@ -137,6 +153,13 @@ public:
     /** MIDI output thread (single consumer). */
     bool popMidi (MidiOutEvent& e) noexcept { return midiOut.pop (e); }
     /** Device output latency, so MIDI notes leave when their audio would reach the speakers. */
+    /** Filter callback jitter out of MIDI timing (core/SampleClock). On by default. */
+    void setClockSmoothing (bool on) noexcept { clockSmoothing.store (on, std::memory_order_relaxed); }
+    /** Times the audio clock filter lost lock (dropouts, driver restarts). */
+    std::uint64_t getClockRelockCount() const noexcept { return clockRelocks.load (std::memory_order_relaxed); }
+    /** Tests only: replaces the wall clock read at each callback (set before playing). */
+    void setTimeSourceForTesting (std::int64_t (*fn)()) noexcept { timeSource = fn; }
+
     void setOutputLatencyMs (double ms) noexcept { outputLatencyNs.store ((std::int64_t) (std::max (0.0, ms) * 1.0e6), std::memory_order_relaxed); }
     std::uint64_t getMidiDroppedCount() const noexcept { return midiDropped.load (std::memory_order_relaxed); }
     /** Notes currently sounding on a port (as sent by the engine). */
@@ -146,6 +169,13 @@ public:
     std::uint64_t getInstrumentEventsDropped() const noexcept { return instrumentEventsDropped.load (std::memory_order_relaxed); }
     /** In-ear monitor mix: how much click, guide and MR (Main) go into the Monitor bus. */
     void setMonitorMix (float click, float guide, float main) noexcept;
+
+    // --- latency measurement (docs/04 §4) ---
+    /** Audio loopback: a burst on `output` (never a PA output), its onset found on `input`.
+        Module: a MIDI note on port/channel (1-16)/note; its sound found on `input`.
+        Only starts while stopped with no test signal; PLAY, LOCATE and EMERGENCY cancel it. */
+    static EngineCommand makeProbeCommand (bool midi, int output, int input, int port = 0, int channel = 1, int note = 60, int pings = 5);
+    ProbeStatus getProbeStatus() const noexcept;
 
     // --- telemetry (lock-free reads) ---
     EngineTransport getTransport() const noexcept { return (EngineTransport) transport.load (std::memory_order_acquire); }
@@ -170,6 +200,8 @@ private:
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
     void renderMidi (int numSamples) noexcept;
+    void renderMidiClock (int numSamples) noexcept;
+    void stopMidiClock() noexcept;
     void renderInstruments (int numSamples) noexcept;
     /** Note Off / CC64 0 / CC123 into every instrument that has sounding notes (output discarded). */
     void releaseInstrumentNotes() noexcept;
@@ -180,6 +212,9 @@ private:
     void handleCommand (const EngineCommand&) noexcept;
     void pushEvent (EngineEvent::Type, float load = 0.0f) noexcept;
     void renderTest (float* const* outputs, int numOutputs, int start, int numSamples) noexcept;
+    void startProbe (const EngineCommand&) noexcept;
+    void runProbe (const float* const* inputs, int numInputs, float* const* chunk, int numOutputs, int offset, int n) noexcept;
+    void publishProbe() noexcept;
     float nextNoise() noexcept;
 
     // configuration (written in prepare only)
@@ -257,8 +292,17 @@ private:
     std::array<ActiveNoteTracker, maxMidiPorts> midiNotes;
     std::array<std::size_t, maxTracks> midiCursor {};
     std::int64_t midiExpectedPos = -1;
+    // MIDI Clock (audio thread only)
+    std::int64_t clockNextTick = -1;      // next 24-PPQN tick to send; -1 = (re)start from the position
+    std::int64_t clockExpectedPos = -1;
+    bool clockRunning = false, clockNeedsStart = false;
+    MidiChaser chaser;                    // locate chase scratch (audio thread only)
     std::int64_t chunkStartNs = 0;
     std::atomic<std::int64_t> outputLatencyNs { 0 };
+    SampleClock sampleClock;                         // audio thread only
+    std::atomic<bool> clockSmoothing { true };
+    std::atomic<std::uint64_t> clockRelocks { 0 };
+    std::int64_t (*timeSource)() = nullptr;
     std::atomic<std::uint64_t> midiDropped { 0 };
     std::array<std::atomic<int>, maxMidiPorts> activeNotesTelemetry {};
 
@@ -272,6 +316,15 @@ private:
     std::vector<float> instL, instR;
     std::atomic<std::uint64_t> instrumentEventsDropped { 0 };
     std::array<std::atomic<int>, maxTracks> instActiveTelemetry {};
+
+    // latency measurement (audio thread only, mirrored to atomics)
+    LatencyProbe probe;
+    bool probeMidi = false;
+    int probeIn = -1, probeOut = -1, probePort = 0, probeChannel = 1, probeNote = 60;
+    std::atomic<int> probeState { 0 }, probeFailure { 0 }, probeDelay { -1 }, probeSpread { 0 },
+                     probeValid { 0 }, probePings { 0 };
+    std::atomic<bool> probeIsMidi { false };
+    std::atomic<std::uint32_t> probeRun { 0 };
 
     XrunDetector xruns;
     std::atomic<float> loadTelemetry { 0.0f }, peakLoadTelemetry { 0.0f };
