@@ -51,6 +51,13 @@ struct TrackInfo
     double mediaRate = 0.0;
     std::shared_ptr<const std::vector<float>> overview;   // peak per bucket over the whole file, for drawing
 
+    // --- AI stems (docs/07): separated from another track's media ---
+    juce::String stemName;             // vocals | drums | bass | guitar | piano | other; empty: not a stem
+    juce::String stemSourcePath;       // media the stem was separated from
+    float aiConfidence = -1.0f;        // 0..1, < 0: not AI-made
+    juce::String aiWarning;            // shown with a warning icon; empty: none
+    bool isStem() const noexcept { return stemName.isNotEmpty(); }
+
     // --- external MIDI (MidiExternal tracks) ---
     juce::String midiPath;             // .mid file; empty: none
     juce::String moduleId;             // ModuleProfile::id; empty: not assigned
@@ -307,6 +314,7 @@ public:
     struct AnalysisApply
     {
         bool withTempo = true, withTimeSig = true, withKey = true, withCues = true, withChords = true;
+        bool withStems = true;       // add the separated stems as (muted) tracks; the original stays
         double bpm = 0.0;            // > 0: one constant tempo at this BPM instead of the analysed map
         double tempoScale = 1.0;     // 2 or 0.5: the analyser picked half / double tempo
         double gridStartSec = -1.0;  // >= 0: bar 1 starts here instead
@@ -316,7 +324,9 @@ public:
         std::vector<AnalysisResult::Section> sections;   // edited list (names, removed rows)
     };
     /** Writes the accepted parts into the current song (stopped, not in Live Mode). AI cues of an
-        earlier apply are replaced, the user's own cues are kept. One level of undo. */
+        earlier apply are replaced, the user's own cues are kept. Stems become muted tracks after
+        the others (stems of an earlier separation of the same track are re-pointed, keeping
+        their mixer settings); their files move to stems/<song-id>/<run>/. One level of undo. */
     juce::String applyAnalysis (const AnalysisApply&);
     bool canUndoAnalysisApply() const;
     juce::String undoAnalysisApply();
@@ -445,8 +455,11 @@ private:
         double bpmConfidence = -1.0, keyConfidence = -1.0;
         std::vector<CuePoint> cues;
         std::vector<ChordData> chords;
+        std::optional<std::vector<TrackInfo>> tracks;   // when stems were applied
+        juce::File stemsFrom, stemsTo;                  // the moved stem folder
     };
     std::optional<AnalysisUndo> analysisUndo;
+    juce::String applyStems (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

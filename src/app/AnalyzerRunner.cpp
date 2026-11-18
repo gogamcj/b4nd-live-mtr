@@ -26,15 +26,25 @@ bool validSection (const juce::String& s)
 }
 
 // Share of the whole run per analyzer task, for one progress bar (measured on a 4 min song).
-float overallProgress (const juce::String& task, float p)
+// Stems run first and take most of the time when asked for.
+float overallProgress (const juce::String& task, float p, bool withStems, bool withAnalysis)
 {
     static const std::map<juce::String, std::pair<float, float>> w {
         { "load", { 0.00f, 0.05f } }, { "features", { 0.05f, 0.35f } }, { "tempo", { 0.40f, 0.25f } },
         { "key", { 0.65f, 0.05f } }, { "chords", { 0.70f, 0.15f } }, { "structure", { 0.85f, 0.15f } } };
+    p = juce::jlimit (0.0f, 1.0f, p);
+    const float stemShare = ! withStems ? 0.0f : withAnalysis ? 0.8f : 1.0f;
+    if (task == "stems")
+        return stemShare * p;
     const auto it = w.find (task);
     if (it == w.end())
         return -1.0f;
-    return it->second.first + it->second.second * juce::jlimit (0.0f, 1.0f, p);
+    return stemShare + (1.0f - stemShare) * (it->second.first + it->second.second * p);
+}
+
+bool stemNameOk (const juce::String& n)
+{
+    return n.isNotEmpty() && n.length() <= 32 && n.containsOnly ("abcdefghijklmnopqrstuvwxyz0123456789_");
 }
 
 const char* bootstrap =
@@ -196,6 +206,38 @@ AnalysisResult AnalysisResult::parse (const juce::String& json)
         r.hasSections = true;
     }
 
+    if (const auto& st = v["stems"]; st.isObject())
+    {
+        if (auto* files = st["files"].getArray())
+            for (const auto& f : *files)
+            {
+                Stem x;
+                x.name = f["name"].toString();
+                x.relPath = f["path"].toString();
+                x.energyDb = num (f["energyDb"], -120.0);
+                x.empty = (bool) f["empty"];
+                x.clipped = (bool) f["clipped"];
+                // Only plain names under stems/: the path is joined to the package folder.
+                if (stemNameOk (x.name) && x.relPath == "stems/" + x.name + ".wav")
+                    r.stems.push_back (x);
+                else
+                    r.errors.add ("stems: ignored a bad stem entry");
+            }
+        r.stemResidualDb = num (st["residualDb"], 0.0);
+        if (auto* w = st["warnings"].getArray())
+            for (const auto& x : *w)
+                r.stemWarnings.add (x.toString().substring (0, 200));
+        r.stemModel = st["model"].toString().substring (0, 40);
+        // -40 dB residual or better: the stems add up to the mix (0.9); -10 dB: a lot is missing (0.3).
+        r.stemConfidence = juce::jlimit (0.3, 0.9, 0.3 + (-10.0 - r.stemResidualDb) / 30.0 * 0.6);
+        r.hasStems = ! r.stems.empty();
+    }
+    if (const auto& j = v["job"]; j.isObject())
+    {
+        r.sourceTrackId = j["sourceTrackId"].toString().substring (0, 64);
+        r.sourceStartSec = std::max (0.0, num (j["sourceStartSec"], 0.0));
+    }
+
     if (v["versions"].isObject())
         r.versionsJson = juce::JSON::toString (v["versions"], true);
     r.valid = r.status == "done" || r.status == "partial";
@@ -332,6 +374,7 @@ juce::String AnalyzerRunner::start (Job j)
         status.state = State::Preparing;
         status.songId = job.songId;
         result = {};
+        jobTimeoutSec = std::max (timeoutSec, job.timeoutSec);
     }
     cancelRequested = false;
     startedMs = juce::Time::getMillisecondCounter();
@@ -354,7 +397,7 @@ AnalyzerRunner::Status AnalyzerRunner::getStatus() const
     if (s.state == State::Preparing || s.state == State::Running)
     {
         s.elapsedSec = (juce::Time::getMillisecondCounter() - startedMs) / 1000.0;
-        if (s.elapsedSec > timeoutSec && process != nullptr)
+        if (s.elapsedSec > jobTimeoutSec && process != nullptr)
         {
             // A hung analyzer: kill it (the run thread then reports the timeout).
             cancelRequested = true;
@@ -430,6 +473,40 @@ bool AnalyzerRunner::writeInputWav (const Job& j, const juce::File& wav, juce::S
     return true;
 }
 
+bool AnalyzerRunner::writeStemsInputWav (const Job& j, const juce::File& wav, juce::String& error)
+{
+    // Stereo, 24-bit, in media time (the stems get the source track's start): separation needs
+    // the stereo image and the full resolution, unlike the analysis.
+    wav.deleteFile();
+    auto stream = wav.createOutputStream();
+    if (stream == nullptr)
+        return error = "Cannot write " + wav.getFullPathName(), false;
+    juce::WavAudioFormat fmt;
+    std::unique_ptr<juce::OutputStream> os (stream.release());
+    auto w = fmt.createWriterFor (os, juce::AudioFormatWriterOptions{}.withSampleRate (j.mediaRate).withNumChannels (2)
+                                                                      .withBitsPerSample (24));
+    if (w == nullptr)
+        return error = "Cannot create the stem input WAV", false;
+    const auto& m = *j.media;
+    const int block = 65536;
+    juce::AudioBuffer<float> buf (2, block);
+    for (std::int64_t pos = 0; pos < m.numFrames; pos += block)
+    {
+        if (cancelRequested || threadShouldExit())
+            return error = "Cancelled", false;
+        const int n = (int) std::min<std::int64_t> (block, m.numFrames - pos);
+        for (int c = 0; c < 2; ++c)
+        {
+            const float* src = m.channel (std::min (c, m.numChannels - 1)) + pos;
+            std::copy (src, src + n, buf.getWritePointer (c));
+        }
+        if (! w->writeFromAudioSampleBuffer (buf, 0, n))
+            return error = "Writing the stem input WAV failed (disk full?)", false;
+    }
+    w.reset();
+    return true;
+}
+
 void AnalyzerRunner::run()
 {
     Job j;
@@ -447,7 +524,24 @@ void AnalyzerRunner::run()
         setState (cancelRequested ? State::Cancelled : State::Failed, error);
         return;
     }
-    j.media.reset();   // the WAV is written: do not hold the decoded audio longer than needed
+    const bool withStems = j.tasks.contains ("stems");
+    bool withAnalysis = false;
+    for (const auto* t : { "tempo", "key", "chords", "structure" })
+        withAnalysis = withAnalysis || j.tasks.contains (t);
+    const auto stemsWav = j.outDir.getChildFile ("stems_input.wav");
+    if (withStems)
+    {
+        // Old stem files of this song's previous run: the new run replaces them all.
+        j.outDir.getChildFile ("stems").deleteRecursively();
+        if (! writeStemsInputWav (j, stemsWav, error))
+        {
+            wav.deleteFile();
+            stemsWav.deleteFile();
+            setState (cancelRequested ? State::Cancelled : State::Failed, error);
+            return;
+        }
+    }
+    j.media.reset();   // the WAVs are written: do not hold the decoded audio longer than needed
 
     auto* o = new juce::DynamicObject();
     o->setProperty ("input", wav.getFileName());
@@ -457,9 +551,17 @@ void AnalyzerRunner::run()
     o->setProperty ("tasks", tasks);
     o->setProperty ("device", "cpu");
     o->setProperty ("out", ".");
+    if (withStems)
+        o->setProperty ("stemsInput", stemsWav.getFileName());
+    auto* meta = new juce::DynamicObject();
+    meta->setProperty ("sourceTrackId", j.sourceTrackId);
+    meta->setProperty ("sourceStartSec", j.mediaStartSec);
+    o->setProperty ("meta", juce::var (meta));
     resultFile.deleteFile();
     if (! jobFile.replaceWithText (juce::JSON::toString (juce::var (o))))
     {
+        wav.deleteFile();
+        stemsWav.deleteFile();
         setState (State::Failed, "Cannot write " + jobFile.getFullPathName());
         return;
     }
@@ -468,6 +570,8 @@ void AnalyzerRunner::run()
     auto cmd = resolveCommand (where);
     if (cmd.isEmpty())
     {
+        wav.deleteFile();
+        stemsWav.deleteFile();
         setState (State::Failed, where);
         return;
     }
@@ -481,6 +585,8 @@ void AnalyzerRunner::run()
         if (cancelRequested || ! process->start (cmd, juce::ChildProcess::wantStdOut))
         {
             process.reset();
+            wav.deleteFile();
+            stemsWav.deleteFile();
             status.state = cancelRequested ? State::Cancelled : State::Failed;
             status.message = cancelRequested ? "Cancelled" : "Cannot start the analyzer (" + where + ")";
             return;
@@ -513,7 +619,7 @@ void AnalyzerRunner::run()
                 continue;
             if (v["task"].isString())
             {
-                const auto p = overallProgress (v["task"].toString(), (float) num (v["progress"], 0.0));
+                const auto p = overallProgress (v["task"].toString(), (float) num (v["progress"], 0.0), withStems, withAnalysis);
                 std::lock_guard<std::mutex> g (lock);
                 status.task = v["task"].toString();
                 if (p >= 0.0f)
@@ -532,10 +638,11 @@ void AnalyzerRunner::run()
         status.exitCode = code;
     }
     wav.deleteFile();   // ~10 MB per song; the result keeps everything that is needed
+    stemsWav.deleteFile();
 
     if (cancelRequested)
     {
-        const bool timedOut = (juce::Time::getMillisecondCounter() - startedMs) / 1000.0 > timeoutSec;
+        const bool timedOut = (juce::Time::getMillisecondCounter() - startedMs) / 1000.0 > jobTimeoutSec;
         setState (State::Cancelled, timedOut ? "Timed out" : "Cancelled");
         return;
     }

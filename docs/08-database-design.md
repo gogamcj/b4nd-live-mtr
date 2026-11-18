@@ -229,3 +229,10 @@ CREATE TABLE analysis_run (
 - `analysis_run`: 분석 기록. 시작·종료 시각, 상태(done/partial/failed/cancelled), 작업 목록, `analysis/<song-id>/result.json` 경로, 분석기 버전(JSON). 곡마다 최근 20개만 남긴다
 - `cue_point.section`, `cue_point.source`: 분석에서 온 큐는 `source = 'ai'`. 다시 적용하면 AI 큐만 바뀌고 사용자 큐는 남는다
 - 테스트: 위 값의 왕복과, 0 신뢰도와 NULL(값 없음)의 구분
+
+### Phase 9 (스키마 변경 없음, v5 그대로)
+
+- `media_file.kind = 'stem'`과 `media_file.source_media_id`: 스템 파일과 그 원본. 원본이 곡에서 지워졌으면 NULL이다. 스템이 원본보다 먼저 나와도 되도록, 모든 행을 넣은 뒤 원본 연결을 UPDATE로 쓴다
+- `track.ai_confidence`: 스템 트랙의 분리 신뢰도(0~1). AI가 만든 트랙이 아니면 NULL이다
+- 스템 파일 위치: `stems/<song-id>/<시각>/<name>.wav` (패키지 상대 경로)
+- 테스트: 스템 미디어와 원본 연결, 신뢰도 0과 NULL의 구분 왕복

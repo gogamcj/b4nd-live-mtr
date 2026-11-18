@@ -498,6 +498,12 @@ DbResult ProjectDatabase::save (const ProjectData& p)
             if (! s.bind (1, m.id).bind (2, m.kind).bind (3, m.path).bindOrNull (4, m.sha256)
                      .bind (5, m.durationSec).bind (6, m.sampleRate).bind (7, m.channels).run())
                 return fail ("Saving media " + m.path);
+        // After all rows exist: a stem may be listed before the media it was separated from.
+        Stmt src (db, "UPDATE media_file SET source_media_id = ? WHERE id = ?");
+        for (const auto& m : p.media)
+            if (! m.sourceMediaId.empty() && p.findMedia (m.sourceMediaId) != nullptr
+                && ! src.bind (1, m.sourceMediaId).bind (2, m.id).run())
+                return fail ("Saving media " + m.path);
     }
 
     {
@@ -543,8 +549,8 @@ DbResult ProjectDatabase::save (const ProjectData& p)
     Stmt sig (db, "INSERT INTO time_sig_point (song_id, bar, numerator, denominator) VALUES (?,?,?,?)");
     Stmt cue (db, "INSERT INTO cue_point (id, song_id, name, section, position_sec, color, sort_order, source) VALUES (?,?,?,?,?,?,?,?)");
     Stmt track (db, "INSERT INTO track (id, song_id, name, sort_order, kind, media_id, volume_db, pan, gain_db, mute, solo, mono,"
-                    " output_bus_id, delay_offset_ms, destination_label, module_profile_id, midi_channel, midi_rel_path, plugin_slot_id)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    " output_bus_id, delay_offset_ms, destination_label, module_profile_id, midi_channel, midi_rel_path, plugin_slot_id,"
+                    " ai_confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     Stmt clip (db, "INSERT INTO clip (id, track_id, media_id, start_sec, offset_sec, length_sec) VALUES (?,?,?,?,?,?)");
     Stmt click (db, "INSERT INTO click_settings (song_id, enabled, count_in_bars, accent_first, sound, volume_db, subdivision)"
                     " VALUES (?,?,?,?,?,?,?)");
@@ -581,11 +587,13 @@ DbResult ProjectDatabase::save (const ProjectData& p)
         for (const auto& t : sd.tracks)
         {
             const std::string firstMedia = t.clips.empty() ? std::string() : t.clips.front().mediaId;
-            if (! track.bind (1, t.id).bind (2, sd.id).bind (3, t.name).bind (4, order++).bind (5, t.kind)
+            track.bind (1, t.id).bind (2, sd.id).bind (3, t.name).bind (4, order++).bind (5, t.kind)
                        .bindOrNull (6, firstMedia).bind (7, t.volumeDb).bind (8, t.pan).bind (9, t.gainDb)
                        .bind (10, t.mute).bind (11, t.solo).bind (12, t.mono).bind (13, busId (t.busKind))
                        .bind (14, t.delayOffsetMs).bindOrNull (15, t.destinationLabel).bindOrNull (16, t.moduleProfileId)
-                       .bind (17, t.midiChannel).bindOrNull (18, t.midiPath).bindOrNull (19, t.pluginSlotId).run())
+                       .bind (17, t.midiChannel).bindOrNull (18, t.midiPath).bindOrNull (19, t.pluginSlotId);
+            if (t.aiConfidence >= 0.0) track.bind (20, t.aiConfidence); else track.bindNull (20);
+            if (! track.run())
                 return fail ("Saving track " + t.name);
             for (const auto& c : t.clips)
                 if (! clip.bind (1, c.id).bind (2, t.id).bind (3, c.mediaId).bind (4, c.startSec)
@@ -666,12 +674,12 @@ DbResult ProjectDatabase::load (ProjectData& out)
         p.masterVolumeDb = s.real (6); p.limiterOn = s.integer (7) != 0;
     }
     {
-        Stmt s (db, "SELECT id, kind, rel_path, sha256, duration_sec, sample_rate, channels FROM media_file ORDER BY rowid");
+        Stmt s (db, "SELECT id, kind, rel_path, sha256, duration_sec, sample_rate, channels, source_media_id FROM media_file ORDER BY rowid");
         while (s.next())
         {
             MediaRef m;
             m.id = s.text (0); m.kind = s.text (1); m.path = s.text (2); m.sha256 = s.text (3);
-            m.durationSec = s.real (4); m.sampleRate = s.integer (5); m.channels = s.integer (6);
+            m.durationSec = s.real (4); m.sampleRate = s.integer (5); m.channels = s.integer (6); m.sourceMediaId = s.text (7);
             p.media.push_back (std::move (m));
         }
     }
@@ -717,7 +725,7 @@ DbResult ProjectDatabase::load (ProjectData& out)
     Stmt sig (db, "SELECT bar, numerator, denominator FROM time_sig_point WHERE song_id = ? ORDER BY bar");
     Stmt cue (db, "SELECT id, name, section, position_sec, color, source FROM cue_point WHERE song_id = ? ORDER BY sort_order, position_sec");
     Stmt track (db, "SELECT id, name, kind, volume_db, pan, gain_db, mute, solo, mono, output_bus_id, delay_offset_ms, destination_label,"
-                    " module_profile_id, midi_channel, midi_rel_path, plugin_slot_id FROM track WHERE song_id = ? ORDER BY sort_order");
+                    " module_profile_id, midi_channel, midi_rel_path, plugin_slot_id, ai_confidence FROM track WHERE song_id = ? ORDER BY sort_order");
     Stmt clip (db, "SELECT id, media_id, start_sec, offset_sec, length_sec FROM clip WHERE track_id = ? ORDER BY start_sec, rowid");
     Stmt click (db, "SELECT enabled, count_in_bars, accent_first, sound, volume_db, subdivision FROM click_settings WHERE song_id = ?");
     if (! songs.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid()
@@ -771,6 +779,7 @@ DbResult ProjectDatabase::load (ProjectData& out)
             t.busKind = busKindFromId (track.text (9)); t.delayOffsetMs = track.real (10); t.destinationLabel = track.text (11);
             t.moduleProfileId = track.text (12); t.midiChannel = track.integer (13); t.midiPath = track.text (14);
             t.pluginSlotId = track.text (15);
+            t.aiConfidence = track.isNull (16) ? -1.0 : std::clamp (track.real (16), 0.0, 1.0);
             sd.tracks.push_back (std::move (t));
         }
         track.reset();

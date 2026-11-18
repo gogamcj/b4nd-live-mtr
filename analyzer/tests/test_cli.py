@@ -55,12 +55,12 @@ class CliTests(unittest.TestCase):
 
     def test_unavailable_task_gives_partial_result(self):
         run_cli("synth", "--out", os.path.join(self.dir, "song.wav"))
-        code, out, _ = run_cli("run", "--job", self.job("song.wav", ["tempo", "stems"]))
+        code, out, _ = run_cli("run", "--job", self.job("song.wav", ["tempo", "midi"]))
         self.assertEqual(code, 3)
         r = self.result()
         self.assertEqual(r["status"], "partial")
         self.assertIn("bpm", r)                      # the tasks that worked are kept
-        self.assertTrue(any(e.startswith("stems:") for e in r["errors"]))
+        self.assertTrue(any(e.startswith("midi:") for e in r["errors"]))
 
     def test_missing_input_fails_with_a_result_file(self):
         code, out, _ = run_cli("run", "--job", self.job("nope.wav", ["tempo"]))
@@ -108,7 +108,8 @@ class CliTests(unittest.TestCase):
         code, out, _ = run_cli("info")
         self.assertEqual(code, 0)
         info = json.loads(out)
-        self.assertEqual(info["tasks"], ["tempo", "key", "chords", "structure"])
+        self.assertEqual(info["tasks"], ["tempo", "key", "chords", "structure", "stems"])
+        self.assertIn("available", info["stems"])
 
 
 if __name__ == "__main__":

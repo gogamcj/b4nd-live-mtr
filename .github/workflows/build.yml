@@ -63,14 +63,25 @@ jobs:
           B4ND_REQUIRE_ANALYZER: '1'
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: Demucs (CPU PyTorch) for stem separation
+        shell: pwsh
+        run: |
+          python -m pip install --quiet torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet demucs==4.0.1
+          python -c "import demucs, torch; print('demucs', demucs.__version__, 'torch', torch.__version__)"
+
       - name: Standalone analyzer (PyInstaller, no Python needed on the band PC)
         shell: pwsh
         run: |
           $dir = "build/src/app/B4ND_LIVE_MTR_artefacts/Release"
           pyinstaller --noconfirm --onedir --name b4nd-analyzer --distpath "$dir" --workpath build/pyinstaller `
-            --specpath build/pyinstaller --paths analyzer --exclude-module tkinter analyzer/pyinstaller_entry.py
-          & "$dir/b4nd-analyzer/b4nd-analyzer.exe" info
+            --specpath build/pyinstaller --paths analyzer --exclude-module tkinter `
+            --collect-submodules demucs --collect-data demucs --hidden-import yaml analyzer/pyinstaller_entry.py
+          # The model ships with the analyzer: the band PC separates without internet.
+          python analyzer/tools/fetch_demucs_model.py "$dir/b4nd-analyzer/models"
+          & "$dir/b4nd-analyzer/b4nd-analyzer.exe" info | Tee-Object -Variable info
           if ($LASTEXITCODE -ne 0) { throw "standalone analyzer does not run" }
+          if (-not ("$info" -match '"available": true')) { throw "stems not available in the standalone analyzer" }
 
       - name: AI analysis end to end (standalone analyzer, apply, save)
         shell: pwsh
@@ -89,6 +100,25 @@ jobs:
           if (-not ($logs | Select-String -Pattern "Analysis DONE in .*: 128\.0\d BPM .* bar 1 at 0\.6\d\d s, 4/4, A minor" -Quiet)) { throw "wrong analysis result" }
           if (-not ($logs | Select-String -Pattern "Analysis applied to " -Quiet)) { throw "analysis not applied" }
           if (-not (Test-Path "ai-test.b4nd/analysis")) { throw "analysis folder not in the package" }
+
+      - name: Stems end to end (standalone analyzer with Demucs, bundled model, apply, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $env:TORCH_HOME = "$PWD/no-torch-cache"   # must use the bundled model, not the download cache
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-stems.png','--analysis',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--analyze-tasks', 'stems', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "stem run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy|Stems" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*6 stems \(htdemucs_6s" -Quiet)) { throw "no stems from Demucs" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to .*stems \(" -Quiet)) { throw "stems not applied" }
+          $stems = Get-ChildItem -Recurse "ai-test.b4nd/stems" -Filter *.wav
+          $stems | ForEach-Object { "$($_.FullName) $($_.Length)" }
+          if ($stems.Count -lt 3) { throw "stem files missing" }
+          if (Test-Path "no-torch-cache/hub/checkpoints") { throw "the model was downloaded instead of the bundled one used" }
 
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
@@ -224,6 +254,33 @@ jobs:
             echo "expected a failure without an analyzer"; exit 1
           fi
           grep -q "analysis: FAILED.*NOT FOUND" analysis-missing.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch/hub/checkpoints
+          key: demucs-htdemucs_6s-v1
+
+      - name: Stems with real Demucs (CPU) - analyzer tests and app end to end
+        run: |
+          set -o pipefail
+          python -m pip install --quiet torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --quiet demucs==4.0.1
+          (cd analyzer && B4ND_TEST_DEMUCS=1 python -m unittest tests.test_stems -v)
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems.png --analysis --project ai-test.b4nd \
+            --analyze --analyze-tasks stems --apply-analysis | tee stems.txt
+          grep -q "analysis: done" stems.txt
+          grep -Eq "analysis stems: .*model htdemucs_6s" stems.txt
+          grep -q "analysis apply: ok" stems.txt
+          grep -q "project save: ok" stems.txt
+          ls -la ai-test.b4nd/stems/*/*
+          # Reopened: the stems are muted tracks next to the untouched original, and marked as AI.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee stems-reopen.txt
+          grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' stems-reopen.txt
+          grep -Eq 'track "Vocals \(stem\)" AUDIO 0.0 dB MUTE media=vocals.wav STEM of ai-song.wav ai=[0-9]+%' stems-reopen.txt
+          grep -Eq 'track "Bass \(stem\)" AUDIO 0.0 dB MUTE media=bass.wav STEM of ai-song.wav' stems-reopen.txt
+          grep -q "missing media: 0" stems-reopen.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |

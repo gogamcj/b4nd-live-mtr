@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 8 (AI 분석: BPM, Key, 코드, 구조)
+## 현재 상태: Phase 9 (AI 스템 분리)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -52,6 +52,13 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
   - 곡의 MR 트랙을 분석해 BPM, 마디 1 위치, 박자, Key, 코드, 구간(Intro/Verse/Chorus...)을 신뢰도와 함께 보여 줍니다.
   - 결과는 초안입니다. 고친 뒤 APPLY TO SONG을 눌러야 곡에 들어가고, UNDO APPLY로 되돌릴 수 있습니다.
   - 분석기는 앱 옆의 `b4nd-analyzer` 폴더(Windows 빌드에 포함, Python 불필요)나 Python 3 + numpy + scipy로 실행됩니다. 공연 모드에서는 쓸 수 없습니다.
+- 스템 분리: 좌측 Stem Separation을 누르거나 분석 창에서 "Stems"를 켜고 ANALYZE를 누릅니다.
+  - Demucs(htdemucs_6s)로 Vocals / Drums / Bass / Guitar / Piano / Other를 나눕니다. CPU에서는 곡당 몇 분 걸립니다.
+  - APPLY TO SONG을 누르면 스템이 음소거된 트랙으로 추가됩니다. 원본 트랙은 그대로 있고, 필요한 스템만 켜서 쓰면 됩니다.
+  - 스템 트랙에는 보라색 "AI 신뢰도" 표시가 붙고, 확인이 필요하면 노란 "!"가 붙습니다 (Guitar/Piano는 항상 귀로 확인).
+  - Windows 빌드의 분석기에는 Demucs와 모델 파일이 들어 있어 인터넷 없이 동작합니다.
+
+![스템 트랙](docs/images/phase9-stems.png)
 
 ![AI 분석 창](docs/images/phase8-analysis.png)
 

@@ -33,6 +33,9 @@ const juce::StringArray& allKeys()
     return k;
 }
 
+const char* const stemsTip = "Separate the track into vocals / drums / bass / guitar / piano / other (Demucs htdemucs_6s). "
+                             "Takes several minutes on a CPU. The stems are added as muted tracks; the original stays.";
+
 juce::String stateText (AnalyzerRunner::State s)
 {
     switch (s)
@@ -112,18 +115,17 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
     analyzeButton.setColour (juce::TextButton::buttonColourId, theme::accent.darker (0.4f));
     applyButton.setColour (juce::TextButton::buttonColourId, theme::play.darker (0.5f));
     for (auto* t : { &taskTempo, &taskKey, &taskChords, &taskSections, &taskStems, &taskMidi,
-                     &useTempo, &useTimeSig, &useKey, &useChords, &useCues })
+                     &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems })
     {
         t->setToggleState (true, juce::dontSendNotification);
         t->setWantsKeyboardFocus (false);
         addAndMakeVisible (*t);
     }
-    for (auto* t : { &taskStems, &taskMidi })
-    {
-        t->setToggleState (false, juce::dontSendNotification);
-        t->setEnabled (false);
-        t->setTooltip ("Comes with a later phase (docs/09)");
-    }
+    taskMidi.setToggleState (false, juce::dontSendNotification);
+    taskMidi.setEnabled (false);
+    taskMidi.setTooltip ("Comes with a later phase (docs/09)");
+    taskStems.setToggleState (false, juce::dontSendNotification);   // minutes on a CPU: only when asked for
+    taskStems.setTooltip (stemsTip);
     for (auto* e : { &bpmEditor, &gridEditor })
     {
         e->setFont (theme::mono (15.0f));
@@ -168,6 +170,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
         if (taskKey.getToggleState()) tasks.add ("key");
         if (taskChords.getToggleState()) tasks.add ("chords");
         if (taskSections.getToggleState()) tasks.add ("structure");
+        if (taskStems.getToggleState() && taskStems.isEnabled()) tasks.add ("stems");
         if (tasks.isEmpty())
             return setMessage ("Choose at least one analysis.", true);
         const auto err = state.startAnalysis (sourceBox.getSelectedId() - 1, tasks);
@@ -188,7 +191,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
 
     state.addChangeListener (this);
     startTimerHz (4);
-    setSize (1000, 720);
+    setSize (1000, 760);
     refresh();
     probeAnalyzer();
 }
@@ -234,16 +237,34 @@ void AnalysisPanel::probeAnalyzer()
             safe->analyzerChecked = true;
             safe->analyzerError = error;
             safe->analyzerInfo = info;
+            safe->stemsAvailable = false;
+            safe->stemsReason = "the analyzer is not available";
             if (info.isNotEmpty())
             {
                 juce::var v;
                 if (juce::JSON::parse (info, v).wasOk())
+                {
                     safe->analyzerInfo = "Analyzer " + v["b4nd_analyzer"].toString() + " (Python " + v["python"].toString() + ", numpy "
                                          + v["numpy"].toString() + ", scipy " + v["scipy"].toString() + ")";
+                    const auto& st = v["stems"];
+                    safe->stemsAvailable = st.isObject() && (bool) st["available"];
+                    safe->stemsReason = ! st.isObject() ? juce::String ("this analyzer version has no stem separation")
+                                                        : st["reason"].toString();
+                    safe->analyzerInfo << (safe->stemsAvailable ? ", stems: Demucs " + st["demucs"].toString()
+                                                                      + (st["repo"].isString() ? " (model included)" : " (model downloads on first use)")
+                                                                : ", stems: not available");
+                }
                 juce::Logger::writeToLog ("Analyzer ready: " + safe->analyzerInfo);
             }
             else
                 juce::Logger::writeToLog ("Analyzer NOT AVAILABLE: " + error);
+            if (safe->stemsRequested)
+            {
+                if (safe->stemsAvailable)
+                    safe->taskStems.setToggleState (true, juce::dontSendNotification);
+                else
+                    safe->setMessage ("Stems are not available: " + safe->stemsReason, true);
+            }
             safe->repaint();
         });
     });
@@ -298,6 +319,7 @@ void AnalysisPanel::loadDraft (const AnalysisResult& r)
     useKey.setToggleState (r.hasKey, juce::dontSendNotification);
     useChords.setToggleState (r.hasChords, juce::dontSendNotification);
     useCues.setToggleState (r.hasSections, juce::dontSendNotification);
+    useStems.setToggleState (r.hasStems, juce::dontSendNotification);
 }
 
 void AnalysisPanel::refresh()
@@ -326,11 +348,13 @@ void AnalysisPanel::refresh()
     const bool locked = lockReason().isNotEmpty();
     analyzeButton.setEnabled (! busy && ! locked && song != nullptr);
     cancelButton.setEnabled (busy);
+    taskStems.setEnabled (stemsAvailable && ! busy);
+    taskStems.setTooltip (stemsAvailable || ! analyzerChecked ? juce::String (stemsTip) : "Stems are not available: " + stemsReason);
     analyzerButton.setEnabled (! busy && ! state.isLiveMode());
     const bool hasResult = r != nullptr;
     for (auto* c : std::initializer_list<juce::Component*> { &applyButton, &halfButton, &doubleButton, &earlierButton, &laterButton,
                                                              &bpmEditor, &gridEditor, &timeSigBox, &keyBox, &useTempo, &useTimeSig,
-                                                             &useKey, &useChords, &useCues, &sectionList })
+                                                             &useKey, &useChords, &useCues, &useStems, &sectionList })
         c->setEnabled (hasResult && ! locked && ! busy);
     undoButton.setEnabled (state.canUndoAnalysisApply() && ! locked);
     halfButton.setToggleState (tempoScale < 0.75, juce::dontSendNotification);
@@ -359,6 +383,7 @@ void AnalysisPanel::apply()
     a.withKey = useKey.getToggleState();
     a.withChords = useChords.getToggleState();
     a.withCues = useCues.getToggleState();
+    a.withStems = useStems.getToggleState();
     a.tempoScale = tempoScale;
     const double typed = bpmEditor.getText().getDoubleValue();
     if (r->hasTempo && typed >= 20.0 && std::abs (typed - r->bpm * tempoScale) > 0.005)
@@ -378,12 +403,22 @@ void AnalysisPanel::apply()
         if (d.include && d.s.label.trim().isNotEmpty())
             a.sections.push_back (d.s);
     const auto err = state.applyAnalysis (a);
-    setMessage (err.isEmpty() ? "Applied to the song. AI cues are marked; UNDO APPLY restores the song." : err, err.isNotEmpty());
+    setMessage (err.isEmpty() ? "Applied to the song. AI cues and stems are marked (stems start muted); UNDO APPLY restores the song." : err, err.isNotEmpty());
+}
+
+void AnalysisPanel::preselectStems()
+{
+    stemsRequested = true;
+    if (stemsAvailable)
+        taskStems.setToggleState (true, juce::dontSendNotification);
+    else if (analyzerChecked)
+        setMessage ("Stems are not available: " + stemsReason, true);
+    refresh();
 }
 
 juce::String AnalysisPanel::applyAll()
 {
-    for (auto* t : { &useTempo, &useTimeSig, &useKey, &useChords, &useCues })
+    for (auto* t : { &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems })
         t->setToggleState (true, juce::dontSendNotification);
     apply();
     return messageIsError ? message : juce::String();
@@ -513,6 +548,15 @@ void AnalysisPanel::paint (juce::Graphics& g)
             g.drawText (juce::String ((int) sections.size()) + " sections (list on the right); your own cues are kept",
                         cuesInfoArea, juce::Justification::centredLeft);
         }
+        if (r->hasStems)
+        {
+            juce::StringArray names;
+            for (const auto& x : r->stems)
+                names.add (x.name + (x.empty ? " (empty)" : ""));
+            line (stemsInfoArea, names.joinIntoString (", ") + "  residual " + juce::String (r->stemResidualDb, 1) + " dB"
+                                     + (r->stemWarnings.isEmpty() ? juce::String() : "  ! " + r->stemWarnings.joinIntoString ("; ")),
+                  r->stemConfidence);
+        }
         if (! r->errors.isEmpty())
         {
             g.setColour (theme::warn);
@@ -627,6 +671,11 @@ void AnalysisPanel::resized()
         auto x = row();
         useCues.setBounds (x.removeFromLeft (110));
         cuesInfoArea = x;
+    }
+    {
+        auto x = row();
+        useStems.setBounds (x.removeFromLeft (110));
+        stemsInfoArea = x;
     }
     errorsArea = left.removeFromTop (40);
     sectionsHeader = r.removeFromTop (22);

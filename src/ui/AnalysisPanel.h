@@ -27,6 +27,9 @@ public:
     /** For tests and the command line: press APPLY with everything selected. */
     juce::String applyAll();
 
+    /** Ticks "Stems" (once the analyzer check says Demucs is there): the Stem Separation button. */
+    void preselectStems();
+
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
@@ -50,8 +53,8 @@ private:
                      halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" };
     juce::ComboBox sourceBox, timeSigBox, keyBox;
     juce::ToggleButton taskTempo { "Tempo / beats / bars" }, taskKey { "Key" }, taskChords { "Chords" },
-                       taskSections { "Sections (cues)" }, taskStems { "Stems (Phase 9)" }, taskMidi { "Audio to MIDI (Phase 10)" };
-    juce::ToggleButton useTempo { "TEMPO" }, useTimeSig { "TIME SIG" }, useKey { "KEY" }, useChords { "CHORDS" }, useCues { "CUES" };
+                       taskSections { "Sections (cues)" }, taskStems { "Stems (Demucs, slow)" }, taskMidi { "Audio to MIDI (Phase 10)" };
+    juce::ToggleButton useTempo { "TEMPO" }, useTimeSig { "TIME SIG" }, useKey { "KEY" }, useChords { "CHORDS" }, useCues { "CUES" }, useStems { "STEMS" };
     juce::TextEditor bpmEditor, gridEditor;
     juce::ListBox sectionList { "sections", this };
     std::unique_ptr<juce::FileChooser> chooser;
@@ -65,10 +68,12 @@ private:
 
     juce::String analyzerInfo, analyzerError;
     bool analyzerChecked = false;
+    bool stemsAvailable = false, stemsRequested = false;
+    juce::String stemsReason;
     juce::String message;
     bool messageIsError = false;
     juce::Rectangle<int> headerArea, analyzerArea, progressArea, resultsArea, tempoInfoArea, barLabelArea, barInfoArea, sigInfoArea,
-                         keyInfoArea, chordsArea, cuesInfoArea, errorsArea, lockArea, messageArea, sectionsHeader;
+                         keyInfoArea, chordsArea, cuesInfoArea, stemsInfoArea, errorsArea, lockArea, messageArea, sectionsHeader;
 
     friend class SectionRow;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AnalysisPanel)

@@ -189,6 +189,28 @@ void TimelineView::paint (juce::Graphics& g)
         auto badge = hr.removeFromLeft (kindW).withHeight (14).translated (0, 2);
         g.drawRoundedRectangle (badge.toFloat(), 3.0f, 1.0f);
         g.drawText (kind, badge, juce::Justification::centred);
+        if (t.isStem())
+        {
+            // AI stem: violet badge with its confidence, "!" when it needs a listen (docs/07).
+            const juce::String ai = "AI " + (t.aiConfidence >= 0.0f ? juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
+                                                                    : juce::String());
+            const int aiW = (int) juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), ai) + 10;
+            hr.removeFromLeft (3);
+            auto b = hr.removeFromLeft (aiW).withHeight (14).translated (0, 2);
+            g.setColour (theme::trackVsti);
+            g.fillRoundedRectangle (b.toFloat(), 3.0f);
+            g.setColour (theme::background);
+            g.drawText (ai, b, juce::Justification::centred);
+            if (t.aiWarning.isNotEmpty())
+            {
+                hr.removeFromLeft (3);
+                auto w = hr.removeFromLeft (14).withHeight (14).translated (0, 2);
+                g.setColour (theme::warn);
+                g.fillRoundedRectangle (w.toFloat(), 3.0f);
+                g.setColour (theme::background);
+                g.drawText ("!", w, juce::Justification::centred);
+            }
+        }
         g.setColour (theme::textDim);
         g.setFont (theme::font (10.0f));
         g.drawFittedText (" > " + state.getTrackDestination ((int) i), hr.withHeight (18), juce::Justification::centredLeft, 1);

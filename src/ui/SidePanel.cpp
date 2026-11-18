@@ -44,11 +44,16 @@ SidePanel::SidePanel (AppState& s) : state (s)
                                   "Results are drafts you check before applying.");
         aiButtons[i]->onClick = [this] { showAnalysisWindow (state); };
     }
-    for (int i = 4; i <= 5; ++i)
+    aiButtons[4]->setTooltip ("Separate the song into vocals / drums / bass / guitar / piano / other (Demucs). "
+                              "The stems are added as muted tracks; the original stays.");
+    aiButtons[4]->onClick = [this]
     {
-        aiButtons[i]->setEnabled (false);   // Phase 9 / 10
-        aiButtons[i]->setTooltip (i == 4 ? "Arrives in Phase 9 (Demucs stems)" : "Arrives in Phase 10 (Basic Pitch / CREPE)");
-    }
+        showAnalysisWindow (state);
+        if (auto* p = getAnalysisWindowContent())
+            p->preselectStems();
+    };
+    aiButtons[5]->setEnabled (false);   // Phase 10
+    aiButtons[5]->setTooltip ("Arrives in Phase 10 (Basic Pitch / CREPE)");
 
     newButton.onClick  = [this] { projectCommands::newProject (state); };
     openButton.onClick = [this] { projectCommands::openProject (state); };
@@ -86,7 +91,7 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
         repaint();
     }
     const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
-    for (int i = 0; i <= 3 && i < aiButtons.size(); ++i)
+    for (int i = 0; i <= 4 && i < aiButtons.size(); ++i)
         aiButtons[i]->setEnabled (! state.isLiveMode());
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);

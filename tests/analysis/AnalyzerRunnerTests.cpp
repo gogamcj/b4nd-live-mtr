@@ -269,3 +269,76 @@ TEST_CASE ("Analysis: failures are reported, never hang, and leave no running pr
     empty.media.reset();
     CHECK (r.start (empty).isNotEmpty());
 }
+
+TEST_CASE ("Analysis: stem entries are checked before their paths are used")
+{
+    const auto r = AnalysisResult::parse (R"({"status":"done","errors":[],
+        "stems":{"model":"htdemucs_6s","residualDb":-35.0,"warnings":["piano: check"],
+                 "files":[{"name":"vocals","path":"stems/vocals.wav","energyDb":-6.5},
+                          {"name":"piano","path":"stems/piano.wav","energyDb":-60.0,"empty":true},
+                          {"name":"evil","path":"../../evil.wav"},
+                          {"name":"../x","path":"stems/../x.wav"}]},
+        "job":{"sourceTrackId":"track-7","sourceStartSec":1.25}})");
+    CHECK (r.valid);
+    CHECK (r.hasStems);
+    CHECK (r.stems.size() == 2);   // the two path tricks are ignored
+    CHECK (r.errors.size() == 2);
+    CHECK (r.stems.size() == 2 && r.stems[1].empty);
+    CHECK_NEAR (r.stemResidualDb, -35.0, 1e-9);
+    CHECK (r.stemConfidence > 0.7);
+    CHECK (r.stemWarnings.size() == 1);
+    CHECK (r.sourceTrackId == "track-7");
+    CHECK_NEAR (r.sourceStartSec, 1.25, 1e-9);
+
+    const auto bad = AnalysisResult::parse (R"({"status":"done","stems":{"residualDb":-8,"files":[{"name":"bass","path":"stems/bass.wav"}]}})");
+    CHECK_NEAR (bad.stemConfidence, 0.3, 1e-9);   // stems that do not add up to the mix: low
+}
+
+TEST_CASE ("Analysis: a stem run writes stereo input, gets the stems back and cleans up")
+{
+    if (! analyzerAvailable())
+    {
+        CHECK (! required());
+        return;
+    }
+    TempDir t;
+    setEnv ("B4ND_ANALYZER_FAKE_STEMS", "1");   // band-split stand-in: the app side, not Demucs
+    AnalyzerRunner r;
+    auto job = makeJob (t.dir.getChildFile ("analysis/song-1"), { "stems" });
+    job.media = clickTrack (48000.0, 8.0, 120.0, 0.5);
+    job.mediaRate = 48000.0;
+    job.mediaStartSec = 2.0;
+    job.sourceTrackId = "track-original";
+    t.dir.getChildFile ("analysis/song-1/stems").createDirectory();
+    t.dir.getChildFile ("analysis/song-1/stems/old.wav").replaceWithText ("old run");
+    CHECK (r.start (job).isEmpty());
+    const auto st = waitDone (r, 120.0);
+    setEnv ("B4ND_ANALYZER_FAKE_STEMS", {});
+    CHECK (st.state == AnalyzerRunner::State::Done);
+    if (st.state != AnalyzerRunner::State::Done)
+        std::printf ("  state %d: %s\n", (int) st.state, st.message.toRawUTF8());
+    const auto res = r.getResult();
+    CHECK (res.hasStems);
+    CHECK (res.stems.size() == 6);
+    CHECK (! res.hasTempo);   // only stems were asked for
+    CHECK (res.sourceTrackId == "track-original");
+    CHECK_NEAR (res.sourceStartSec, 2.0, 1e-9);
+    CHECK (res.stemResidualDb < -60.0);   // the band split adds up exactly
+    const auto dir = t.dir.getChildFile ("analysis/song-1");
+    for (const auto& s : res.stems)
+    {
+        const auto f = dir.getChildFile (s.relPath);
+        CHECK (f.existsAsFile());
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatReader> rd (wav.createReaderFor (f.createInputStream().release(), true));
+        CHECK (rd != nullptr);
+        if (rd != nullptr)
+        {
+            CHECK (rd->numChannels == 2);
+            CHECK_NEAR ((double) rd->lengthInSamples / rd->sampleRate, 8.0, 0.001);   // media time: same length as the source
+        }
+    }
+    CHECK (! dir.getChildFile ("stems/old.wav").exists());     // the previous run's stems are replaced
+    CHECK (! dir.getChildFile ("stems_input.wav").exists());   // removed after the run
+    CHECK (! dir.getChildFile ("input.wav").exists());
+}

@@ -25,6 +25,7 @@ struct MediaRef
     double durationSec = 0.0;
     int sampleRate = 0;
     int channels = 0;
+    std::string sourceMediaId;       // stems: the media they were separated from
 };
 
 struct CueData
@@ -63,6 +64,8 @@ struct TrackData
     std::string moduleProfileId;   // external module (midi_external)
     int midiChannel = 0;           // 1-16 overrides the profile's channel, 0 = use the profile's
     std::string midiPath;          // .mid file, stored like media paths
+
+    double aiConfidence = -1.0;    // stems (and later MIDI) made by the AI: 0..1, < 0 = not AI-made
 };
 
 /** A plugin instance and its saved state (docs/05 §6). The state is stored in the database

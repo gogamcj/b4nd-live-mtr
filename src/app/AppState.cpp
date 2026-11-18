@@ -1849,6 +1849,7 @@ ProjectData AppState::toProjectData() const
 
     const auto pkg = session.getPackage();
     std::map<juce::String, std::string> mediaIds;   // absolute path -> media id
+    std::map<std::string, juce::String> stemSources;   // stem media id -> source path
 
     SetlistData setlist;
     setlist.id = "setlist-main";
@@ -1925,7 +1926,7 @@ ProjectData AppState::toProjectData() const
                 {
                     MediaRef m;
                     m.id = newUuid();
-                    m.kind = t.kind == TrackKind::Guide ? "guide" : "original";
+                    m.kind = t.kind == TrackKind::Guide ? "guide" : t.isStem() ? "stem" : "original";
                     m.path = session.isOpen() ? pkg.toStoredPath (u8 (t.mediaPath)) : u8 (t.mediaPath);
                     if (t.media != nullptr && t.mediaRate > 0.0)
                     {
@@ -1934,6 +1935,8 @@ ProjectData AppState::toProjectData() const
                     }
                     p.media.push_back (m);
                     it = mediaIds.emplace (t.mediaPath, m.id).first;
+                    if (t.isStem())
+                        stemSources[m.id] = t.stemSourcePath;
                 }
                 ClipData c;
                 c.id = newUuid();
@@ -1941,6 +1944,7 @@ ProjectData AppState::toProjectData() const
                 c.startSec = t.mediaStartSeconds;
                 td.clips.push_back (c);
             }
+            td.aiConfidence = t.aiConfidence >= 0.0f ? (double) t.aiConfidence : -1.0;
             sd.tracks.push_back (td);
         }
         if (s.tracks.empty() || std::none_of (s.tracks.begin(), s.tracks.end(), [] (const TrackInfo& t) { return t.kind == TrackKind::Click; }))
@@ -1948,6 +1952,10 @@ ProjectData AppState::toProjectData() const
         setlist.songIds.push_back (sd.id);
         p.songs.push_back (std::move (sd));
     }
+    for (auto& m : p.media)
+        if (auto it = stemSources.find (m.id); it != stemSources.end())
+            if (auto src = mediaIds.find (it->second); src != mediaIds.end())
+                m.sourceMediaId = src->second;   // empty when the original was removed from the song
     p.setlists.push_back (setlist);
     p.modules = modules;
     p.masterVolumeDb = masterDb;
@@ -2036,6 +2044,17 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
                     t.mediaPath = fromU8 (pkg.toAbsolutePath (m->path));
                     t.mediaStartSeconds = td.clips.front().startSec;
                     t.mediaStatus = TrackInfo::MediaStatus::Loading;
+                    if (m->kind == "stem")
+                    {
+                        t.stemName = juce::File (t.mediaPath).getFileNameWithoutExtension();
+                        if (const auto* src = p.findMedia (m->sourceMediaId))
+                            t.stemSourcePath = fromU8 (pkg.toAbsolutePath (src->path));
+                        t.aiConfidence = (float) td.aiConfidence;
+                        if (td.aiConfidence >= 0.0 && td.aiConfidence < 0.5)
+                            t.aiWarning = "low separation quality (" + juce::String (juce::roundToInt (td.aiConfidence * 100)) + "%)";
+                        if (t.stemName == "piano" || t.stemName == "guitar")
+                            t.aiWarning << (t.aiWarning.isEmpty() ? "" : "; ") << "check by ear";
+                    }
                 }
             s.tracks.push_back (std::move (t));
         }

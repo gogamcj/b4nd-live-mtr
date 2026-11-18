@@ -43,6 +43,9 @@ ProjectData sampleProject()
 
     MediaRef mr;
     mr.id = newUuid(); mr.path = "media/backing.wav"; mr.durationSec = 180.5; mr.sampleRate = 44100; mr.channels = 2;
+    MediaRef st;   // listed before its source: the source link is written after all rows
+    st.id = newUuid(); st.kind = "stem"; st.path = "stems/song/vocals.wav"; st.sourceMediaId = mr.id; st.channels = 2;
+    p.media.push_back (st);
     p.media.push_back (mr);
     MediaRef gd;
     gd.id = newUuid(); gd.kind = "guide"; gd.path = "C:/Shows/guide 보컬.wav"; gd.durationSec = 180.0; gd.sampleRate = 48000; gd.channels = 1;
@@ -66,6 +69,9 @@ ProjectData sampleProject()
         a.id = newUuid(); a.name = "Original Mix"; a.kind = "audio"; a.busKind = "main";
         a.volumeDb = -3.5; a.pan = -0.25; a.mute = true;
         a.clips.push_back ({ newUuid(), mr.id, 1.5, 0.25, 0.0 });
+        TrackData v;
+        v.id = newUuid(); v.name = "Stem: Vocals"; v.kind = "audio"; v.mute = true; v.aiConfidence = i == 0 ? 0.0 : 0.62;
+        v.clips.push_back ({ newUuid(), st.id, 1.5, 0.0, 0.0 });
         TrackData g;
         g.id = newUuid(); g.name = "Guide"; g.kind = "guide"; g.busKind = "guide"; g.solo = true;
         g.clips.push_back ({ newUuid(), gd.id, 0.0, 0.0, 0.0 });
@@ -77,7 +83,7 @@ ProjectData sampleProject()
         x.id = newUuid(); x.name = "Strings"; x.kind = "midi_external"; x.moduleProfileId = "mod-integra";
         x.midiChannel = i == 0 ? 0 : 5; x.midiPath = "media/strings 현악.mid";
         m.pluginSlotId = "slot-piano-" + std::to_string (i);
-        s.tracks = { a, g, c, m, x };
+        s.tracks = { a, v, g, c, m, x };
         s.click.countInBars = 2;
         s.click.sound = "wood";
         s.click.subdivision = 2;
@@ -135,7 +141,7 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
         return false;
     for (size_t i = 0; i < a.media.size(); ++i)
         if (a.media[i].id != b.media[i].id || a.media[i].path != b.media[i].path || a.media[i].kind != b.media[i].kind
-            || a.media[i].channels != b.media[i].channels)
+            || a.media[i].channels != b.media[i].channels || a.media[i].sourceMediaId != b.media[i].sourceMediaId)
             return false;
     for (size_t i = 0; i < a.songs.size(); ++i)
     {
@@ -177,7 +183,7 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             if (t.id != u.id || t.name != u.name || t.kind != u.kind || t.busKind != u.busKind || t.volumeDb != u.volumeDb
                 || t.pan != u.pan || t.mute != u.mute || t.solo != u.solo || t.destinationLabel != u.destinationLabel
                 || t.clips.size() != u.clips.size() || t.moduleProfileId != u.moduleProfileId || t.midiChannel != u.midiChannel
-            || t.midiPath != u.midiPath || t.pluginSlotId != u.pluginSlotId)
+            || t.midiPath != u.midiPath || t.pluginSlotId != u.pluginSlotId || t.aiConfidence != u.aiConfidence)   // NOLINT exact
                 return false;
             for (size_t c = 0; c < t.clips.size(); ++c)
                 if (t.clips[c].mediaId != u.clips[c].mediaId || t.clips[c].startSec != u.clips[c].startSec

@@ -63,7 +63,9 @@ struct ScreenshotRequest
     bool analysisWindow = false;   // --analysis: show (and capture) the AI analysis window
     bool analyze = false;          // --analyze: analyse the current song once its media is loaded
     bool applyAnalysis = false;    // --apply-analysis: then apply everything and save
+    bool undoAnalysis = false;     // --undo-analysis: then undo the apply (before the save)
     juce::String analyzer;         // --analyzer <program or python>
+    juce::StringArray analyzeTasks;   // --analyze-tasks tempo,key,chords,structure,stems (default: all but stems)
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
     {
@@ -80,8 +82,11 @@ struct ScreenshotRequest
         r.analysisWindow = args.contains ("--analysis");
         r.analyze = args.contains ("--analyze");
         r.applyAnalysis = args.contains ("--apply-analysis");
+        r.undoAnalysis = args.contains ("--undo-analysis");
         if (const int s = args.indexOf ("--analyzer"); s >= 0 && s + 1 < args.size())
             r.analyzer = args[s + 1].unquoted();
+        if (const int s = args.indexOf ("--analyze-tasks"); s >= 0 && s + 1 < args.size())
+            r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -250,9 +255,13 @@ public:
             if (! s.analysisRuns.empty() || s.tempo.getOffsetSeconds() > 0.0 || ! s.chords.empty())
                 printSongAnalysis (s);
             for (const auto& t : s.tracks)
-                std::printf ("    track \"%s\" %s %.1f dB%s%s%s\n", t.name.toRawUTF8(), nameForTrackKind (t.kind).toRawUTF8(),
+                std::printf ("    track \"%s\" %s %.1f dB%s%s%s%s\n", t.name.toRawUTF8(), nameForTrackKind (t.kind).toRawUTF8(),
                              (double) t.volumeDb, t.mute ? " MUTE" : "", t.solo ? " SOLO" : "",
-                             t.mediaPath.isNotEmpty() ? (" media=" + juce::File (t.mediaPath).getFileName()).toRawUTF8() : "");
+                             t.mediaPath.isNotEmpty() ? (" media=" + juce::File (t.mediaPath).getFileName()).toRawUTF8() : "",
+                             ! t.isStem() ? ""
+                                          : (" STEM of " + juce::File (t.stemSourcePath).getFileName() + " ai="
+                                             + juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
+                                             + (t.aiWarning.isNotEmpty() ? " WARNING: " + t.aiWarning : juce::String())).toRawUTF8());
         }
         if (state->getPluginSummary().instruments > 0)
             printPluginSummary();
@@ -410,7 +419,7 @@ private:
             }
             if (screenshot->analyze)
             {
-                const auto err = state->startAnalysis();
+                const auto err = state->startAnalysis (-1, screenshot->analyzeTasks);
                 std::printf ("analysis: start %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
                 if (err.isEmpty())
                 {
@@ -438,6 +447,15 @@ private:
                              "%d chords, %d sections\n", r->bpm, r->bpmConfidence * 100.0, r->gridStartSec, r->numerator,
                              r->denominator, r->timeSigConfidence * 100.0, (int) r->tempoMap.size(), r->key.toRawUTF8(),
                              r->keyConfidence * 100.0, (int) r->chords.size(), (int) r->sections.size());
+                if (r->hasStems)
+                {
+                    juce::String list;
+                    for (const auto& x : r->stems)
+                        list << x.name << " " << juce::String (x.energyDb, 1) << " dB" << (x.empty ? " (empty)" : "") << ", ";
+                    std::printf ("analysis stems: %s model %s, residual %.1f dB, confidence %.0f%%%s%s\n", list.toRawUTF8(),
+                                 r->stemModel.toRawUTF8(), r->stemResidualDb, r->stemConfidence * 100.0,
+                                 r->stemWarnings.isEmpty() ? "" : ", warnings: ", r->stemWarnings.joinIntoString ("; ").toRawUTF8());
+                }
                 if (screenshot->applyAnalysis)
                 {
                     const auto err = getAnalysisWindowContent() != nullptr ? getAnalysisWindowContent()->applyAll()
@@ -447,6 +465,14 @@ private:
                         setApplicationReturnValue (1);
                     if (const auto* s = state->getCurrentSong())
                         printSongAnalysis (*s);
+                    if (screenshot->undoAnalysis)
+                    {
+                        const auto e3 = state->undoAnalysisApply();
+                        std::printf ("analysis undo: %s\n", e3.isEmpty() ? "ok" : e3.toRawUTF8());
+                        if (const auto* s = state->getCurrentSong())
+                            std::printf ("    %d tracks, %d stems after undo\n", (int) s->tracks.size(),
+                                         (int) std::count_if (s->tracks.begin(), s->tracks.end(), [] (const TrackInfo& t) { return t.isStem(); }));
+                    }
                     if (state->hasProjectFile())
                     {
                         const auto e2 = state->saveProject();

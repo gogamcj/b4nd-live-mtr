@@ -8,7 +8,7 @@ from b4nd_analyzer import analyze, audio, synth  # noqa: E402
 
 
 @functools.lru_cache(maxsize=None)
-def analysed(bpm=128.0, numerator=4, lead_in=0.6, semitones=0, tempo_change=0.0, tasks=analyze.TASKS):
+def analysed(bpm=128.0, numerator=4, lead_in=0.6, semitones=0, tempo_change=0.0, tasks=analyze.ANALYSIS_TASKS):
     """(song, truth, result) for a synthetic song, analysed through a WAV file like the app does."""
     import tempfile
 

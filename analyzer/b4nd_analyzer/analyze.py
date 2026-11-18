@@ -10,8 +10,9 @@ import scipy
 
 from . import __version__, audio, harmony, structure, tempo
 
-TASKS = ("tempo", "key", "chords", "structure")
-DEFERRED = ("stems", "midi")   # Phase 9 / 10
+ANALYSIS_TASKS = ("tempo", "key", "chords", "structure")
+TASKS = ANALYSIS_TASKS + ("stems",)
+DEFERRED = ("midi",)   # Phase 10
 
 
 def grid_beats(t: tempo.TempoResult, duration: float) -> np.ndarray:
@@ -32,15 +33,23 @@ def grid_beats(t: tempo.TempoResult, duration: float) -> np.ndarray:
     return np.array(out)
 
 
-def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None):
-    """Returns (result dict, list of error strings). Never raises for a failed task."""
+def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None, out_dir=None, stems_input=None,
+        separator=None):
+    """Returns (result dict, list of error strings). Never raises for a failed task.
+    Stems are written to out_dir/stems/ from stems_input (the stereo source; default input_path)."""
     result = {"input": input_path, "tasks": list(tasks), "errors": [],
               "versions": {"b4nd_analyzer": __version__, "numpy": np.__version__, "scipy": scipy.__version__,
                            "python": platform.python_version(), "backend": "builtin"}}
     errors = []
     unknown = [t for t in tasks if t not in TASKS]
     for t in unknown:
-        errors.append(f"{t}: not available in this analyzer version" + (" (Phase 9/10)" if t in DEFERRED else ""))
+        errors.append(f"{t}: not available in this analyzer version" + (" (Phase 10)" if t in DEFERRED else ""))
+
+    if "stems" in tasks:
+        _run_stems(result, errors, stems_input or input_path, out_dir, emit, log, separator)
+    if not any(x in tasks for x in ANALYSIS_TASKS):
+        result["errors"] = errors
+        return result, errors
 
     emit("load", 0.0)
     y = audio.load_audio(input_path)
@@ -49,7 +58,7 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None)
     feats = audio.compute_features(y, progress=lambda p: emit("features", p))
 
     t = None
-    want = [x for x in TASKS if x in tasks]
+    want = [x for x in ANALYSIS_TASKS if x in tasks]
     if want:
         try:
             t = tempo.analyse_tempo(feats, progress=lambda p: emit("tempo", p))
@@ -124,3 +133,22 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None)
         result["key"]["candidates"] = result["key"]["candidates"][:3]
     result["errors"] = errors
     return result, errors
+
+
+def _run_stems(result, errors, path, out_dir, emit, log, separator):
+    from . import stems
+
+    try:
+        if not out_dir:
+            raise ValueError("no output folder for the stem files")
+        if separator is None and not stems.demucs_available():
+            raise RuntimeError("Demucs is not installed in this analyzer (pip install demucs)")
+        emit("stems", 0.0)
+        r = stems.run_stems(path, out_dir, separate=separator, names_versions={"model": "custom"} if separator else None,
+                            progress=lambda p: emit("stems", p))
+        result["stems"] = r
+        result["versions"].update({k: v for k, v in r.get("versions", {}).items() if k != "device"})
+        emit("stems", 1.0)
+    except Exception as e:  # noqa: BLE001 - reported, the other tasks still run
+        errors.append(f"stems: {e}")
+        log(traceback.format_exc())

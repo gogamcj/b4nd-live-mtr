@@ -20,6 +20,24 @@ juce::File analysisDir (const juce::File& package, const juce::String& songId)
 {
     return package.getChildFile ("analysis").getChildFile (songId);
 }
+
+juce::String stemTitle (const juce::String& name)
+{
+    return name.substring (0, 1).toUpperCase() + name.substring (1) + " (stem)";
+}
+
+/** One line for the track's warning icon, or "" (docs/07: low quality -> warning). */
+juce::String stemWarning (const AnalysisResult& r, const AnalysisResult::Stem& st)
+{
+    juce::StringArray w;
+    if (r.stemConfidence < 0.5)
+        w.add ("the stems do not add up to the mix (" + juce::String (r.stemResidualDb, 1) + " dB)");
+    if (st.clipped)
+        w.add ("clipped");
+    if (st.name == "piano" || st.name == "guitar")
+        w.add ("piano / guitar separation is the weakest part of the model: check by ear");
+    return w.joinIntoString ("; ");
+}
 } // namespace
 
 int AppState::findAnalysisSourceTrack() const
@@ -71,6 +89,13 @@ juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks)
     job.media = t.media;
     job.mediaRate = t.mediaRate;
     job.mediaStartSec = t.mediaStartSeconds;
+    job.sourceTrackId = t.id;
+    if (job.tasks.contains ("stems"))
+    {
+        if (t.isStem())
+            return "This track is a stem: separate the original instead";
+        job.timeoutSec = 120.0 * 60.0;   // Demucs on a CPU: several minutes per song, more on old PCs
+    }
     if (auto err = analyzer.start (job); err.isNotEmpty())
         return err;
     analysisStartedAt = nowIso();
@@ -141,6 +166,9 @@ void AppState::pollAnalysis()
                 names.add (x.label);
             summary << ", sections: " << names.joinIntoString (" / ");
         }
+        if (r.hasStems)
+            summary << (summary.isEmpty() ? "" : ", ") << (int) r.stems.size() << " stems (" << r.stemModel << ", residual "
+                    << juce::String (r.stemResidualDb, 1) << " dB, " << juce::roundToInt (r.stemConfidence * 100) << "%)";
         juce::Logger::writeToLog ("Analysis " + r.status.toUpperCase() + " in " + juce::String (st.elapsedSec, 1) + " s: " + summary
                                   + (st.message.isNotEmpty() ? " | " + st.message : juce::String()));
         analysisResults[st.songId] = std::move (r);
@@ -204,6 +232,10 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
     TempoMap tempo = s->tempo;
     double gridShift = 0.0;
     juce::StringArray applied;
+    const bool withStems = a.withStems && r.hasStems;
+    if (withStems)
+        if (auto err = applyStems (*s, r, undo, applied, true); err.isNotEmpty())
+            return err;   // checked before anything is written to the song
     if (a.withTempo && r.hasTempo)
     {
         std::vector<TempoPoint> pts;
@@ -263,6 +295,18 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
         s->chords = std::move (ch);
         applied.add (juce::String ((int) s->chords.size()) + " chords");
     }
+    if (withStems)
+        if (auto err = applyStems (*s, r, undo, applied, false); err.isNotEmpty())
+        {
+            // Moving the files failed (disk, permissions): put the song back as it was.
+            s->tempo = undo.tempo;
+            s->key = undo.key;
+            s->bpmConfidence = undo.bpmConfidence;
+            s->keyConfidence = undo.keyConfidence;
+            s->cues = undo.cues;
+            s->chords = undo.chords;
+            return err;
+        }
     if (applied.isEmpty())
         return "Nothing selected to apply";
 
@@ -271,6 +315,92 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
     markDirty();
     juce::Logger::writeToLog ("Analysis applied to " + s->title + ": " + applied.joinIntoString (", "));
     sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::applyStems (SongInfo& s, const AnalysisResult& r, AnalysisUndo& undo, juce::StringArray& applied, bool checkOnly)
+{
+    const auto from = analysisDir (session.getFolder(), s.id).getChildFile ("stems");
+    const TrackInfo* source = nullptr;
+    for (const auto& t : s.tracks)
+        if (t.id == r.sourceTrackId)
+            source = &t;
+    if (source == nullptr || source->mediaPath.isEmpty())
+        return "Stems: the separated track is no longer in this song";
+    std::vector<const AnalysisResult::Stem*> use;
+    int added = 0;
+    for (const auto& st : r.stems)
+    {
+        if (! from.getChildFile (st.relPath.fromFirstOccurrenceOf ("stems/", false, false)).existsAsFile())
+            return "Stems: the files are no longer in the analysis folder (already added? run the separation again)";
+        if (st.empty)
+            continue;   // nothing of this instrument in the song: no track
+        use.push_back (&st);
+        const bool exists = std::any_of (s.tracks.begin(), s.tracks.end(), [&] (const TrackInfo& t) {
+            return t.stemName == st.name && t.stemSourcePath == source->mediaPath; });
+        if (! exists)
+            ++added;
+    }
+    if (use.empty())
+        return "Stems: every stem is empty";
+    if ((int) s.tracks.size() + added > AudioEngine::maxTracks)
+        return "Stems: too many tracks in this song";
+    if (checkOnly)
+        return {};
+
+    const auto runFolder = session.getFolder().getChildFile ("stems").getChildFile (s.id)
+                               .getChildFile (juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S"));
+    if (runFolder.exists() || ! runFolder.getParentDirectory().createDirectory() || ! from.moveFileTo (runFolder))
+        return "Stems: cannot move the files to " + runFolder.getFullPathName();
+    undo.tracks = s.tracks;
+    undo.stemsFrom = from;
+    undo.stemsTo = runFolder;
+
+    const juce::String sourcePath = source->mediaPath;
+    const double start = source->mediaStartSeconds;
+    juce::StringArray names, skipped;
+    for (const auto& st : r.stems)
+        if (st.empty)
+            skipped.add (st.name);
+    for (const auto* st : use)
+    {
+        const auto file = runFolder.getChildFile (st->name + ".wav");
+        TrackInfo* t = nullptr;
+        for (auto& x : s.tracks)
+            if (x.stemName == st->name && x.stemSourcePath == sourcePath)
+                t = &x;   // separated again: keep its name, fader, mute and solo
+        if (t == nullptr)
+        {
+            TrackInfo nt;
+            nt.id = newUuid();
+            nt.name = stemTitle (st->name);
+            nt.kind = TrackKind::Audio;
+            nt.destination = "Main L/R";
+            nt.bus = BusKind::Main;
+            nt.mute = true;   // nothing changes in the mix until the user unmutes a stem
+            nt.stemName = st->name;
+            nt.stemSourcePath = sourcePath;
+            s.tracks.push_back (nt);
+            t = &s.tracks.back();
+        }
+        t->mediaPath = file.getFullPathName();
+        t->mediaStartSeconds = start;
+        t->media.reset();
+        t->overview.reset();
+        t->mediaRate = 0.0;
+        t->mediaError.clear();
+        t->mediaStatus = TrackInfo::MediaStatus::Loading;
+        t->aiConfidence = (float) r.stemConfidence;
+        t->aiWarning = stemWarning (r, *st);
+        names.add (st->name);
+    }
+    applied.add (juce::String ((int) names.size()) + " stems (" + names.joinIntoString (", ") + ", muted)"
+                 + (skipped.isEmpty() ? juce::String() : ", empty: " + skipped.joinIntoString (", ")));
+    juce::Logger::writeToLog ("Stems from " + juce::File (sourcePath).getFileName() + " -> " + runFolder.getFullPathName()
+                              + " residual " + juce::String (r.stemResidualDb, 1) + " dB, confidence "
+                              + juce::String (juce::roundToInt (r.stemConfidence * 100)) + "%");
+    pushMixerToEngine();
+    requestAllMedia();
     return {};
 }
 
@@ -295,6 +425,15 @@ juce::String AppState::undoAnalysisApply()
     s->keyConfidence = analysisUndo->keyConfidence;
     s->cues = analysisUndo->cues;
     s->chords = analysisUndo->chords;
+    if (analysisUndo->tracks.has_value())
+    {
+        s->tracks = std::move (*analysisUndo->tracks);
+        // Back to the analysis folder, so that the stems can be added again.
+        if (analysisUndo->stemsTo.isDirectory() && ! analysisUndo->stemsFrom.exists())
+            analysisUndo->stemsTo.moveFileTo (analysisUndo->stemsFrom);
+        pushMixerToEngine();
+        requestAllMedia();
+    }
     analysisUndo.reset();
     rebuildPlan();
     markDirty();

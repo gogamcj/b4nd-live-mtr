@@ -18,7 +18,7 @@ import sys
 import time
 
 from . import __version__
-from .analyze import DEFERRED, TASKS, run
+from .analyze import ANALYSIS_TASKS, DEFERRED, TASKS, run
 
 
 def _emit(obj):
@@ -60,7 +60,10 @@ def cmd_run(args) -> int:
     inp = job.get("input", "")
     if inp and not os.path.isabs(inp):
         inp = os.path.join(base, inp)
-    tasks = job.get("tasks") or list(TASKS)
+    tasks = job.get("tasks") or list(ANALYSIS_TASKS)
+    stems_input = job.get("stemsInput") or None
+    if stems_input and not os.path.isabs(stems_input):
+        stems_input = os.path.join(base, stems_input)
     started = time.time()
     if not inp or not os.path.isfile(inp):
         msg = f"input not found: {inp}"
@@ -75,18 +78,31 @@ def cmd_run(args) -> int:
         sys.stderr.write(msg + "\n")
 
     try:
-        result, errors = run(inp, tasks, emit, log)
+        result, errors = run(inp, tasks, emit, log, out_dir=out_dir, stems_input=stems_input,
+                             separator=_test_separator())
     except Exception as e:  # noqa: BLE001 - unreadable audio etc.
         msg = f"analysis failed: {e}"
         _emit({"error": msg})
         _write_result(out_dir, {"input": inp, "tasks": tasks, "errors": [msg], "status": "failed"})
         return 2
+    if isinstance(job.get("meta"), dict):
+        result["job"] = job["meta"]   # echoed for the MTR (which track was analysed)
     result["status"] = "partial" if errors else "done"
     result["elapsedSec"] = round(time.time() - started, 2)
-    result["device"] = "cpu"   # the built-in analysers do not use a GPU
+    result["device"] = result.get("stems", {}).get("versions", {}).get("device", "cpu")
     _write_result(out_dir, result)
     _emit({"done": True, "status": result["status"], "errors": errors})
     return 3 if errors else 0
+
+
+def _test_separator():
+    """B4ND_ANALYZER_FAKE_STEMS=1: a fast stand-in separator (tests and CI of the app without
+    Demucs). Never set in a release."""
+    if os.environ.get("B4ND_ANALYZER_FAKE_STEMS") != "1":
+        return None
+    from .stems import fake_separator
+
+    return fake_separator
 
 
 def cmd_info(_args) -> int:
@@ -99,7 +115,9 @@ def cmd_info(_args) -> int:
         sf = soundfile.__version__
     except ImportError:
         sf = None
-    _emit({"b4nd_analyzer": __version__, "tasks": list(TASKS), "deferred": list(DEFERRED),
+    from .stems import demucs_info
+
+    _emit({"b4nd_analyzer": __version__, "tasks": list(TASKS), "deferred": list(DEFERRED), "stems": demucs_info(),
            "numpy": numpy.__version__, "scipy": scipy.__version__, "soundfile": sf,
            "python": sys.version.split()[0]})
     return 0

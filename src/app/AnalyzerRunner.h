@@ -49,6 +49,24 @@ struct AnalysisResult
     bool hasSections = false;
     std::vector<Section> sections;
 
+    struct Stem
+    {
+        juce::String name;               // vocals | drums | bass | guitar | piano | other
+        juce::String relPath;            // relative to the result folder
+        double energyDb = 0.0;           // stem RMS against the mix RMS
+        bool empty = false;              // nearly silent: nothing of this instrument in the song
+        bool clipped = false;
+    };
+    bool hasStems = false;
+    std::vector<Stem> stems;
+    double stemResidualDb = 0.0;         // mix minus the sum of the stems, against the mix
+    juce::StringArray stemWarnings;
+    juce::String stemModel;
+    double stemConfidence = -1.0;        // 0..1 from the residual (docs/07 quality check)
+
+    juce::String sourceTrackId;          // the track that was analysed (from the job)
+    double sourceStartSec = 0.0;         // where its audio starts on the song timeline
+
     juce::String versionsJson;
 
     /** Parses result.json text. Never throws; `valid` is false with a reason in errors. */
@@ -96,6 +114,8 @@ public:
         std::shared_ptr<const AudioData> media;         // decoded source (shared, read-only)
         double mediaRate = 0.0;
         double mediaStartSec = 0.0;                     // where the media starts on the song timeline
+        juce::String sourceTrackId;                     // written to the result, for stems
+        double timeoutSec = 0.0;                        // 0: the runner's default
     };
 
     /** Explicit analyzer: an executable path, or a Python interpreter. Empty: search. */
@@ -120,7 +140,8 @@ public:
     /** The parsed result of the last finished run (valid only after Done). */
     AnalysisResult getResult() const;
 
-    /** Seconds after which a run is cancelled (a hung analyzer must not block the next one). */
+    /** Seconds after which a run is cancelled (a hung analyzer must not block the next one).
+        A job can ask for more (stem separation on a CPU is slow). */
     void setTimeoutSeconds (double s) { timeoutSec = s; }
 
     static constexpr int maxSeconds = 20 * 60;   // longest audio sent to the analyzer
@@ -129,6 +150,7 @@ private:
     void run() override;
     void setState (State s, const juce::String& message = {});
     bool writeInputWav (const Job& job, const juce::File& wav, juce::String& error);
+    bool writeStemsInputWav (const Job& job, const juce::File& wav, juce::String& error);
 
     mutable std::mutex lock;
     Status status;
@@ -139,6 +161,7 @@ private:
     mutable std::atomic<bool> cancelRequested { false };
     juce::uint32 startedMs = 0;
     double timeoutSec = 30.0 * 60.0;
+    double jobTimeoutSec = 30.0 * 60.0;   // of the running job
 };
 
 } // namespace b4nd

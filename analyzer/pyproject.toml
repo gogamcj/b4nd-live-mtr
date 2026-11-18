@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "b4nd-analyzer"
 version = "0.1.0"
-description = "Offline song analysis (tempo, beats, key, chords, structure) for B4ND LIVE MTR"
+description = "Offline song analysis (tempo, beats, key, chords, structure) and stem separation for B4ND LIVE MTR"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.21", "scipy>=1.7"]
 
 [project.optional-dependencies]
 # soundfile reads FLAC/AIFF/24-bit WAV directly; without it only WAV is read (the app always writes WAV).
 io = ["soundfile>=0.10"]
+# Stem separation (Phase 9): Demucs htdemucs_6s on PyTorch. Large; CPU works, a GPU is faster.
+stems = ["demucs==4.0.1", "torch>=2.0", "torchaudio>=2.0"]
 
 [project.scripts]
 b4nd-analyzer = "b4nd_analyzer.cli:main"
