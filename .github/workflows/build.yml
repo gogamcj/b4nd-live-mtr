@@ -209,6 +209,58 @@ jobs:
           grep -q "DSP overloads 0" play8.txt
           grep -q "DSP overloads 0" play2.txt
 
+      - name: Click count-in test (JACK dummy, 2 outputs)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndcount
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          python3 tools/make-test-wav.py count-backing.wav --rate 44100 --seconds 20
+          jackd -n b4ndcount -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          # During a one-bar count-in only the click plays: the MR (PA) stays silent.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-countin.png --with-audio \
+            --media count-backing.wav --count-in 1 --play 1.5 | tee countin.txt
+          # After the count-in the MR plays.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-countin-after.png --with-audio \
+            --media count-backing.wav --count-in 1 --play 4 | tee countin-after.txt
+          pkill -f "jackd -n b4ndcount" || true
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          grep -q "click: count-in 1" countin.txt
+          lt "$(peak countin.txt 1)" 0.001
+          gt "$(peak countin.txt 2)" 0.3
+          gt "$(peak countin-after.txt 1)" 0.3
+
+      - name: Module audio return test (JACK dummy, in-ear output patched into IN1)
+        run: |
+          set -o pipefail
+          export JACK_DEFAULT_SERVER=b4ndret
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          jackd -n b4ndret -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          run() {
+            xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot "$1.png" --with-audio --module "$2" --play 4 | tee "$1.txt" &
+            RUN=$!
+            for i in $(seq 1 40); do
+              OUT=$(jack_lsp | grep -v '^system' | grep ':out_2$' || true)
+              IN=$(jack_lsp | grep -v '^system' | grep ':in_1$' || true)
+              if [ -n "$OUT" ] && [ -n "$IN" ]; then jack_connect "$OUT" "$IN"; break; fi
+              sleep 0.25
+            done
+            wait $RUN
+          }
+          # The click leaves on OUT2, comes back on IN1: with a module return on IN1 it reaches
+          # the PA (OUT1) through the Main bus; without one the PA stays silent.
+          run screenshot-return "Synth+ret1"
+          run screenshot-noreturn "Synth"
+          pkill -f "jackd -n b4ndret" || true
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          gt "$(peak screenshot-return.txt 1)" 0.3
+          lt "$(peak screenshot-noreturn.txt 1)" 0.001
+
       - name: Latency measurement test (JACK dummy, in-ear output patched into an input)
         run: |
           set -o pipefail

@@ -151,6 +151,14 @@ public:
 
     void setMasterGain (float linear) noexcept       { masterGain.store (linear, std::memory_order_relaxed); }
 
+    // --- module audio returns (LINE IN -> Main bus, docs/06 §1) ---
+    static constexpr int maxLineInputs = 16;
+    /** Input channel(s) of return `index` (-1 = off; inR = -1 for mono), gain, mute. Plays whether
+        the transport runs or not (a keyboard played live through a module). Muted while a
+        latency measurement runs, so a test tick can never loop into the PA. */
+    void setLineInput (int index, int inL, int inR, float linearGain, bool mute) noexcept;
+    float takeLineInputPeak (int index) noexcept;
+
     // --- click (docs/06) ---
     /** 1 = beats, 2 = 8ths, 4 = 16ths (quieter subdivision clicks). Takes effect at once. */
     void setClickSubdivision (int perBeat) noexcept { clickSubdivision.store (perBeat == 2 || perBeat == 4 ? perBeat : 1, std::memory_order_relaxed); }
@@ -222,6 +230,7 @@ private:
     void renderChunk (float* const* outputs, int numOutputs, int numSamples) noexcept;
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
+    void renderLineInputs (int numSamples) noexcept;
     void renderCountIn (int numSamples) noexcept;
     void startCountIn() noexcept;
     void startClickVoice (int kind) noexcept;   // 0 accent, 1 normal, 2 subdivision
@@ -283,6 +292,17 @@ private:
     // Bus buffers [kind][channel], sized in prepare().
     std::array<std::array<std::vector<float>, 2>, numBusKinds> busBuffers;
     std::atomic<float> masterGain { 1.0f };
+    struct LineInput
+    {
+        std::atomic<int> inL { -1 }, inR { -1 };
+        std::atomic<float> gain { 1.0f };
+        std::atomic<bool> mute { false };
+        std::atomic<float> peak { 0.0f };
+    };
+    std::array<LineInput, maxLineInputs> lineInputs;
+    std::array<float, maxLineInputs> lineSmooth {};   // audio thread only
+    const float* const* chunkInputs = nullptr;        // this callback's inputs (audio thread only)
+    int chunkNumInputs = 0, chunkInputOffset = 0;
     Limiter limiter;                                 // audio thread only
     bool limiterWasOn = true;
     std::atomic<bool> limiterOn { true };

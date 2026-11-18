@@ -50,7 +50,8 @@ private:
     juce::TextEditor clockOffsetEdit;
     juce::TextButton applyButton { "APPLY" }, testButton { "TEST NOTE" }, recallButton { "SEND PRESET" },
                      refreshButton { "Rescan" }, measureButton { "MEASURE DELAY" };
-    juce::ComboBox measureInBox;
+    juce::ComboBox measureInBox, returnBox;
+    void fillReturnBox (int input, bool stereo);
     bool wasMeasuring = false;
 
     struct TrackRow

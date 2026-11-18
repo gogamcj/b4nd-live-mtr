@@ -55,6 +55,8 @@ struct ScreenshotRequest
     juce::StringArray media;
     double playSeconds = 0.0;
     int measureInput = 0;   // --measure-latency <input, 1-based>: loopback round trip, then capture
+    int countIn = -1;       // --count-in <bars>: click count-in for the current song
+    int clickSub = 0;       // --click-sub <1|2|4>
     juce::File project, saveAs;
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
@@ -82,6 +84,10 @@ struct ScreenshotRequest
             r.playSeconds = args[s + 1].getDoubleValue();
         if (const int s = args.indexOf ("--measure-latency"); s >= 0 && s + 1 < args.size())
             r.measureInput = args[s + 1].getIntValue();
+        if (const int s = args.indexOf ("--count-in"); s >= 0 && s + 1 < args.size())
+            r.countIn = args[s + 1].getIntValue();
+        if (const int s = args.indexOf ("--click-sub"); s >= 0 && s + 1 < args.size())
+            r.clickSub = args[s + 1].getIntValue();
         const auto cwd = juce::File::getCurrentWorkingDirectory();
         if (const int s = args.indexOf ("--project"); s >= 0 && s + 1 < args.size())
             r.project = cwd.getChildFile (args[s + 1].unquoted());
@@ -168,9 +174,12 @@ public:
             {
                 // "Name" or "Name@port": the first MIDI output whose name contains `port`.
                 // A "+clock" suffix also sends MIDI Clock to it.
+                // "+ret<N>" cables its audio return into input N (1-based).
                 ModuleProfile p;
-                p.clockOut = spec.endsWith ("+clock");
-                const auto bare = spec.upToLastOccurrenceOf ("+clock", false, false);
+                p.clockOut = spec.contains ("+clock");
+                if (spec.contains ("+ret"))
+                    p.returnInput = spec.fromFirstOccurrenceOf ("+ret", false, false).getIntValue() - 1;
+                const auto bare = spec.upToFirstOccurrenceOf ("+", false, false);
                 p.deviceName = bare.upToFirstOccurrenceOf ("@", false, false).toStdString();
                 if (const auto want = bare.fromFirstOccurrenceOf ("@", false, false); want.isNotEmpty())
                 {
@@ -362,6 +371,15 @@ private:
                     return;
                 }
                 setApplicationReturnValue (1);
+            }
+            if (screenshot->countIn >= 0 || screenshot->clickSub > 0)
+            {
+                auto c = state->getClickSettings();
+                if (screenshot->countIn >= 0) c.countInBars = screenshot->countIn;
+                if (screenshot->clickSub > 0) c.subdivision = screenshot->clickSub;
+                const auto err = state->setClickSettings (c);
+                std::printf ("click: count-in %d, subdivision %d %s\n", state->getClickSettings().countInBars,
+                             state->getClickSettings().subdivision, err.toRawUTF8());
             }
             if (screenshot->playSeconds > 0.0)
             {

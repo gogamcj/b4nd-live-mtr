@@ -211,3 +211,11 @@ CREATE TABLE analysis_run (
 - `module_profile`에 `clock_out INTEGER DEFAULT 0`(이 포트로 MIDI Clock을 보낼지)과 `clock_offset_ms REAL DEFAULT 0`(클럭만 앞당기거나 늦추는 값, ±50 ms로 제한)을 추가했다
 - 지연 측정 결과는 기존 `delay_offset_ms`에 들어간다. 루프백 왕복 지연은 장치·샘플레이트·버퍼 크기에 따라 달라지므로 프로젝트에 저장하지 않는다 (앱을 켤 때마다 다시 잰다)
 - v1–v3 파일은 트랜잭션 하나로 v4까지 올린다. 테스트: v4 열 왕복, v1 파일에서 올린 뒤 기본값
+
+### 스키마 v5 (Phase 7)
+
+- `project.master_volume_db REAL DEFAULT 0`, `project.limiter_on INTEGER DEFAULT 1`: Main 볼륨과 PA 리미터
+- `module_profile.return_stereo INTEGER DEFAULT 0`, `module_profile.return_gain_db REAL DEFAULT 0`: 모듈 오디오 리턴. 입력 채널은 처음 설계에 있던 `audio_input_channel`을 쓴다 (0부터, NULL = 없음)
+- `click_settings`(곡마다, 설계 때부터 있던 표)를 실제로 쓴다: `count_in_bars`, `accent_first`, `sound`(default | wood | stick), `subdivision`(1, 2, 4). `volume_db`는 쓰지 않는다 (클릭 트랙 페이더가 레벨)
+- v4 → v5 업그레이드에서 `count_in_bars`를 모두 0으로 바꾼다. 예전 빌드는 기본값 1을 저장했지만 카운트인을 하지 않았다. 열자마자 곡이 1마디 늦게 시작하는 일이 없게 하기 위해서다. 새 기본값도 0이다
+- 테스트: v5 열 왕복, v1 → v5, v4 → v5에서 카운트인만 0이 되고 다른 클릭 설정은 유지

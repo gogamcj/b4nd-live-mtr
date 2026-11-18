@@ -38,6 +38,8 @@ ProjectData sampleProject()
     p.name = "주말 공연 2026";   // Korean title must survive the round trip
     p.sampleRate = 48000;
     p.appVersion = "0.1.0";
+    p.masterVolumeDb = -3.5;
+    p.limiterOn = false;
 
     MediaRef mr;
     mr.id = newUuid(); mr.path = "media/backing.wav"; mr.durationSec = 180.5; mr.sampleRate = 44100; mr.channels = 2;
@@ -77,6 +79,9 @@ ProjectData sampleProject()
         m.pluginSlotId = "slot-piano-" + std::to_string (i);
         s.tracks = { a, g, c, m, x };
         s.click.countInBars = 2;
+        s.click.sound = "wood";
+        s.click.subdivision = 2;
+        s.click.accentFirst = false;
         s.click.volumeDb = -9.0;
         p.songs.push_back (s);
     }
@@ -85,6 +90,7 @@ ProjectData sampleProject()
     mod.channel = 3; mod.bankMsb = 87; mod.bankLsb = -1; mod.program = 41; mod.volume = 90; mod.pan = -1;
     mod.delayOffsetMs = 4.5; mod.sendOrder = "lsb,msb,pc"; mod.gapMs = 30; mod.settleMs = 400; mod.sustainEnabled = false;
     mod.clockOut = true; mod.clockOffsetMs = -2.5;
+    mod.returnInput = 2; mod.returnStereo = true; mod.returnGainDb = -4.5;
     ModuleProfile plain;
     plain.id = "mod-plain"; plain.deviceName = "GM"; plain.portName = "Port 2";
     p.modules = { mod, plain };
@@ -113,6 +119,8 @@ ProjectData sampleProject()
 
 bool sameProject (const ProjectData& a, const ProjectData& b)
 {
+    if (a.masterVolumeDb != b.masterVolumeDb || a.limiterOn != b.limiterOn)   // NOLINT exact: stored as REAL
+        return false;
     if (a.id != b.id || a.name != b.name || a.sampleRate != b.sampleRate || a.media.size() != b.media.size()
         || a.songs.size() != b.songs.size() || a.setlists.size() != b.setlists.size() || a.outputs.size() != b.outputs.size())
         return false;
@@ -126,7 +134,8 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
         if (x.id != y.id || x.title != y.title || x.key != y.key || x.lengthSec != y.lengthSec   // NOLINT exact: stored as REAL
             || x.lastPositionSec != y.lastPositionSec || x.tempoPoints.size() != y.tempoPoints.size()
             || x.timeSigPoints.size() != y.timeSigPoints.size() || x.cues.size() != y.cues.size()
-            || x.tracks.size() != y.tracks.size() || x.click.countInBars != y.click.countInBars)
+            || x.tracks.size() != y.tracks.size() || x.click.countInBars != y.click.countInBars
+            || x.click.sound != y.click.sound || x.click.subdivision != y.click.subdivision || x.click.accentFirst != y.click.accentFirst)
             return false;
         for (size_t k = 0; k < x.tempoPoints.size(); ++k)
             if (x.tempoPoints[k].beat != y.tempoPoints[k].beat || x.tempoPoints[k].bpm != y.tempoPoints[k].bpm)
@@ -168,7 +177,8 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             || m.channel != n.channel || m.bankMsb != n.bankMsb || m.bankLsb != n.bankLsb || m.program != n.program
             || m.volumeCc != n.volumeCc || m.volume != n.volume || m.panCc != n.panCc || m.pan != n.pan
             || m.sustainEnabled != n.sustainEnabled || m.delayOffsetMs != n.delayOffsetMs || m.sendOrder != n.sendOrder
-            || m.gapMs != n.gapMs || m.settleMs != n.settleMs || m.clockOut != n.clockOut || m.clockOffsetMs != n.clockOffsetMs)
+            || m.gapMs != n.gapMs || m.settleMs != n.settleMs || m.clockOut != n.clockOut || m.clockOffsetMs != n.clockOffsetMs
+            || m.returnInput != n.returnInput || m.returnStereo != n.returnStereo || m.returnGainDb != n.returnGainDb)
             return false;
     }
     if (a.setlists[0].songIds != b.setlists[0].songIds || a.setlists[0].venue != b.setlists[0].venue)
@@ -415,6 +425,10 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
         CHECK (db.open (file, true).ok);
         p.modules.clear();
         p.plugins.clear();
+        p.masterVolumeDb = 0.0;   // v1 had no mix settings: the upgrade gives the defaults
+        p.limiterOn = true;
+        for (auto& s : p.songs)
+            s.click.countInBars = 0;   // and resets count-in (never played before v5)
         for (auto& s : p.songs)
             for (auto& tr : s.tracks)
             {
@@ -428,7 +442,9 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
     sqlite3_open (file.c_str(), &raw);
     CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; ALTER TABLE plugin_slot DROP COLUMN state_blob;"
                               " ALTER TABLE plugin_slot DROP COLUMN description_xml; ALTER TABLE module_profile DROP COLUMN clock_out;"
-                              " ALTER TABLE module_profile DROP COLUMN clock_offset_ms; UPDATE schema_version SET version = 1;",
+                               " ALTER TABLE module_profile DROP COLUMN clock_offset_ms; ALTER TABLE project DROP COLUMN master_volume_db;"
+                               " ALTER TABLE project DROP COLUMN limiter_on; ALTER TABLE module_profile DROP COLUMN return_stereo;"
+                              " ALTER TABLE module_profile DROP COLUMN return_gain_db; UPDATE schema_version SET version = 1;",
                          nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close (raw);
 
@@ -445,4 +461,35 @@ TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and ke
     ProjectData r;
     CHECK (db.load (r).ok);
     CHECK (sameProject (withModules, r));
+}
+
+TEST_CASE ("Project: v4 files get count-in 0 on upgrade (older builds stored 1 but never counted in)")
+{
+    TempDir t;
+    const auto file = t.sub ("v4.db");
+    auto p = sampleProject();
+    {
+        ProjectDatabase db;
+        CHECK (db.open (file, true).ok);
+        CHECK (db.save (p).ok);
+    }
+    sqlite3* raw = nullptr;
+    sqlite3_open (file.c_str(), &raw);
+    CHECK (sqlite3_exec (raw, "ALTER TABLE project DROP COLUMN master_volume_db; ALTER TABLE project DROP COLUMN limiter_on;"
+                              " ALTER TABLE module_profile DROP COLUMN return_stereo; ALTER TABLE module_profile DROP COLUMN return_gain_db;"
+                              " UPDATE click_settings SET count_in_bars = 1; UPDATE schema_version SET version = 4;",
+                         nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close (raw);
+    ProjectDatabase db;
+    CHECK (db.open (file, false).ok);
+    CHECK (db.getSchemaVersion() == 5);
+    ProjectData q;
+    CHECK (db.load (q).ok);
+    for (const auto& s : q.songs)
+    {
+        CHECK (s.click.countInBars == 0);
+        CHECK (s.click.sound == "wood");   // the rest of the click settings stay
+    }
+    CHECK (q.limiterOn);
+    CHECK (q.masterVolumeDb == 0.0);
 }

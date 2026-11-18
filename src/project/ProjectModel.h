@@ -83,9 +83,9 @@ struct PluginSlotData
 struct ClickSettingsData
 {
     bool enabled = true;
-    int countInBars = 1;
+    int countInBars = 0;                 // 0, 1, 2 or 4 (schema v5 reset older files to 0)
     bool accentFirst = true;
-    std::string sound = "default";
+    std::string sound = "default";       // default (beep) | wood | stick
     double volumeDb = -6.0;
     int subdivision = 1;
 };
@@ -139,6 +139,8 @@ struct ProjectData
     std::vector<OutputData> outputs;     // empty: use the device default preset
     std::vector<ModuleProfile> modules;  // external sound modules
     std::vector<PluginSlotData> plugins; // software instrument instances
+    double masterVolumeDb = 0.0;         // Main (PA) bus (v5)
+    bool limiterOn = true;               // Main (PA) bus limiter (v5)
 
     const MediaRef* findMedia (const std::string& mediaId) const
     {

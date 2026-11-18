@@ -7,7 +7,7 @@ namespace b4nd
 
 TransportBar::TransportBar (AppState& s) : state (s)
 {
-    for (auto* b : { &restartButton, &playButton, &pauseButton, &stopButton, &loopButton, &emergencyButton, &liveButton })
+    for (auto* b : { &restartButton, &playButton, &pauseButton, &stopButton, &loopButton, &clickButton, &emergencyButton, &liveButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -32,6 +32,8 @@ TransportBar::TransportBar (AppState& s) : state (s)
     loopButton.onClick      = [this] { state.toggleLoop(); };
     emergencyButton.onClick = [this] { state.emergencyStop(); };
     liveButton.onClick      = [this] { if (onLiveModeClicked) onLiveModeClicked(); };
+    clickButton.onClick     = [this] { showClickMenu(); };
+    clickButton.setTooltip ("Click of this song: count-in, 8ths / 16ths, accent, sound (locked in Live Mode)");
 
     state.addChangeListener (this);
     refresh();
@@ -40,6 +42,45 @@ TransportBar::TransportBar (AppState& s) : state (s)
 TransportBar::~TransportBar()
 {
     state.removeChangeListener (this);
+}
+
+void TransportBar::showClickMenu()
+{
+    const auto c = state.getClickSettings();
+    const bool locked = state.isLiveMode();
+    juce::PopupMenu m;
+    m.addSectionHeader ("COUNT-IN (from stop)");
+    for (int bars : { 0, 1, 2, 4 })
+        m.addItem (100 + bars, bars == 0 ? juce::String ("Off") : juce::String (bars) + (bars == 1 ? " bar" : " bars"), ! locked,
+                   c.countInBars == bars);
+    m.addSectionHeader ("SUBDIVISION");
+    m.addItem (201, "Quarter notes", ! locked, c.subdivision == 1);
+    m.addItem (202, "8th notes", ! locked, c.subdivision == 2);
+    m.addItem (204, "16th notes", ! locked, c.subdivision == 4);
+    m.addSeparator();
+    m.addItem (300, "Accent the first beat", ! locked, c.accentFirst);
+    m.addSectionHeader ("SOUND");
+    m.addItem (401, "Beep", ! locked, c.sound != "wood" && c.sound != "stick");
+    m.addItem (402, "Wood", ! locked, c.sound == "wood");
+    m.addItem (403, "Stick", ! locked, c.sound == "stick");
+    if (locked)
+    {
+        m.addSeparator();
+        m.addItem (-1, "Locked in Live Mode", false, false);
+    }
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&clickButton), [this] (int id)
+    {
+        if (id <= 0)
+            return;
+        auto n = state.getClickSettings();
+        if (id >= 100 && id < 200) { n.countInBars = id - 100; n.enabled = true; }
+        else if (id >= 200 && id < 300) n.subdivision = id - 200;
+        else if (id == 300) n.accentFirst = ! n.accentFirst;
+        else if (id == 401) n.sound = "default";
+        else if (id == 402) n.sound = "wood";
+        else if (id == 403) n.sound = "stick";
+        state.setClickSettings (n);
+    });
 }
 
 void TransportBar::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -116,7 +157,10 @@ void TransportBar::paint (juce::Graphics& g)
     paintCell (g, take(), "BPM", juce::String (song->tempo.bpmAtBeat (beat), 1), theme::text, true);
     paintCell (g, take(), "KEY", song->key, theme::text, false);
     paintCell (g, take(), "TIME SIG", juce::String (bb.numerator) + "/" + juce::String (bb.denominator), theme::text, true);
-    paintCell (g, take(), "BAR . BEAT", formatBarBeat (bb), theme::accent, true);
+    if (state.isCountingIn())
+        paintCell (g, take(), "BAR . BEAT", "COUNT-IN", theme::warn, false);
+    else
+        paintCell (g, take(), "BAR . BEAT", formatBarBeat (bb), theme::accent, true);
     paintCell (g, take(), "TIME", formatSeconds (pos), theme::text, true);
     paintCell (g, take(), "REMAIN", "-" + formatSeconds (state.getRemainingSeconds(), false), theme::textDim, true);
 
@@ -133,13 +177,13 @@ void TransportBar::resized()
     auto r = getLocalBounds();
     infoArea = r.removeFromLeft (juce::jlimit (230, 330, r.getWidth() / 5));
 
-    auto right = r.removeFromRight (juce::jlimit (520, 590, r.getWidth() / 3)).reduced (10, 14);
+    auto right = r.removeFromRight (juce::jlimit (560, 650, r.getWidth() / 3)).reduced (10, 14);
     liveButton.setBounds (right.removeFromRight (100));
     right.removeFromRight (8);
     emergencyButton.setBounds (right.removeFromRight (140));
     right.removeFromRight (14);
-    const int w = juce::jmax (40, (right.getWidth() - 4 * 6) / 5);
-    for (auto* b : { &restartButton, &playButton, &pauseButton, &stopButton, &loopButton })
+    const int w = juce::jmax (40, (right.getWidth() - 5 * 6) / 6);
+    for (auto* b : { &restartButton, &playButton, &pauseButton, &stopButton, &loopButton, &clickButton })
     {
         b->setBounds (right.removeFromLeft (w));
         right.removeFromLeft (6);

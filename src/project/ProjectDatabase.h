@@ -28,7 +28,7 @@ struct DbResult
 class ProjectDatabase
 {
 public:
-    static constexpr int currentSchemaVersion = 4;
+    static constexpr int currentSchemaVersion = 5;
 
     ProjectDatabase() = default;
     ~ProjectDatabase();

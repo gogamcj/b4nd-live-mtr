@@ -466,6 +466,7 @@ void AppState::setMasterVolume (float db)
 {
     masterDb = juce::jlimit (-60.0f, 6.0f, db);
     engine.setMasterGain (juce::Decibels::decibelsToGain (masterDb, -60.0f));
+    markDirty();
     sendChangeMessage();
 }
 
@@ -691,6 +692,8 @@ static ModuleProfile sanitise (ModuleProfile p)
     p.clockOffsetMs = juce::jlimit (-50.0, 50.0, p.clockOffsetMs);
     p.gapMs = juce::jlimit (0, 500, p.gapMs);
     p.settleMs = juce::jlimit (0, 5000, p.settleMs);
+    p.returnInput = p.returnInput < 0 ? -1 : juce::jlimit (0, 63, p.returnInput);
+    p.returnGainDb = juce::jlimit (-60.0, 12.0, p.returnGainDb);
     if (p.deviceName.empty())
         p.deviceName = p.portName.empty() ? "Module" : p.portName;
     return p;
@@ -706,6 +709,7 @@ juce::String AppState::addModule (ModuleProfile p)
         p.id = newUuid();
     modules.push_back (sanitise (std::move (p)));
     midi.setModules (modules);
+    pushLineInputs();
     juce::Logger::writeToLog ("MIDI module added: " + juce::String::fromUTF8 (modules.back().deviceName.c_str()));
     markDirty();
     rebuildPlan();
@@ -722,7 +726,8 @@ juce::String AppState::updateModule (int index, const ModuleProfile& p)
     auto np = sanitise (p);
     np.id = modules[(size_t) index].id;
     modules[(size_t) index] = np;
-    midi.setModules (modules);   // reopens on a port change, sends the preset again on a preset change
+    midi.setModules (modules);
+    pushLineInputs();   // reopens on a port change, sends the preset again on a preset change
     markDirty();
     rebuildPlan();               // channel or delay may have changed
     sendChangeMessage();
@@ -738,11 +743,13 @@ juce::String AppState::removeModule (int index)
     const auto id = juce::String::fromUTF8 (modules[(size_t) index].id.c_str());
     midi.panic();
     modules.erase (modules.begin() + index);
+    returnMuted.fill (false);   // indices shift: never leave a mute on the wrong module
     for (auto& song : songs)
         for (auto& t : song.tracks)
             if (t.moduleId == id)
                 t.moduleId.clear();
     midi.setModules (modules);
+    pushLineInputs();
     markDirty();
     rebuildPlan();
     sendChangeMessage();
@@ -1148,6 +1155,86 @@ void AppState::pushMixerToEngine()
         engine.setTrackMute (i, t != nullptr && t->mute);
         engine.setTrackSolo (i, t != nullptr && t->solo);
     }
+    pushClickToEngine();
+}
+
+void AppState::pushLineInputs()
+{
+    for (int i = 0; i < AudioEngine::maxLineInputs; ++i)
+    {
+        if (i < (int) modules.size() && modules[(size_t) i].returnInput >= 0)
+        {
+            const auto& m = modules[(size_t) i];
+            engine.setLineInput (i, m.returnInput, m.returnStereo ? m.returnInput + 1 : -1,
+                                 juce::Decibels::decibelsToGain ((float) m.returnGainDb, -60.0f), returnMuted[(size_t) i]);
+        }
+        else
+        {
+            engine.setLineInput (i, -1, -1, 1.0f, false);
+        }
+    }
+}
+
+void AppState::setModuleReturnGain (int index, float db)
+{
+    if (! juce::isPositiveAndBelow (index, (int) modules.size()))
+        return;
+    modules[(size_t) index].returnGainDb = juce::jlimit (-60.0, 12.0, (double) db);
+    pushLineInputs();   // a fader: allowed while playing and in Live Mode, like track faders
+    markDirty();
+    sendChangeMessage();
+}
+
+void AppState::setModuleReturnMute (int index, bool mute)
+{
+    if (! juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs))
+        return;
+    returnMuted[(size_t) index] = mute;
+    pushLineInputs();
+    sendChangeMessage();
+}
+
+void AppState::pushClickToEngine()
+{
+    const auto c = getClickSettings();
+    engine.setClickSubdivision (c.subdivision);
+    engine.setClickAccent (c.accentFirst);
+    engine.setCountInBars (c.enabled ? c.countInBars : 0);
+}
+
+ClickSettingsData AppState::getClickSettings() const
+{
+    const auto* s = getCurrentSong();
+    return s != nullptr ? s->click : ClickSettingsData {};
+}
+
+ClickTone AppState::clickToneFromName (const std::string& n)
+{
+    if (n == "wood" || n == "woodblock") return ClickTone::Wood;
+    if (n == "stick") return ClickTone::Stick;
+    return ClickTone::Beep;
+}
+
+juce::String AppState::setClickSettings (const ClickSettingsData& in)
+{
+    if (liveMode)
+        return "Live Mode: the click cannot be changed during a show";
+    auto* s = currentSongMutable();
+    if (s == nullptr)
+        return "No song";
+    auto c = in;
+    c.countInBars = c.countInBars >= 4 ? 4 : c.countInBars >= 2 ? 2 : c.countInBars >= 1 ? 1 : 0;   // DB allows 0,1,2,4
+    c.subdivision = c.subdivision == 2 || c.subdivision == 4 ? c.subdivision : 1;
+    if (c.sound != "wood" && c.sound != "stick")
+        c.sound = "default";
+    const bool toneChanged = c.sound != s->click.sound;
+    s->click = c;
+    pushClickToEngine();
+    if (toneChanged)
+        rebuildPlan();   // picked up at the next stop if playing
+    markDirty();
+    sendChangeMessage();
+    return {};
 }
 
 void AppState::rebuildPlan()
@@ -1170,7 +1257,7 @@ void AppState::rebuildPlan()
             {
                 plan->hasClick = true;
                 plan->clickSlot = i;
-                plan->click = PlaybackPlan::makeDefaultClick (sr);
+                plan->click = PlaybackPlan::makeClick (clickToneFromName (song->click.sound), sr);
             }
             continue;
         }
@@ -1563,6 +1650,8 @@ void AppState::timerCallback()
             outputLevels[(size_t) i] = engine.takeOutputPeak (i);
         for (int i = 0; i < (int) trackLevels.size(); ++i)
             trackLevels[(size_t) i] = engine.takeTrackPeak (i);
+        for (int i = 0; i < AudioEngine::maxLineInputs; ++i)
+            returnLevels[(size_t) i] = engine.takeLineInputPeak (i);
         {
             const float g = engine.takeLimiterGain();
             const float db = g < 1.0f ? juce::Decibels::gainToDecibels (g, -60.0f) : 0.0f;
@@ -1766,6 +1855,7 @@ ProjectData AppState::toProjectData() const
         sd.title = u8 (s.title);
         sd.artist = u8 (s.artist);
         sd.key = u8 (s.key);
+        sd.click = s.click;
         sd.baseBpm = s.tempo.bpmAtBeat (0.0);
         sd.lengthSec = s.lengthSeconds;
         sd.tempoPoints = s.tempo.getTempoPoints();
@@ -1846,6 +1936,8 @@ ProjectData AppState::toProjectData() const
     }
     p.setlists.push_back (setlist);
     p.modules = modules;
+    p.masterVolumeDb = masterDb;
+    p.limiterOn = limiterOn;
     return p;
 }
 
@@ -1876,6 +1968,7 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         s.title = fromU8 (sd.title);
         s.artist = fromU8 (sd.artist);
         s.key = fromU8 (sd.key);
+        s.click = sd.click;
         s.lengthSeconds = sd.lengthSec > 0.0 ? sd.lengthSec : 180.0;
         s.tempo.setTempoPoints (sd.tempoPoints.empty() ? std::vector<TempoPoint> { { 0.0, sd.baseBpm > 0.0 ? sd.baseBpm : 120.0 } } : sd.tempoPoints);
         if (! sd.timeSigPoints.empty())
@@ -1939,6 +2032,11 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         if ((int) modules.size() < MidiOutputService::maxSlots)
             modules.push_back (sanitise (mp));
     midi.setModules (modules);
+    pushLineInputs();
+    masterDb = juce::jlimit (-60.0f, 6.0f, (float) p.masterVolumeDb);
+    engine.setMasterGain (juce::Decibels::decibelsToGain (masterDb, -60.0f));
+    limiterOn = p.limiterOn;
+    engine.setLimiterEnabled (limiterOn);
     songs = std::move (loaded);
     currentSong = 0;
     position = 0.0;

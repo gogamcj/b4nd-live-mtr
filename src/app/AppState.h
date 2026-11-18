@@ -86,6 +86,7 @@ struct SongInfo
     TempoMap tempo;
     std::vector<TrackInfo> tracks;
     std::vector<CuePoint> cues;
+    ClickSettingsData click;           // tone, accent, subdivision, count-in (saved per song)
 };
 
 enum class TransportState
@@ -178,6 +179,13 @@ public:
     float getMasterVolumeDb() const noexcept { return masterDb; }
     /** Main (PA) bus limiter, -0.3 dBFS. On by default; saved with the project. Locked in Live Mode. */
     void setLimiterEnabled (bool on);
+
+    /** Click of the current song. Rejected in Live Mode. Subdivision / accent / count-in act at
+        once; a new tone is used from the next stop. Count-in is 0, 1, 2 or 4 bars. */
+    juce::String setClickSettings (const ClickSettingsData&);
+    ClickSettingsData getClickSettings() const;
+    static ClickTone clickToneFromName (const std::string&);
+    bool isCountingIn() const noexcept { return isEngineActive() && engine.isCountingIn(); }
     bool isLimiterEnabled() const noexcept { return limiterOn; }
     /** Current limiter gain reduction in dB (0 = none, negative = limiting), decays on the UI side. */
     float getLimiterReductionDb() const noexcept { return limiterGrDb; }
@@ -213,6 +221,11 @@ public:
     void recallModulePreset (int index) { midi.recallPreset (index); }
     std::vector<MidiPortInfo> listMidiOutputs() { return midi.listOutputs(); }
     MidiOutputService& getMidiOutput() noexcept { return midi; }
+    /** Module audio return (LINE IN -> Main bus): trim and mute work while playing and in Live Mode. */
+    void setModuleReturnGain (int index, float db);
+    void setModuleReturnMute (int index, bool mute);
+    bool isModuleReturnMuted (int index) const noexcept { return juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs) && returnMuted[(size_t) index]; }
+    float getModuleReturnLevel (int index) const noexcept { return juce::isPositiveAndBelow (index, AudioEngine::maxLineInputs) ? returnLevels[(size_t) index] : 0.0f; }
 
     /** Assigns a .mid file to an external MIDI track, or adds a new one (trackIndex < 0). */
     juce::String addMidiFile (const juce::File&, int trackIndex = -1);
@@ -308,6 +321,8 @@ private:
     void applyFinishedMedia();
     void rebuildPlan();
     void pushMixerToEngine();
+    void pushClickToEngine();
+    void pushLineInputs();
     void loadMidiFile (TrackInfo&, const SongInfo&);
     void sendTrackVolumeToModule (const TrackInfo&);
     juce::String guardModuleChange() const;
@@ -368,7 +383,9 @@ private:
     double roundTripMs = -1.0;
     juce::String roundTripKey;   // device / rate / buffer it was measured with
 
-    std::vector<ModuleProfile> modules;   // module i = MIDI port slot i
+    std::vector<ModuleProfile> modules;   // module i = MIDI port slot i = engine line input i
+    std::array<bool, AudioEngine::maxLineInputs> returnMuted {};
+    std::array<float, AudioEngine::maxLineInputs> returnLevels {};
     MidiOutputService midi;
     PluginHost plugins;
     bool instrumentStateStale = false;   // a plugin changed: capture its state when stopped

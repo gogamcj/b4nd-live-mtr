@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 6 (오디오·MIDI 동기화)
+## 현재 상태: Phase 7 (믹서와 클릭)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -43,6 +43,12 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - 곡 중간으로 이동하거나 일시정지 후 다시 재생하면, 그 위치의 음색(Program/CC)과 길게 눌려 있어야 할 음을 다시 보냅니다
 - 지연이 있는 VSTi는 MIDI를 그만큼 먼저 받아 소리가 MR과 맞습니다 (PDC)
 - 지연 측정: 오디오 설정 창(Ctrl+,) LATENCY에서 인이어 출력을 입력에 케이블로 연결하고 Measure Round Trip. 그다음 MIDI MODULES 창에서 모듈 출력을 입력에 연결하고 MEASURE DELAY를 누르면 모듈 지연이 Delay ms에 기록됩니다. 측정 틱은 PA 출력으로 나가지 않고, 정지 중에만 동작합니다
+
+- PA(Main) 출력에는 -0.3 dBFS 리미터가 기본으로 걸려 있습니다. 마스터 스트립의 LIM으로 끄고 켜며(공연 모드에서는 잠김), CLIP은 Main 믹스가 0 dBFS를 넘었을 때 켜집니다
+- 상단 CLICK 버튼: 곡마다 카운트인(0/1/2/4마디), 8분·16분 분할, 첫 박 악센트, 음색(Beep/Wood/Stick)을 고릅니다. 카운트인 중에는 BAR . BEAT 칸에 COUNT-IN이 표시됩니다
+- 외부 모듈의 오디오 출력을 오디오 인터페이스 입력에 연결했다면 MIDI MODULES 창의 Audio return에서 그 입력을 고르세요. 믹서에 RETURN 스트립이 생기고 PA로 나갑니다
+
+![믹서와 모듈 리턴](docs/images/phase7-mixer-return.png)
 
 ![지연 측정](docs/images/phase6-latency.png)
 

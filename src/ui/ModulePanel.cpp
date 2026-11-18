@@ -74,6 +74,9 @@ ModulePanel::ModulePanel (AppState& s) : state (s)
     addAndMakeVisible (clockToggle);
 
     addAndMakeVisible (measureInBox);
+    addAndMakeVisible (returnBox);
+    returnBox.setTooltip ("The audio input the module's output is cabled into. It plays into the Main (PA) bus, "
+                          "with a RETURN strip in the mixer. Off while a latency measurement runs.");
     measureInBox.setTooltip ("The audio input the module's output is cabled into");
     measureButton.setTooltip ("Sends test notes and listens on the chosen input; writes the measured delay into Delay ms. "
                               "Measure the loopback in Audio Settings first for the best accuracy.");
@@ -157,7 +160,7 @@ void ModulePanel::refreshEnablement()
     applyButton.setEnabled (canEdit && has);
     for (auto* c : std::initializer_list<juce::Component*> { &nameEdit, &msbEdit, &lsbEdit, &programEdit, &volumeEdit, &panEdit,
                                                              &delayEdit, &gapEdit, &settleEdit, &portBox, &channelBox, &orderBox,
-                                                             &sustainToggle, &clockToggle, &clockOffsetEdit })
+                                                             &sustainToggle, &clockToggle, &clockOffsetEdit, &returnBox })
         c->setEnabled (canEdit && has);
     testButton.setEnabled (has);
     recallButton.setEnabled (has);
@@ -225,6 +228,7 @@ void ModulePanel::loadEditor()
     sustainToggle.setToggleState (p.sustainEnabled, juce::dontSendNotification);
     clockToggle.setToggleState (p.clockOut, juce::dontSendNotification);
     clockOffsetEdit.setText (juce::String (p.clockOffsetMs, 1), false);
+    fillReturnBox (p.returnInput, p.returnStereo);
 
     portBox.addItem ("(no port)", 1);
     int selected = 1;
@@ -250,6 +254,18 @@ void ModulePanel::loadEditor()
     repaint();
 }
 
+void ModulePanel::fillReturnBox (int input, bool stereo)
+{
+    returnBox.clear (juce::dontSendNotification);
+    returnBox.addItem ("None", 1);
+    const int numIns = juce::jmax (state.getDevice().getNumInputs(), input + (stereo ? 2 : 1), 2);
+    for (int i = 0; i < numIns; ++i)
+        returnBox.addItem ("IN " + juce::String (i + 1) + " (mono)", 100 + i);
+    for (int i = 0; i + 1 < numIns; i += 2)
+        returnBox.addItem ("IN " + juce::String (i + 1) + "/" + juce::String (i + 2) + " (stereo)", 200 + i);
+    returnBox.setSelectedId (input < 0 ? 1 : (stereo ? 200 : 100) + input, juce::dontSendNotification);
+}
+
 void ModulePanel::applyEditor()
 {
     if (editing < 0 || lockReason().isNotEmpty())
@@ -260,6 +276,11 @@ void ModulePanel::applyEditor()
     p.bankLsb = optionalValue (lsbEdit);
     p.program = optionalValue (programEdit);
     p.volume = optionalValue (volumeEdit);
+    {
+        const int id = returnBox.getSelectedId();
+        p.returnInput = id >= 200 ? id - 200 : id >= 100 ? id - 100 : -1;
+        p.returnStereo = id >= 200;
+    }
     p.pan = optionalValue (panEdit);
     p.delayOffsetMs = delayEdit.getText().getDoubleValue();
     p.gapMs = gapEdit.getText().getIntValue();
@@ -471,6 +492,7 @@ void ModulePanel::paint (juce::Graphics& g)
     label (settleEdit, "Settle ms");
     label (clockOffsetEdit, "Clock ms");
     label (measureInBox, "Measure on");
+    label (returnBox, "Audio return");
 
     // Status line
     auto st = statusArea;
@@ -591,6 +613,7 @@ void ModulePanel::resized()
     gapEdit.setBounds (row (colB).withWidth (70));
     settleEdit.setBounds (row (colB).withWidth (70));
     sustainToggle.setBounds (row (colA).withX (colA.getX() - 4).withWidth (220));
+    returnBox.setBounds (row (colA));
     {
         auto cr = row (colB);
         clockOffsetEdit.setBounds (cr.removeFromLeft (70));

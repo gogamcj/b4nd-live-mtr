@@ -942,6 +942,60 @@ void AudioEngine::renderClick (int n) noexcept
         atomicMax (trackParams[(size_t) plan.clickSlot].peak, peak);
 }
 
+void AudioEngine::setLineInput (int index, int inL, int inR, float linearGain, bool mute) noexcept
+{
+    if (index < 0 || index >= maxLineInputs)
+        return;
+    auto& li = lineInputs[(size_t) index];
+    li.gain.store (std::clamp (linearGain, 0.0f, 4.0f), std::memory_order_relaxed);
+    li.mute.store (mute, std::memory_order_relaxed);
+    li.inR.store (inR, std::memory_order_relaxed);
+    li.inL.store (inL, std::memory_order_relaxed);
+}
+
+float AudioEngine::takeLineInputPeak (int index) noexcept
+{
+    return index >= 0 && index < maxLineInputs ? lineInputs[(size_t) index].peak.exchange (0.0f, std::memory_order_relaxed) : 0.0f;
+}
+
+void AudioEngine::renderLineInputs (int n) noexcept
+{
+    float* ml = busBuffers[(size_t) BusKind::Main][0].data();
+    float* mr = busBuffers[(size_t) BusKind::Main][1].data();
+    const bool probing = probe.getState() == LatencyProbe::State::Running;
+    const float step = 1.0f / (float) std::max (1.0, 0.01 * sampleRate);   // 10 ms gain ramp
+    for (int k = 0; k < maxLineInputs; ++k)
+    {
+        auto& li = lineInputs[(size_t) k];
+        const int a = li.inL.load (std::memory_order_relaxed);
+        if (a < 0)
+        {
+            lineSmooth[(size_t) k] = 0.0f;
+            continue;
+        }
+        const int b = li.inR.load (std::memory_order_relaxed);
+        const float* inA = chunkInputs != nullptr && a < chunkNumInputs && chunkInputs[a] != nullptr ? chunkInputs[a] + chunkInputOffset : nullptr;
+        const float* inB = chunkInputs != nullptr && b >= 0 && b < chunkNumInputs && chunkInputs[b] != nullptr ? chunkInputs[b] + chunkInputOffset : inA;
+        if (inA == nullptr)
+            continue;
+        const float target = (probing || li.mute.load (std::memory_order_relaxed)) ? 0.0f : li.gain.load (std::memory_order_relaxed);
+        float g = lineSmooth[(size_t) k];
+        float peak = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            g = g < target ? std::min (target, g + step) : std::max (target, g - step);
+            float l = inA[i], r = inB[i];
+            if (! std::isfinite (l)) l = 0.0f;
+            if (! std::isfinite (r)) r = 0.0f;
+            ml[i] += l * g;
+            mr[i] += r * g;
+            peak = std::max ({ peak, std::abs (l * g), std::abs (r * g) });
+        }
+        lineSmooth[(size_t) k] = g;
+        atomicMax (li.peak, peak);
+    }
+}
+
 void AudioEngine::startCountIn() noexcept
 {
     countInLeft = 0;
@@ -1012,6 +1066,8 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         renderInstruments (n);
         lastRenderEnd = pos + n;
     }
+
+    renderLineInputs (n);   // module returns: always live, into Main (so the in-ear MR mix and the limiter see them)
 
     // Monitor (in-ear) bus = its own tracks + click + guide + optional MR.
     {
@@ -1171,6 +1227,9 @@ void AudioEngine::process (const float* const* inputs, int numInputs, float* con
             chunkPtrs[ch] = outputs[ch] != nullptr ? outputs[ch] + offset : nullptr;
 
         chunkStartNs = blockNs + (std::int64_t) ((double) offset * blockNsPerSample);
+        chunkInputs = inputs;
+        chunkNumInputs = numInputs;
+        chunkInputOffset = offset;
         renderChunk (chunkPtrs, numOutputs, n);
         runProbe (inputs, numInputs, chunkPtrs, numOutputs, offset, n);
 
