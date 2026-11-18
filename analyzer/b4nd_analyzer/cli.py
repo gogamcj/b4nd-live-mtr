@@ -1,0 +1,117 @@
+"""b4nd-analyzer command line (docs/07 §4).
+
+    b4nd-analyzer run --job job.json     progress as JSON lines on stdout, result.json in "out"
+    b4nd-analyzer info                   versions and available tasks as one JSON line
+    b4nd-analyzer synth --out x.wav      synthetic test song (CI / tests)
+
+Exit codes: 0 all tasks done, 3 some tasks failed (partial result.json written),
+2 bad job or unreadable input (result.json with "errors" when "out" is known).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+from . import __version__
+from .analyze import DEFERRED, TASKS, run
+
+
+def _emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def _write_result(out_dir, result):
+    os.makedirs(out_dir, exist_ok=True)
+    tmp = os.path.join(out_dir, "result.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, os.path.join(out_dir, "result.json"))
+
+
+def cmd_run(args) -> int:
+    try:
+        with open(args.job, "r", encoding="utf-8") as f:
+            job = json.load(f)
+    except (OSError, ValueError) as e:
+        _emit({"error": f"cannot read job: {e}"})
+        return 2
+    base = os.path.dirname(os.path.abspath(args.job))
+    out_dir = job.get("out") or base
+    if not os.path.isabs(out_dir):
+        out_dir = os.path.join(base, out_dir)
+    inp = job.get("input", "")
+    if inp and not os.path.isabs(inp):
+        inp = os.path.join(base, inp)
+    tasks = job.get("tasks") or list(TASKS)
+    started = time.time()
+    if not inp or not os.path.isfile(inp):
+        msg = f"input not found: {inp}"
+        _emit({"error": msg})
+        _write_result(out_dir, {"input": inp, "tasks": tasks, "errors": [msg], "status": "failed"})
+        return 2
+
+    def emit(task, p):
+        _emit({"task": task, "progress": round(float(p), 3)})
+
+    def log(msg):
+        sys.stderr.write(msg + "\n")
+
+    try:
+        result, errors = run(inp, tasks, emit, log)
+    except Exception as e:  # noqa: BLE001 - unreadable audio etc.
+        msg = f"analysis failed: {e}"
+        _emit({"error": msg})
+        _write_result(out_dir, {"input": inp, "tasks": tasks, "errors": [msg], "status": "failed"})
+        return 2
+    result["status"] = "partial" if errors else "done"
+    result["elapsedSec"] = round(time.time() - started, 2)
+    result["device"] = "cpu"   # the built-in analysers do not use a GPU
+    _write_result(out_dir, result)
+    _emit({"done": True, "status": result["status"], "errors": errors})
+    return 3 if errors else 0
+
+
+def cmd_info(_args) -> int:
+    import numpy
+    import scipy
+
+    try:
+        import soundfile  # noqa: F401
+
+        sf = soundfile.__version__
+    except ImportError:
+        sf = None
+    _emit({"b4nd_analyzer": __version__, "tasks": list(TASKS), "deferred": list(DEFERRED),
+           "numpy": numpy.__version__, "scipy": scipy.__version__, "soundfile": sf,
+           "python": sys.version.split()[0]})
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="b4nd-analyzer")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--job", required=True)
+    sub.add_parser("info")
+    s = sub.add_parser("synth")
+    s.add_argument("--out", required=True)
+    s.add_argument("--truth")
+    s.add_argument("--bpm", type=float, default=128.0)
+    s.add_argument("--numerator", type=int, default=4)
+    s.add_argument("--lead-in", type=float, default=0.6)
+    s.add_argument("--rate", type=int, default=44100)
+    s.add_argument("--channels", type=int, default=2)
+    s.add_argument("--tempo-change", type=float, default=0.0)
+    args = p.parse_args(argv)
+    if args.cmd == "run":
+        return cmd_run(args)
+    if args.cmd == "info":
+        return cmd_info(args)
+    from .synth import main_synth
+
+    return main_synth(args)

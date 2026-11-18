@@ -1,4 +1,5 @@
 #include "project/ProjectDatabase.h"
+#include <algorithm>
 
 #include <sqlite3.h>
 
@@ -533,7 +534,11 @@ DbResult ProjectDatabase::save (const ProjectData& p)
     }
 
     Stmt song (db, "INSERT INTO song (id, project_id, title, artist, base_bpm, song_key, time_sig_num, time_sig_den,"
-                   " length_sec, last_position_sec, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+                   " length_sec, last_position_sec, notes, start_offset_sec, bpm_confidence, key_confidence)"
+                   " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    Stmt chord (db, "INSERT INTO chord_event (song_id, start_sec, end_sec, chord, confidence) VALUES (?,?,?,?,?)");
+    Stmt run (db, "INSERT INTO analysis_run (id, song_id, started_at, finished_at, status, tasks, result_rel_path, model_versions)"
+                  " VALUES (?,?,?,?,?,?,?,?)");
     Stmt tempo (db, "INSERT INTO tempo_point (song_id, beat, bpm) VALUES (?,?,?)");
     Stmt sig (db, "INSERT INTO time_sig_point (song_id, bar, numerator, denominator) VALUES (?,?,?,?)");
     Stmt cue (db, "INSERT INTO cue_point (id, song_id, name, section, position_sec, color, sort_order, source) VALUES (?,?,?,?,?,?,?,?)");
@@ -543,16 +548,20 @@ DbResult ProjectDatabase::save (const ProjectData& p)
     Stmt clip (db, "INSERT INTO clip (id, track_id, media_id, start_sec, offset_sec, length_sec) VALUES (?,?,?,?,?,?)");
     Stmt click (db, "INSERT INTO click_settings (song_id, enabled, count_in_bars, accent_first, sound, volume_db, subdivision)"
                     " VALUES (?,?,?,?,?,?,?)");
-    if (! song.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid())
+    if (! song.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid()
+        || ! chord.valid() || ! run.valid())
         return fail ("Preparing statements");
 
     for (const auto& sd : p.songs)
     {
         const int num = sd.timeSigPoints.empty() ? 4 : sd.timeSigPoints.front().numerator;
         const int den = sd.timeSigPoints.empty() ? 4 : sd.timeSigPoints.front().denominator;
-        if (! song.bind (1, sd.id).bind (2, p.id).bind (3, sd.title).bindOrNull (4, sd.artist).bind (5, sd.baseBpm)
+        song.bind (1, sd.id).bind (2, p.id).bind (3, sd.title).bindOrNull (4, sd.artist).bind (5, sd.baseBpm)
                  .bindOrNull (6, sd.key).bind (7, num).bind (8, den).bind (9, sd.lengthSec).bind (10, sd.lastPositionSec)
-                 .bindOrNull (11, sd.notes).run())
+                 .bindOrNull (11, sd.notes).bind (12, sd.gridOffsetSec);
+        if (sd.bpmConfidence >= 0.0) song.bind (13, sd.bpmConfidence); else song.bindNull (13);
+        if (sd.keyConfidence >= 0.0) song.bind (14, sd.keyConfidence); else song.bindNull (14);
+        if (! song.run())
             return fail ("Saving song " + sd.title);
 
         for (const auto& t : sd.tempoPoints)
@@ -583,6 +592,19 @@ DbResult ProjectDatabase::save (const ProjectData& p)
                          .bind (5, c.offsetSec).bind (6, c.lengthSec).run())
                     return fail ("Saving clip of " + t.name);
         }
+
+        for (const auto& c : sd.chords)
+        {
+            chord.bind (1, sd.id).bind (2, c.startSec).bind (3, c.endSec).bind (4, c.chord);
+            if (c.confidence >= 0.0) chord.bind (5, c.confidence); else chord.bindNull (5);
+            if (! chord.run())
+                return fail ("Saving chords of " + sd.title);
+        }
+        for (const auto& r : sd.analysisRuns)
+            if (! run.bind (1, r.id).bind (2, sd.id).bindOrNull (3, r.startedAt).bindOrNull (4, r.finishedAt)
+                     .bindOrNull (5, r.status).bindOrNull (6, r.tasks).bindOrNull (7, r.resultRelPath)
+                     .bindOrNull (8, r.modelVersions).run())
+                return fail ("Saving analysis history of " + sd.title);
 
         const auto& k = sd.click;
         if (! click.bind (1, sd.id).bind (2, k.enabled).bind (3, k.countInBars).bind (4, k.accentFirst)
@@ -686,7 +708,11 @@ DbResult ProjectDatabase::load (ProjectData& out)
         }
     }
 
-    Stmt songs (db, "SELECT id, title, artist, base_bpm, song_key, length_sec, last_position_sec, notes FROM song ORDER BY rowid");
+    Stmt songs (db, "SELECT id, title, artist, base_bpm, song_key, length_sec, last_position_sec, notes,"
+                    " start_offset_sec, bpm_confidence, key_confidence FROM song ORDER BY rowid");
+    Stmt chord (db, "SELECT start_sec, end_sec, chord, confidence FROM chord_event WHERE song_id = ? ORDER BY start_sec");
+    Stmt run (db, "SELECT id, started_at, finished_at, status, tasks, result_rel_path, model_versions FROM analysis_run"
+                  " WHERE song_id = ? ORDER BY started_at, rowid");
     Stmt tempo (db, "SELECT beat, bpm FROM tempo_point WHERE song_id = ? ORDER BY beat");
     Stmt sig (db, "SELECT bar, numerator, denominator FROM time_sig_point WHERE song_id = ? ORDER BY bar");
     Stmt cue (db, "SELECT id, name, section, position_sec, color, source FROM cue_point WHERE song_id = ? ORDER BY sort_order, position_sec");
@@ -694,7 +720,8 @@ DbResult ProjectDatabase::load (ProjectData& out)
                     " module_profile_id, midi_channel, midi_rel_path, plugin_slot_id FROM track WHERE song_id = ? ORDER BY sort_order");
     Stmt clip (db, "SELECT id, media_id, start_sec, offset_sec, length_sec FROM clip WHERE track_id = ? ORDER BY start_sec, rowid");
     Stmt click (db, "SELECT enabled, count_in_bars, accent_first, sound, volume_db, subdivision FROM click_settings WHERE song_id = ?");
-    if (! songs.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid())
+    if (! songs.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid()
+        || ! chord.valid() || ! run.valid())
         return DbResult::failure (std::string ("Reading project: ") + sqlite3_errmsg (db));
 
     while (songs.next())
@@ -702,6 +729,19 @@ DbResult ProjectDatabase::load (ProjectData& out)
         SongData sd;
         sd.id = songs.text (0); sd.title = songs.text (1); sd.artist = songs.text (2); sd.baseBpm = songs.real (3);
         sd.key = songs.text (4); sd.lengthSec = songs.real (5); sd.lastPositionSec = songs.real (6); sd.notes = songs.text (7);
+        sd.gridOffsetSec = std::max (0.0, songs.real (8));
+        sd.bpmConfidence = songs.isNull (9) ? -1.0 : songs.real (9);
+        sd.keyConfidence = songs.isNull (10) ? -1.0 : songs.real (10);
+
+        chord.bind (1, sd.id);
+        while (chord.next())
+            sd.chords.push_back ({ chord.real (0), chord.real (1), chord.text (2), chord.isNull (3) ? -1.0 : chord.real (3) });
+        chord.reset();
+
+        run.bind (1, sd.id);
+        while (run.next())
+            sd.analysisRuns.push_back ({ run.text (0), run.text (1), run.text (2), run.text (3), run.text (4), run.text (5), run.text (6) });
+        run.reset();
 
         tempo.bind (1, sd.id);
         while (tempo.next()) sd.tempoPoints.push_back ({ tempo.real (0), tempo.real (1) });

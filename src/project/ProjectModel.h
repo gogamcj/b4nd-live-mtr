@@ -90,6 +90,25 @@ struct ClickSettingsData
     int subdivision = 1;
 };
 
+/** One chord of the analysed chord timeline (docs/07). Draft data: shown, never played. */
+struct ChordData
+{
+    double startSec = 0.0, endSec = 0.0;
+    std::string chord;          // "Am", "F#", "Bb", "N" (no chord)
+    double confidence = -1.0;   // 0..1, < 0 = unknown
+};
+
+/** One run of the analyzer for a song: what ran, how it ended, where its result.json is. */
+struct AnalysisRunData
+{
+    std::string id;
+    std::string startedAt, finishedAt;   // ISO 8601 UTC
+    std::string status;                  // done | partial | failed | cancelled
+    std::string tasks;                   // "tempo,key,chords,structure"
+    std::string resultRelPath;           // relative to the package folder
+    std::string modelVersions;           // JSON: analyzer and library versions
+};
+
 struct SongData
 {
     std::string id;
@@ -102,9 +121,14 @@ struct SongData
     std::string notes;
     std::vector<TempoPoint> tempoPoints;
     std::vector<TimeSigPoint> timeSigPoints;
+    double gridOffsetSec = 0.0;     // song time of bar 1 beat 1 (TempoMap offset)
+    double bpmConfidence = -1.0;    // from analysis, < 0 = not analysed / set by hand
+    double keyConfidence = -1.0;
     std::vector<CueData> cues;
     std::vector<TrackData> tracks;
     ClickSettingsData click;
+    std::vector<ChordData> chords;
+    std::vector<AnalysisRunData> analysisRuns;
 };
 
 struct OutputData

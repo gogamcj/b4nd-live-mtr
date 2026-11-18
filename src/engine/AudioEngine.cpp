@@ -822,7 +822,9 @@ void AudioEngine::renderMidiClock (int n) noexcept
         // (Re)start on the next 16th note: Song Position Pointer counts 16ths (6 clocks each),
         // so the slave's first clock after Continue is exactly at that 16th.
         const double beat = plan.tempo.beatAtSeconds ((double) pos / sampleRate);
-        const auto firstTick = (std::int64_t) std::ceil (beat * 24.0 - 1e-6);
+        // Never before bar 1: in a lead-in (negative beats) the clock waits for the downbeat
+        // and sends Start there.
+        const auto firstTick = std::max<std::int64_t> (0, (std::int64_t) std::ceil (beat * 24.0 - 1e-6));
         clockNextTick = ((firstTick + 5) / 6) * 6;
         clockNeedsStart = true;
     }
@@ -1010,6 +1012,18 @@ void AudioEngine::startCountIn() noexcept
     countInBeatSamples = 60.0 / bpm * (4.0 / std::max (1, bb.denominator)) * sampleRate;
     countInBeatsPerBar = std::max (1, bb.numerator);
     countInLength = (std::int64_t) std::llround (countInBeatSamples * bars * countInBeatsPerBar);
+    // Line the count-in up with the song's bars: it ends on the next bar line, and the
+    // grid clicks between the start position and that bar line (a lead-in or pickup before
+    // bar 1, or a start in the middle of a bar) come from the song's own click.
+    const double posSec = (double) position.load (std::memory_order_relaxed) / sampleRate;
+    const double nextBarSec = plan.tempo.secondsAtBeat (plan.tempo.beatAtBar (bb.bar + 1));
+    const double thisBarSec = plan.tempo.secondsAtBeat (plan.tempo.beatAtBar (bb.bar));
+    double toBar = nextBarSec - posSec;
+    if (posSec - thisBarSec < 1.0e-6)
+        toBar = 0.0;   // already on a bar line
+    const auto shorten = (std::int64_t) std::llround (toBar * sampleRate);
+    if (shorten > 0 && shorten < countInLength)
+        countInLength -= shorten;
     countInLeft = countInLength;
     clickVoicePos = -1;
 }

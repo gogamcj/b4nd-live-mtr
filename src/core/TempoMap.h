@@ -52,6 +52,14 @@ public:
         invalid values (numerator < 1, denominator not a power of two in 1..64). */
     bool setTimeSigPoints (std::vector<TimeSigPoint> points);
 
+    /** Where beat 0 (bar 1, beat 1) sits on the song timeline, in seconds (>= 0). Lets the
+        grid follow the music when the first downbeat is not at 0 s (count-in on the
+        recording, a pickup, silence). Before it, beats and bars are negative and follow the
+        first tempo and time signature (so the click can still count through a lead-in).
+        Returns false (unchanged) for negative or non-finite values. */
+    bool setOffsetSeconds (double seconds);
+    double getOffsetSeconds() const noexcept { return offsetSeconds; }
+
     double secondsAtBeat (double beat) const noexcept;
     double beatAtSeconds (double seconds) const noexcept;
     double bpmAtBeat (double beat) const noexcept;
@@ -79,6 +87,7 @@ private:
     std::vector<double>       tempoStartSeconds;   // seconds at each tempo point
     std::vector<TimeSigPoint> timeSigs;
     std::vector<double>       sigStartBeat;        // beat at each time sig point
+    double                    offsetSeconds = 0.0;
 };
 
 } // namespace b4nd

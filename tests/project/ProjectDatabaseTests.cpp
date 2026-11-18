@@ -83,6 +83,15 @@ ProjectData sampleProject()
         s.click.subdivision = 2;
         s.click.accentFirst = false;
         s.click.volumeDb = -9.0;
+        if (i != 1)   // song 2: never analysed (NULL confidences, no chords)
+        {
+            s.gridOffsetSec = 0.6025 + i;
+            s.bpmConfidence = 0.93;
+            s.keyConfidence = i == 0 ? 0.0 : 0.41;   // 0 is a value, not "unknown"
+            s.chords = { { 0.6, 2.5, "Am", 0.81 }, { 2.5, 4.375, "F", -1.0 }, { 4.375, 6.25, "N", 0.2 } };
+            s.analysisRuns = { { newUuid(), "2026-11-18T10:00:00Z", "2026-11-18T10:00:02Z", "partial", "tempo,key,stems",
+                                 "analysis/" + s.id + "/result.json", "{\"b4nd_analyzer\": \"0.1.0\"}" } };
+        }
         p.songs.push_back (s);
     }
     ModuleProfile mod;
@@ -137,6 +146,21 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             || x.tracks.size() != y.tracks.size() || x.click.countInBars != y.click.countInBars
             || x.click.sound != y.click.sound || x.click.subdivision != y.click.subdivision || x.click.accentFirst != y.click.accentFirst)
             return false;
+        if (x.gridOffsetSec != y.gridOffsetSec || x.bpmConfidence != y.bpmConfidence   // NOLINT exact: stored as REAL
+            || x.keyConfidence != y.keyConfidence || x.chords.size() != y.chords.size()
+            || x.analysisRuns.size() != y.analysisRuns.size())
+            return false;
+        for (size_t k = 0; k < x.chords.size(); ++k)
+            if (x.chords[k].startSec != y.chords[k].startSec || x.chords[k].endSec != y.chords[k].endSec
+                || x.chords[k].chord != y.chords[k].chord || x.chords[k].confidence != y.chords[k].confidence)
+                return false;
+        for (size_t k = 0; k < x.analysisRuns.size(); ++k)
+        {
+            const auto &r = x.analysisRuns[k], &q = y.analysisRuns[k];
+            if (r.id != q.id || r.startedAt != q.startedAt || r.finishedAt != q.finishedAt || r.status != q.status
+                || r.tasks != q.tasks || r.resultRelPath != q.resultRelPath || r.modelVersions != q.modelVersions)
+                return false;
+        }
         for (size_t k = 0; k < x.tempoPoints.size(); ++k)
             if (x.tempoPoints[k].beat != y.tempoPoints[k].beat || x.tempoPoints[k].bpm != y.tempoPoints[k].bpm)
                 return false;
@@ -333,6 +357,7 @@ TEST_CASE ("Project: corrupted pages are detected on open")
             s.id = newUuid();
             for (auto& tr : s.tracks) { tr.id = newUuid(); for (auto& c : tr.clips) c.id = newUuid(); }
             for (auto& c : s.cues) c.id = newUuid();
+            for (auto& r : s.analysisRuns) r.id = newUuid();
             s.notes = std::string (2000, 'x');
             p.songs.push_back (s);
         }

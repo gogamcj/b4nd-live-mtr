@@ -621,3 +621,56 @@ TEST_CASE ("Click: every tone has accent, normal and subdivision sounds at the s
         for (float x : c.accent) CHECK (std::isfinite (x));
     }
 }
+
+TEST_CASE ("Click: grid offset (first downbeat at 0.6 s) moves the click and the bar accent")
+{
+    // 120 BPM, bar 1 at 0.6 s: grid beats at 0.1 s (beat -1, a pickup), 0.6, 1.1, ...
+    Player pl;
+    auto p = std::make_unique<PlaybackPlan>();
+    p->lengthSamples = (std::int64_t) (sr * 10);
+    addClick (*p, 120.0);
+    CHECK (p->tempo.setOffsetSeconds (0.6));
+    pl.engine.setPlan (std::move (p), sr);
+    pl.command (EngineCommand::Type::Play);
+    pl.run (48000 * 2 + 256);
+    const auto click = pl.onsets (2, 0.05f);
+    const auto pk = onsetPeaks (pl, 2, click);
+    CHECK (click.size() == 4);   // 0.1, 0.6, 1.1, 1.6 s
+    if (click.size() == 4)
+    {
+        for (int i = 0; i < 4; ++i) CHECK (std::abs (click[(size_t) i] - (4800 + i * 24000)) < 10);
+        CHECK_NEAR (pk[0], 0.5f, 0.03f);   // beat 4 of the lead-in bar
+        CHECK_NEAR (pk[1], 0.7f, 0.03f);   // bar 1
+        CHECK_NEAR (pk[2], 0.5f, 0.03f);
+    }
+}
+
+TEST_CASE ("Click: count-in lines up with the bars when bar 1 is not at 0 s")
+{
+    // Bar 1 at 0.6 s, 120 BPM: the lead-in bar runs from -1.4 s. A 1-bar count-in from 0 s
+    // ends at the next bar line (0.6 s): count-in clicks for -1.4, -0.9, -0.4 s, then the song's
+    // own click at 0.1 s (beat 4) and the accent at 0.6 s. Steady 0.5 s spacing throughout.
+    Player pl;
+    auto p = planWithTrack (TrackRole::Audio, BusKind::Main, constantData (2, 480000, 0.5f, 0.5f));
+    addClick (*p, 120.0);
+    CHECK (p->tempo.setOffsetSeconds (0.6));
+    pl.engine.setPlan (std::move (p), sr);
+    pl.engine.setCountInBars (1);
+    pl.command (EngineCommand::Type::Play);
+    pl.run (48000 * 3);
+    const auto click = pl.onsets (2, 0.05f);
+    const auto pk = onsetPeaks (pl, 2, click);
+    CHECK (click.size() >= 5);
+    if (click.size() >= 5)
+    {
+        for (int i = 0; i < 5; ++i) CHECK (std::abs (click[(size_t) i] - i * 24000) < 10);
+        CHECK_NEAR (pk[0], 0.7f, 0.03f);   // count-in accent = the lead-in bar's downbeat
+        CHECK_NEAR (pk[1], 0.5f, 0.03f);
+        CHECK_NEAR (pk[3], 0.5f, 0.03f);   // song click, beat 4
+        CHECK_NEAR (pk[4], 0.7f, 0.03f);   // song bar 1
+    }
+    // The count-in was 1.4 s: the MR starts there.
+    const auto mr = pl.onsets (0);
+    CHECK (! mr.empty());
+    if (! mr.empty()) CHECK (mr[0] >= 67200 && mr[0] < 67200 + 64);
+}

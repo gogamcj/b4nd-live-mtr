@@ -515,3 +515,38 @@ TEST_CASE ("MIDI engine: with the PA limiter on, module notes leave 1 ms later t
     const double got = (double) (r.got[0].dueNs - r.callbackNs[0]) / 1e6;
     CHECK (got > want - 0.3 && got < want + 0.3);
 }
+
+TEST_CASE ("MIDI clock: with bar 1 at 0.5 s, Start and the first clock wait for the downbeat")
+{
+    Rig r;
+    r.engine.setClockSmoothing (true);
+    r.engine.setTimeSourceForTesting (&fakeClock);
+    auto t = tempoAt (120.0);
+    CHECK (t.setOffsetSeconds (0.5));
+    r.engine.setPlan (planWithClock (t), sr);
+    const double blockNs = block * 1.0e9 / sr;
+    const double epoch = 3.0e12;
+    r.cmd (EngineCommand::Type::Play);
+    std::vector<MidiOutEvent> got;
+    std::int64_t playStartSample = -1;
+    for (int b = 0; b < 375; ++b)   // 2.0 s
+    {
+        fakeNow = (std::int64_t) (epoch + b * blockNs);
+        const auto posBefore = r.engine.getPosition();
+        r.engine.process (nullptr, 0, r.ptrs, 2, block);
+        if (playStartSample < 0 && r.engine.getPosition() > posBefore)
+            playStartSample = (std::int64_t) b * block - posBefore;
+        MidiOutEvent e;
+        while (r.engine.popMidi (e)) got.push_back (e);
+    }
+    CHECK (got.size() > 2);
+    if (got.size() > 2)
+    {
+        CHECK (got[0].msg.data[0] == 0xfa);   // Start, not Song Position + Continue
+        CHECK (got[1].msg.data[0] == 0xf8);
+        const double ideal = epoch + (double) (playStartSample + 24000) * 1.0e9 / sr;
+        CHECK (std::abs ((double) got[0].dueNs - ideal) < 0.1e6);
+    }
+    const auto clocks = std::count_if (got.begin(), got.end(), [] (const MidiOutEvent& e) { return e.msg.data[0] == 0xf8; });
+    CHECK (clocks >= 71 && clocks <= 73);   // 1.5 s at 48 clocks/s
+}
