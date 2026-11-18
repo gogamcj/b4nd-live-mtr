@@ -1,6 +1,7 @@
 #include "ui/SidePanel.h"
 #include "core/TimeFormat.h"
 #include "ui/AnalysisPanel.h"
+#include "ui/FootswitchPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -71,7 +72,9 @@ SidePanel::SidePanel (AppState& s) : state (s)
     modulesButton.setTooltip ("External MIDI sound modules: ports, channels, presets, status (Ctrl+M)");
     pluginsButton.onClick = [this] { showPluginWindow (state); };
     pluginsButton.setTooltip ("VST3 plugins: scan, Live Certified status, which plugin each VSTi track plays (Ctrl+P)");
-    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton })
+    footswitchButton.onClick = [this] { showFootswitchWindow (state); };
+    footswitchButton.setTooltip ("Footswitch / MIDI control: inputs, pedal mapping, MIDI Learn (Ctrl+F)");
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -111,6 +114,19 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
             modulesButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
         else
             modulesButton.removeColour (juce::TextButton::buttonColourId);
+    }
+
+    {
+        const auto& fp = state.getFootswitch().getPorts();
+        int lost = 0;
+        for (const auto& p : fp)
+            lost += p.status != FootswitchInput::PortState::Status::Open ? 1 : 0;
+        footswitchButton.setButtonText (fp.empty() ? juce::String ("FOOTSWITCH")
+                                        : lost > 0 ? "FOOTSWITCH - NOT CONNECTED" : "FOOTSWITCH - READY");
+        if (lost > 0)
+            footswitchButton.setColour (juce::TextButton::buttonColourId, theme::danger.darker (0.45f));
+        else
+            footswitchButton.removeColour (juce::TextButton::buttonColourId);
     }
 
     {
@@ -220,6 +236,7 @@ void SidePanel::resized()
     const int buttonH = juce::jlimit (22, 30, (getHeight() * 2 / 5 - 40) / juce::jmax (1, n) - 4);
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
     totalArea = r.removeFromBottom (26);
+    footswitchButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     pluginsButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     songList.setBounds (r.reduced (0, 4));

@@ -92,6 +92,8 @@ void LiveModeView::changeListenerCallback (juce::ChangeBroadcaster*)
 
 void LiveModeView::timerCallback()
 {
+    if (const double age = juce::Time::getMillisecondCounterHiRes() - state.getLastFootswitchMs(); age > 2400.0 && age < 3000.0)
+        repaint (statusArea);   // the pedal action display ends
     mainMeterL.update();
     mainMeterR.update();
     clickMeter.update();
@@ -183,7 +185,7 @@ void LiveModeView::paint (juce::Graphics& g)
     auto st = statusArea;
     auto pill = [&] (const juce::String& text, juce::Colour c)
     {
-        auto r = st.removeFromLeft (juce::jmin (300, st.getWidth() / 4)).reduced (4, 4);
+        auto r = st.removeFromLeft (juce::jmin (300, statusArea.getWidth() / 5)).reduced (4, 4);
         g.setColour (c.withAlpha (0.15f));
         g.fillRoundedRectangle (r.toFloat(), 6.0f);
         g.setColour (c);
@@ -234,6 +236,23 @@ void LiveModeView::paint (juce::Graphics& g)
             pill ("VSTi: " + juce::String (ps.notCertified) + " NOT LIVE CERTIFIED", theme::warn);
         else
             pill ("VSTi: " + juce::String (ps.ready) + " READY", theme::ok);
+    }
+    {
+        // Footswitch: the last press stays visible for a moment, a lost pedal is red.
+        const auto& ports = state.getFootswitch().getPorts();
+        const auto lastText = state.getLastFootswitchText();
+        const bool recent = lastText.isNotEmpty() && juce::Time::getMillisecondCounterHiRes() - state.getLastFootswitchMs() < 2500.0;
+        int lost = 0;
+        for (const auto& fp : ports)
+            lost += fp.status != FootswitchInput::PortState::Status::Open ? 1 : 0;
+        if (recent)
+            pill ("PEDAL: " + lastText.toUpperCase(), lastText.contains ("refused") ? theme::warn : theme::accent);
+        else if (ports.empty())
+            pill ("PEDAL: NONE", theme::textDim);
+        else if (lost > 0)
+            pill ("PEDAL LOST: " + ports.front().port.name.toUpperCase(), theme::danger);
+        else
+            pill ("PEDAL: " + ports.front().port.name.toUpperCase(), theme::ok);
     }
     if (state.isEmergencyStopped())
         pill ("EMERGENCY STOPPED", theme::danger);

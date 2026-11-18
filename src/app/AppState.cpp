@@ -151,6 +151,11 @@ AppState::AppState (AudioEngine& e, AudioDeviceController& d)
     engine.setRouting (routing);
     midi.onStatusChanged = [this] { sendChangeMessage(); };
     midi.start();
+    footswitch = std::make_unique<FootswitchInput> (createJuceMidiInputBackend());
+    footswitch->onAction = [this] (LiveAction a) { performLiveAction (a, true); };
+    footswitch->onPortsChanged = [this] { sendChangeMessage(); };
+    loadFootswitchSettings();
+    footswitch->start();
     device.addChangeListener (this);
     requestAllMedia();
     rebuildPlan();
@@ -161,6 +166,9 @@ AppState::~AppState()
 {
     stopTimer();
     closeProject();
+    footswitch->onAction = nullptr;
+    footswitch->onPortsChanged = nullptr;
+    footswitch->shutdown();
     midi.onStatusChanged = nullptr;
     midi.shutdown();   // releases every sounding note first
     device.removeChangeListener (this);

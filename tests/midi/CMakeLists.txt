@@ -4,6 +4,8 @@ juce_add_console_app(b4nd_midi_tests PRODUCT_NAME "b4nd_midi_tests")
 target_sources(b4nd_midi_tests PRIVATE
     ../core/TestMain.cpp
     MidiOutputTests.cpp
+    FootswitchInputTests.cpp
+    ../../src/midi/FootswitchInput.cpp
     ../../src/midi/MidiOutputService.cpp
     ../../src/midi/MidiFileImport.cpp)
 

@@ -26,13 +26,16 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../media/MediaLoader.cpp
     ../midi/MidiOutputService.cpp
     ../midi/MidiFileImport.cpp
+    ../midi/FootswitchInput.cpp
     ../plugins/PluginCatalog.cpp
     ../plugins/PluginInstrument.cpp
     ../plugins/PluginHost.cpp
     ../ui/PluginPanel.cpp
     ../ui/AnalysisPanel.cpp
     AppStateMidiEdit.cpp
-    ../ui/MidiEditorPanel.cpp)
+    AppStateLive.cpp
+    ../ui/MidiEditorPanel.cpp
+    ../ui/FootswitchPanel.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

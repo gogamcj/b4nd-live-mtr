@@ -156,6 +156,21 @@ jobs:
           $edits = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter bass.mid | Where-Object { $_.DirectoryName -match "edit-" }
           if ($edits.Count -lt 1) { throw "edited bass.mid missing" }
 
+      - name: Footswitch (mapping, refusal while playing, double press)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" -ErrorAction SilentlyContinue | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-footswitch.png','--footswitch',
+                 '--footswitch-press', 'cc:65:127@0,cc:65:0@100,cc:64:127@400,cc:64:0@500,cc:65:127@600,cc:68:127@1000,cc:68:0@1100,cc:68:127@1300')
+          if ($p.ExitCode -ne 0) { throw "footswitch run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Footswitch" | ForEach-Object { $_.Line }
+          foreach ($want in @("Footswitch: NEXT SONG \(CC 65\)$", "Footswitch: PLAY / PAUSE \(CC 64\)",
+                              "Footswitch: NEXT SONG \(CC 65\) refused: stop the song first", "Footswitch: EMERGENCY STOP \(CC 68\)")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
+
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
         run: |
@@ -399,6 +414,29 @@ jobs:
           # The transpose in Live Mode did nothing: the first notes moved up 1 semitone, not 2.
           first=$(grep -oE "opened .*first [0-9]+:[0-9]+" locks.txt | grep -oE "[0-9]+$")
           grep -Eq "try-save -> saved; .* first 0:$((first + 1)):" locks.txt
+
+      - name: Footswitch end to end (mapping, bounce, double press, refusals, learn)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          rm -f "$HOME/.config/B4ND LIVE MTR/footswitch.json"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-footswitch.png --footswitch \
+            --footswitch-press "cc:65:127@0,cc:65:0@20,cc:65:127@30,cc:65:0@200,cc:64:127@400,cc:64:0@500,cc:65:127@600,cc:65:0@700,cc:67:127@800,cc:68:127@1000,cc:68:0@1100,cc:68:127@1300,learn:2,note:70:90@2500,cc:65:127@3000" \
+            | tee fs.txt
+          grep -q 'footswitch: cc:65:127@0 -> NEXT SONG (CC 65); song 2 ' fs.txt
+          grep -q 'footswitch: cc:65:127@30 -> no press; song 2 ' fs.txt                      # bounce
+          grep -q 'footswitch: cc:64:127@400 -> PLAY / PAUSE (CC 64); song 2 .*, playing' fs.txt
+          grep -q 'footswitch: cc:65:127@600 -> NEXT SONG (CC 65) refused: stop the song first; song 2 .*, playing' fs.txt
+          grep -q 'footswitch: cc:68:127@1000 -> first of two presses; .*, playing' fs.txt
+          grep -q 'footswitch: cc:68:127@1300 -> EMERGENCY STOP (CC 68); .*EMERGENCY STOPPED' fs.txt
+          grep -q 'footswitch: learn row 2: waiting' fs.txt
+          grep -q 'footswitch binding: note 70 ch 1 port "" -> next_song' fs.txt
+          grep -q 'footswitch: cc:65:127@3000 -> press, no action' fs.txt
+          test -s "$HOME/.config/B4ND LIVE MTR/footswitch.json"
+          # the learned mapping is kept for the next start
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-footswitch-live.png --live --size 1600x960 \
+            --footswitch-press "note:70:90@0" | tee fs2.txt
+          grep -q 'footswitch: note:70:90@0 -> NEXT SONG (Note 70); song 2 ' fs2.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |

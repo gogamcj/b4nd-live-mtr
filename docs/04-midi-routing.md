@@ -176,3 +176,18 @@ MIDI 전송 시각 = 해당 샘플이 출력될 예정 시각 − moduleLatency 
   - 프로젝트가 없으면 앱 데이터 폴더의 `midi-edits/`에 쓴다
 - 엔진 쪽 변화 없음: 저장하면 재생 계획을 다시 만들고(현재 곡일 때만), 재생 중에는 저장을 막는다
 - 명령줄(테스트용): `--midi-edit "<트랙 이름>" --midi-ops all,grid:240,quantize,transpose:12,first,vel:-10,delete,undo,redo,add:<틱>:<음>:<길이>:<벨로시티>,move:<틱>,play,stop,live,try-save,save`
+
+## 12. 풋스위치 구현 (Phase 12, 2026-11-18)
+
+- 입력: 사용자가 켠 MIDI 입력만 연다. 다른 입력에 꽂힌 키보드의 서스테인 페달(CC 64)이 곡을 시작하는 일이 없다. 1초마다 포트를 확인해 분리되면 빨간색, 다시 꽂으면 다시 연다 (식별자 → 이름 순으로 찾음)
+- 누름 판정 (`core/Footswitch`)
+  - Note On, 또는 CC 값이 64 미만에서 64 이상으로 올라갈 때. 익스프레션 페달을 끝까지 밟아도 한 번
+  - 같은 값을 다시 보내는 페달(127, 127)은 매번 한 번. LATCH로 지정한 CC는 127 → 0 바뀔 때도 한 번 (토글 페달)
+  - 같은 입력이 50 ms 안에 다시 눌리면 접점 떨림으로 보고 버린다
+  - 2x: 0.5초 안에 두 번 눌러야 동작. 2x 입력은 한 번 누름으로는 아무것도 하지 않는다. 기본값에서 EMERGENCY STOP(CC 68)이 2x
+- 실행: MIDI 스레드는 매핑만 하고 결과를 lock-free 큐에 넣는다. 동작은 메시지 스레드에서 화면 버튼과 같은 AppState 함수로 실행 (엔진 명령 큐는 단일 생산자라서 MIDI 스레드가 직접 넣지 않는다)
+- 공연 중 실수 방지: 곡이 재생 중이면 페달의 NEXT/PREVIOUS SONG, RESTART는 거부하고 공연 화면에 "refused: stop the song first"를 보여 준다. 화면 버튼은 그대로
+- 동작 목록: PLAY/PAUSE, STOP, RESTART, NEXT/PREVIOUS SONG, NEXT/PREVIOUS CUE, LOOP, EMERGENCY STOP
+- 저장: 앱 설정 `footswitch.json` (켠 입력 + 매핑). 페달은 PC에 붙는 장비라서 프로젝트가 아니라 PC 설정에 둔다. 프로젝트별 덮어쓰기와 DB `footswitch_mapping` 표는 쓰지 않는다 (스키마 v5 그대로)
+- 설정 창: 좌측 FOOTSWITCH 또는 Ctrl+F. LEARN 후 페달을 밟으면 그 입력이 들어간다. 마지막 누름과 결과가 아래에 보인다. Live Mode에서는 잠기고 페달은 동작한다
+- 공연 화면: PEDAL 표시 (입력 이름 / 분리 시 빨간색 / 방금 누른 동작 2.5초)

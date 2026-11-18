@@ -8,6 +8,7 @@
 #include "app/AnalyzerRunner.h"
 #include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
+#include "midi/FootswitchInput.h"
 #include "midi/MidiOutputService.h"
 #include "plugins/PluginHost.h"
 
@@ -187,6 +188,8 @@ public:
     void toggleLoop();
     void jumpToCue (int cueIndex);
     void jumpToNextCue();
+    /** The cue before the play head (if the play head is within 1.5 s after a cue, the one before that). */
+    void jumpToPreviousCue();
 
     // --- mixer (pushed to the engine in real time) ---
     void setTrackVolume (int trackIndex, float db);
@@ -249,6 +252,20 @@ public:
     /** Assigns a .mid file to an external MIDI track, or adds a new one (trackIndex < 0). */
     juce::String addMidiFile (const juce::File&, int trackIndex = -1);
     juce::String setTrackModule (int trackIndex, const juce::String& moduleId, int channel = 0);
+
+    // --- footswitch / MIDI control (Phase 12, docs/04 §8) ---
+    FootswitchInput& getFootswitch() noexcept { return *footswitch; }
+    /** Runs a stage action. From a footswitch, song changes and RESTART are refused while a
+        song plays (a stray step must not end a song): the result says why. Empty = done. */
+    juce::String performLiveAction (LiveAction, bool fromFootswitch);
+    /** The inputs to listen to and the mapping; saved in the app settings (they belong to the
+        PC and its pedal, not to a project). */
+    void setFootswitchPorts (const std::vector<MidiPortInfo>&);
+    void setFootswitchBindings (const std::vector<FootswitchBinding>&);
+    /** "NEXT SONG (CC 65)" / "refused: ..." for the status displays; empty when nothing yet. */
+    const juce::String& getLastFootswitchText() const noexcept { return lastFootswitchText; }
+    double getLastFootswitchMs() const noexcept { return lastFootswitchMs; }
+    static juce::File getFootswitchSettingsFile();
 
     // --- MIDI editor (Phase 11) ---
     /** A song by id (any song in the setlist, not only the current one). */
@@ -455,6 +472,11 @@ private:
     std::array<bool, AudioEngine::maxLineInputs> returnMuted {};
     std::array<float, AudioEngine::maxLineInputs> returnLevels {};
     MidiOutputService midi;
+    std::unique_ptr<FootswitchInput> footswitch;
+    juce::String lastFootswitchText;
+    double lastFootswitchMs = 0.0;
+    void loadFootswitchSettings();
+    void saveFootswitchSettings();
     PluginHost plugins;
     bool instrumentStateStale = false;   // a plugin changed: capture its state when stopped
     std::set<const PluginInstrument*> failureLogged;

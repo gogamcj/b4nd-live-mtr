@@ -10,6 +10,7 @@
 #include "ui/ModulePanel.h"
 #include "ui/AnalysisPanel.h"
 #include "ui/MidiEditorPanel.h"
+#include "ui/FootswitchPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
@@ -66,6 +67,8 @@ struct ScreenshotRequest
     bool applyAnalysis = false;    // --apply-analysis: then apply everything and save
     bool undoAnalysis = false;     // --undo-analysis: then undo the apply (before the save)
     juce::String analyzer;         // --analyzer <program or python>
+    bool footswitchWindow = false; // --footswitch: show (and capture) the footswitch window
+    juce::StringArray footswitchPresses;   // --footswitch-press cc:65:127@0,note:60:100@300,learn:2@...
     juce::String midiEditTrack;    // --midi-edit <track name>: open the MIDI editor on it (and capture it)
     juce::StringArray midiOps;     // --midi-ops all,quantize,transpose:2,vel:+10,delete,undo,play,stop,live,try-save,save ...
     juce::StringArray analyzeTasks;   // --analyze-tasks tempo,key,chords,structure,stems (default: all but stems)
@@ -90,6 +93,9 @@ struct ScreenshotRequest
             r.analyzer = args[s + 1].unquoted();
         if (const int s = args.indexOf ("--analyze-tasks"); s >= 0 && s + 1 < args.size())
             r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
+        r.footswitchWindow = args.contains ("--footswitch");
+        if (const int s = args.indexOf ("--footswitch-press"); s >= 0 && s + 1 < args.size())
+            r.footswitchPresses = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--midi-edit"); s >= 0 && s + 1 < args.size())
             r.midiEditTrack = args[s + 1].unquoted();
         if (const int s = args.indexOf ("--midi-ops"); s >= 0 && s + 1 < args.size())
@@ -319,6 +325,48 @@ public:
                 std::printf ("vsti midi rejected: %s\n", err.toRawUTF8());
     }
 
+    /** --footswitch-press: MIDI as if it came from a pedal (the MIDI-thread path), with times in ms.
+        "cc:<n>:<value>@<ms>", "note:<n>:<velocity>@<ms>", "learn:<row>" (LEARN on a row of the window). */
+    void runFootswitchPresses()
+    {
+        auto& fs = state->getFootswitch();
+        const double base = juce::Time::getMillisecondCounterHiRes();
+        for (const auto& p : screenshot->footswitchPresses)
+        {
+            const auto spec = p.upToFirstOccurrenceOf ("@", false, false);
+            const double at = p.fromFirstOccurrenceOf ("@", false, false).getDoubleValue();
+            const auto parts = juce::StringArray::fromTokens (spec, ":", "");
+            if (parts[0] == "learn")
+            {
+                if (auto* panel = getFootswitchWindowContent())
+                    panel->learn (parts[1].getIntValue());
+                std::printf ("footswitch: learn row %d: %s\n", parts[1].getIntValue(), fs.isLearning() ? "waiting" : "NOT STARTED");
+                continue;
+            }
+            const bool note = parts[0] == "note";
+            const int number = parts[1].getIntValue(), value = parts[2].getIntValue();
+            const auto msg = note ? MidiBytes::make (0x90, (std::uint8_t) number, (std::uint8_t) value)
+                                  : MidiBytes::make (0xb0, (std::uint8_t) number, (std::uint8_t) value);
+            const auto before = fs.getLastPress().count;
+            const auto msBefore = state->getLastFootswitchMs();
+            fs.receive (-1, msg, base + at);
+            fs.deliverPending();
+            juce::String what = fs.getLastPress().count == before ? "no press"
+                              : fs.getLastPress().waiting ? "first of two presses"
+                              : state->getLastFootswitchMs() > msBefore ? state->getLastFootswitchText()
+                              : juce::String ("press, no action");
+            const auto* s = state->getCurrentSong();
+            std::printf ("footswitch: %s -> %s; song %d \"%s\", %s, %.2f s%s\n", p.toRawUTF8(), what.toRawUTF8(),
+                         state->getCurrentSongIndex() + 1, s != nullptr ? s->title.toRawUTF8() : "",
+                         state->getTransportState() == TransportState::Playing ? "playing"
+                             : state->getTransportState() == TransportState::Paused ? "paused" : "stopped",
+                         state->getPositionSeconds(), state->isEmergencyStopped() ? ", EMERGENCY STOPPED" : "");
+        }
+        for (const auto& b : fs.getBindings())
+            std::printf ("footswitch binding: %s %d ch %d port \"%s\" -> %s%s%s\n", b.note ? "note" : "cc", b.number, b.channel + 1,
+                         b.port.c_str(), liveActionId (b.action), b.doublePress ? " (2x)" : "", b.latching ? " (latching)" : "");
+    }
+
     /** --midi-edit / --midi-ops: the editor's own functions on a track, then a save (CI round trip). */
     void runMidiEdit()
     {
@@ -446,6 +494,7 @@ public:
         closePluginWindow();
         closeAnalysisWindow();
         closeMidiEditor();
+        closeFootswitchWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -593,6 +642,10 @@ private:
         {
             if (screenshot->midiEditTrack.isNotEmpty())
                 runMidiEdit();
+            if (screenshot->footswitchWindow)
+                showFootswitchWindow (*state);
+            if (! screenshot->footswitchPresses.isEmpty())
+                runFootswitchPresses();
             if (screenshot->countIn >= 0 || screenshot->clickSub > 0)
             {
                 auto c = state->getClickSettings();
@@ -701,6 +754,8 @@ private:
             comp = getAnalysisWindowContent();
         if (screenshot->midiEditTrack.isNotEmpty() && getMidiEditorContent() != nullptr)
             comp = getMidiEditorContent();
+        if (screenshot->footswitchWindow && getFootswitchWindowContent() != nullptr)
+            comp = getFootswitchWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))
