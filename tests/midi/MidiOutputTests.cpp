@@ -381,3 +381,81 @@ TEST_CASE ("MIDI out: engine events played in real time arrive on time, module d
     CHECK (svc.getDroppedCount() == 0);
     svc.shutdown();
 }
+
+TEST_CASE ("MIDI out: notes queued ahead for a slow module never start after a stop")
+{
+    constexpr double sr = 48000.0;
+    constexpr int block = 256;
+    std::unique_ptr<AudioEngine> enginePtr = std::make_unique<AudioEngine>();
+    AudioEngine& engine = *enginePtr;
+    engine.prepare (sr, block, 2, 0);
+    engine.setRouting (OutputRouting::createForDevice (2));
+    engine.setOutputLatencyMs (0.0);
+    engine.setClockSmoothing (false);
+
+    // Module 150 ms slow: notes are queued up to 150 ms before they are due.
+    auto plan = std::make_unique<PlaybackPlan>();
+    plan->lengthSamples = (std::int64_t) (sr * 10);
+    MidiTrackRuntime t;
+    t.slot = 0;
+    t.port = 0;
+    t.sendEarlyMs = 150.0;
+    for (int i = 0; i < 40; ++i)
+    {
+        const auto s = (std::int64_t) (sr * (0.2 + i * 0.05));
+        t.events.push_back ({ s, MidiBytes::make (0x90, (std::uint8_t) (40 + i), 100) });
+        t.events.push_back ({ s + 1200, MidiBytes::make (0x80, (std::uint8_t) (40 + i), 0) });
+    }
+    plan->midiTracks.push_back (std::move (t));
+    engine.setPlan (std::move (plan), sr);
+
+    auto fake = std::make_unique<FakeBackend>();
+    auto* be = fake.get();
+    be->setPorts ({ { "A", "a" } });
+    MidiOutputService svc (&engine, std::move (fake));
+    svc.start (false);
+    auto a = module ("A");
+    a.bankMsb = a.bankLsb = a.program = a.volume = a.pan = -1;
+    svc.setModules ({ a });
+    waitFor ([&] { return be->sentCount() >= 2; });
+    be->takeSent();
+
+    std::vector<float> l (block), r (block);
+    float* outs[2] { l.data(), r.data() };
+    EngineCommand c;
+    c.type = EngineCommand::Type::Play;
+    engine.postCommand (c);
+    // Real-time-ish callbacks for 0.5 s, then STOP while notes are queued ahead.
+    const auto t0 = AudioEngine::clockNs();
+    const auto blockNs = (std::int64_t) (1.0e9 * block / sr);
+    int i = 0;
+    for (; i < (int) (sr * 0.5 / block); ++i)
+    {
+        while (AudioEngine::clockNs() < t0 + i * blockNs)
+            std::this_thread::yield();
+        engine.process (nullptr, 0, outs, 2, block);
+    }
+    const auto stopNs = AudioEngine::clockNs();
+    c.type = EngineCommand::Type::Stop;
+    engine.postCommand (c);
+    for (int k = 0; k < (int) (sr * 0.4 / block); ++k, ++i)   // stop fade, then silence
+    {
+        while (AudioEngine::clockNs() < t0 + i * blockNs)
+            std::this_thread::yield();
+        engine.process (nullptr, 0, outs, 2, block);
+    }
+    std::this_thread::sleep_for (std::chrono::milliseconds (300));
+    const auto got = be->takeSent();
+    int onsAfterStop = 0, ons = 0;
+    std::array<int, 128> sounding {};
+    for (const auto& s : got)
+    {
+        if (s.msg.isNoteOn()) { ++ons; ++sounding[s.msg.data[1]]; if (s.atNs > stopNs + 60'000'000) ++onsAfterStop; }
+        if (s.msg.isNoteOff()) sounding[s.msg.data[1]] = 0;
+    }
+    std::printf ("    %d note-ons before the stop, %d started after it\n", ons, onsAfterStop);
+    CHECK (ons >= 4);
+    CHECK (onsAfterStop == 0);
+    CHECK (std::all_of (sounding.begin(), sounding.end(), [] (int v) { return v == 0; }));
+    svc.shutdown();
+}

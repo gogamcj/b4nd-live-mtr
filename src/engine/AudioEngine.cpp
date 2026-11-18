@@ -39,6 +39,7 @@ void AudioEngine::prepare (double sr, int maxBlockSize, int numOutputs, int numI
     numIns = std::max (0, numInputs);
 
     xruns.prepare (sampleRate, 1.5, 0.8, 1'000'000, 0.25);   // 250 ms start-up warm-up
+    sampleClock.prepare (sampleRate);
     for (auto& p : peaks)
         p.store (0.0f);
 
@@ -615,8 +616,11 @@ void AudioEngine::renderMidi (int n) noexcept
                               && (trackParams[(size_t) t.slot].mute.load (std::memory_order_relaxed)
                                   || (anySolo && ! trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed)));
         const auto early = (std::int64_t) (t.sendEarlyMs * 1.0e6);
+        // Lookahead: a module slower than the output latency needs its notes before this block is
+        // even due, so events up to (early - latency) ahead are queued now (docs/04 §4).
+        const auto aheadSamples = early > latency ? (std::int64_t) ((double) (early - latency) / nsPerSample) + 1 : 0;
 
-        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n + aheadSamples)
         {
             const auto& e = t.events[cursor++];
             if (silenced && e.msg.isNoteOn())
@@ -775,8 +779,22 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
 
 void AudioEngine::process (const float* const*, int, float* const* outputs, int numOutputs, int numSamples) noexcept
 {
-    const auto startNs = nowNs();
+    const auto startNs = timeSource != nullptr ? timeSource() : nowNs();
     callbacks.fetch_add (1, std::memory_order_relaxed);
+    // MIDI timing reference: when this block's first sample was really due, without the
+    // callback's own scheduling jitter (docs/04 §4).
+    std::int64_t blockNs = startNs;
+    double blockNsPerSample = 1.0e9 / sampleRate;
+    if (clockSmoothing.load (std::memory_order_relaxed) && numSamples > 0)
+    {
+        blockNs = sampleClock.onCallback (startNs, numSamples);
+        blockNsPerSample = sampleClock.getNsPerSample();
+        clockRelocks.store (sampleClock.getRelockCount(), std::memory_order_relaxed);
+    }
+    else
+    {
+        sampleClock.reset();
+    }
 
     for (int ch = 0; ch < numOutputs; ++ch)
         if (outputs[ch] != nullptr)
@@ -837,7 +855,7 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
         for (int ch = 0; ch < numOutputs; ++ch)
             chunkPtrs[ch] = outputs[ch] != nullptr ? outputs[ch] + offset : nullptr;
 
-        chunkStartNs = startNs + (std::int64_t) ((double) offset * 1.0e9 / sampleRate);
+        chunkStartNs = blockNs + (std::int64_t) ((double) offset * blockNsPerSample);
         renderChunk (chunkPtrs, numOutputs, n);
 
         // Transport advances per chunk so tracks and click stay sample-aligned.

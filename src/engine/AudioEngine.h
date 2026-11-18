@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/SampleClock.h"
 #include "core/OutputRouting.h"
 #include "core/SpscQueue.h"
 #include "core/XrunDetector.h"
@@ -137,6 +138,13 @@ public:
     /** MIDI output thread (single consumer). */
     bool popMidi (MidiOutEvent& e) noexcept { return midiOut.pop (e); }
     /** Device output latency, so MIDI notes leave when their audio would reach the speakers. */
+    /** Filter callback jitter out of MIDI timing (core/SampleClock). On by default. */
+    void setClockSmoothing (bool on) noexcept { clockSmoothing.store (on, std::memory_order_relaxed); }
+    /** Times the audio clock filter lost lock (dropouts, driver restarts). */
+    std::uint64_t getClockRelockCount() const noexcept { return clockRelocks.load (std::memory_order_relaxed); }
+    /** Tests only: replaces the wall clock read at each callback (set before playing). */
+    void setTimeSourceForTesting (std::int64_t (*fn)()) noexcept { timeSource = fn; }
+
     void setOutputLatencyMs (double ms) noexcept { outputLatencyNs.store ((std::int64_t) (std::max (0.0, ms) * 1.0e6), std::memory_order_relaxed); }
     std::uint64_t getMidiDroppedCount() const noexcept { return midiDropped.load (std::memory_order_relaxed); }
     /** Notes currently sounding on a port (as sent by the engine). */
@@ -259,6 +267,10 @@ private:
     std::int64_t midiExpectedPos = -1;
     std::int64_t chunkStartNs = 0;
     std::atomic<std::int64_t> outputLatencyNs { 0 };
+    SampleClock sampleClock;                         // audio thread only
+    std::atomic<bool> clockSmoothing { true };
+    std::atomic<std::uint64_t> clockRelocks { 0 };
+    std::int64_t (*timeSource)() = nullptr;
     std::atomic<std::uint64_t> midiDropped { 0 };
     std::array<std::atomic<int>, maxMidiPorts> activeNotesTelemetry {};
 
