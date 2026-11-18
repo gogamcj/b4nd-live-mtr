@@ -2036,6 +2036,14 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
                 t.midiChannel = juce::jlimit (0, 16, td.midiChannel);
                 if (! td.midiPath.empty())
                     t.midiPath = fromU8 (pkg.toAbsolutePath (td.midiPath));
+                if (td.aiConfidence >= 0.0 && t.midiPath.isNotEmpty())
+                {
+                    // Converted from a stem (Phase 10): the part is the file's name (bass.mid).
+                    t.aiPart = juce::File (t.midiPath).getFileNameWithoutExtension();
+                    t.aiConfidence = (float) td.aiConfidence;
+                    if (td.aiConfidence < 0.5)
+                        t.aiWarning = "low transcription confidence (" + juce::String (juce::roundToInt (td.aiConfidence * 100)) + "%)";
+                }
                 loadMidiFile (t, s);
             }
             if (! td.clips.empty())

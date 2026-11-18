@@ -4,4 +4,4 @@ Everything here runs before the show, in its own process: the MTR never imports 
 Results are drafts with confidences; the user reviews them before they touch a song.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

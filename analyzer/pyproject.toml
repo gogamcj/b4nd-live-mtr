@@ -14,9 +14,14 @@ dependencies = ["numpy>=1.21", "scipy>=1.7"]
 io = ["soundfile>=0.10"]
 # Stem separation (Phase 9): Demucs htdemucs_6s on PyTorch. Large; CPU works, a GPU is faster.
 stems = ["demucs==4.0.1", "torch>=2.0", "torchaudio>=2.0"]
+# Audio to MIDI (Phase 10): Basic Pitch's ONNX model (included in the package) on onnxruntime.
+midi = ["onnxruntime>=1.16"]
 
 [project.scripts]
 b4nd-analyzer = "b4nd_analyzer.cli:main"
 
 [tool.setuptools]
 packages = ["b4nd_analyzer"]
+
+[tool.setuptools.package-data]
+b4nd_analyzer = ["models/basic_pitch/*"]

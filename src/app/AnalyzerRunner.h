@@ -64,6 +64,19 @@ struct AnalysisResult
     juce::String stemModel;
     double stemConfidence = -1.0;        // 0..1 from the residual (docs/07 quality check)
 
+    struct MidiNote { double startSec, endSec; int pitch, velocity; double confidence; };
+    struct MidiPart
+    {
+        juce::String name;               // bass | drums | piano | ... (the stem it came from)
+        juce::String sourceId;           // track id of the stem, or "stems/<name>" (separated in the same run)
+        int program = 0;                 // GM program suggestion (not written to the file)
+        bool drums = false;              // GM drum map, channel 10
+        double confidence = -1.0;        // mean note confidence
+        std::vector<MidiNote> notes;     // in the source file's time
+    };
+    bool hasMidi = false;
+    std::vector<MidiPart> midi;
+
     juce::String sourceTrackId;          // the track that was analysed (from the job)
     double sourceStartSec = 0.0;         // where its audio starts on the song timeline
 
@@ -116,6 +129,10 @@ public:
         double mediaStartSec = 0.0;                     // where the media starts on the song timeline
         juce::String sourceTrackId;                     // written to the result, for stems
         double timeoutSec = 0.0;                        // 0: the runner's default
+        struct MidiInput { juce::String name, path, id; };
+        std::vector<MidiInput> midiInputs;              // audio to MIDI: stem files (absolute paths)
+        /** Analysis and stems need the decoded media; MIDI alone reads its input files. */
+        bool needsMedia() const;
     };
 
     /** Explicit analyzer: an executable path, or a Python interpreter. Empty: search. */

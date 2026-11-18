@@ -73,28 +73,42 @@ juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks)
     const auto* s = getCurrentSong();
     if (s == nullptr)
         return "No song";
-    if (trackIndex < 0)
-        trackIndex = findAnalysisSourceTrack();
-    if (! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
-        return "No audio track with loaded audio in this song";
-    const auto& t = s->tracks[(size_t) trackIndex];
-    if (t.media == nullptr || t.mediaStatus != TrackInfo::MediaStatus::Ready)
-        return "The track's audio is not loaded";
-
     AnalyzerRunner::Job job;
     job.songId = s->id;
     job.outDir = analysisDir (session.getFolder(), s->id);
     if (! tasks.isEmpty())
         job.tasks = tasks;
-    job.media = t.media;
-    job.mediaRate = t.mediaRate;
-    job.mediaStartSec = t.mediaStartSeconds;
-    job.sourceTrackId = t.id;
-    if (job.tasks.contains ("stems"))
+    juce::String sourceName = "stem tracks";
+    if (job.needsMedia())
     {
-        if (t.isStem())
-            return "This track is a stem: separate the original instead";
-        job.timeoutSec = 120.0 * 60.0;   // Demucs on a CPU: several minutes per song, more on old PCs
+        if (trackIndex < 0)
+            trackIndex = findAnalysisSourceTrack();
+        if (! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+            return "No audio track with loaded audio in this song";
+        const auto& t = s->tracks[(size_t) trackIndex];
+        if (t.media == nullptr || t.mediaStatus != TrackInfo::MediaStatus::Ready)
+            return "The track's audio is not loaded";
+        job.media = t.media;
+        job.mediaRate = t.mediaRate;
+        job.mediaStartSec = t.mediaStartSeconds;
+        job.sourceTrackId = t.id;
+        sourceName = t.name;
+        if (job.tasks.contains ("stems"))
+        {
+            if (t.isStem())
+                return "This track is a stem: separate the original instead";
+            job.timeoutSec = 120.0 * 60.0;   // Demucs on a CPU: several minutes per song, more on old PCs
+        }
+    }
+    if (job.tasks.contains ("midi") && ! job.tasks.contains ("stems"))
+    {
+        // Audio to MIDI works on the song's stems (docs/07: one instrument per file).
+        for (const auto& t : s->tracks)
+            if (t.isStem() && t.mediaPath.isNotEmpty() && juce::File (t.mediaPath).existsAsFile())
+                job.midiInputs.push_back ({ t.stemName, t.mediaPath, t.id });
+        if (job.midiInputs.empty())
+            return "Audio to MIDI needs stem tracks: separate the stems first (or tick Stems too)";
+        job.timeoutSec = std::max (job.timeoutSec, 30.0 * 60.0);
     }
     if (auto err = analyzer.start (job); err.isNotEmpty())
         return err;
@@ -103,7 +117,7 @@ juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks)
     lastAnalysisState = AnalyzerRunner::State::Preparing;
     juce::String where;
     analyzer.resolveCommand (where);
-    juce::Logger::writeToLog ("Analysis started: " + s->title + " / " + t.name + " [" + analysisTasks + "] using " + where);
+    juce::Logger::writeToLog ("Analysis started: " + s->title + " / " + sourceName + " [" + analysisTasks + "] using " + where);
     sendChangeMessage();
     return {};
 }
@@ -165,6 +179,13 @@ void AppState::pollAnalysis()
             for (const auto& x : r.sections)
                 names.add (x.label);
             summary << ", sections: " << names.joinIntoString (" / ");
+        }
+        if (r.hasMidi)
+        {
+            juce::StringArray parts;
+            for (const auto& m : r.midi)
+                parts.add (m.name + " " + juce::String ((int) m.notes.size()));
+            summary << (summary.isEmpty() ? "" : ", ") << "MIDI: " << parts.joinIntoString (" / ") << " notes";
         }
         if (r.hasStems)
             summary << (summary.isEmpty() ? "" : ", ") << (int) r.stems.size() << " stems (" << r.stemModel << ", residual "
@@ -233,9 +254,13 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
     double gridShift = 0.0;
     juce::StringArray applied;
     const bool withStems = a.withStems && r.hasStems;
+    const bool withMidi = a.withMidi && r.hasMidi;
     if (withStems)
         if (auto err = applyStems (*s, r, undo, applied, true); err.isNotEmpty())
             return err;   // checked before anything is written to the song
+    if (withMidi)
+        if (auto err = applyMidi (*s, r, undo, applied, true); err.isNotEmpty())
+            return err;
     if (a.withTempo && r.hasTempo)
     {
         std::vector<TempoPoint> pts;
@@ -295,8 +320,12 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
         s->chords = std::move (ch);
         applied.add (juce::String ((int) s->chords.size()) + " chords");
     }
+    juce::String lateError;
     if (withStems)
-        if (auto err = applyStems (*s, r, undo, applied, false); err.isNotEmpty())
+        lateError = applyStems (*s, r, undo, applied, false);
+    if (lateError.isEmpty() && withMidi)   // after the stems (it may use the stem tracks just added) and the tempo
+        lateError = applyMidi (*s, r, undo, applied, false);
+    if (auto err = lateError; err.isNotEmpty())
         {
             // Moving the files failed (disk, permissions): put the song back as it was.
             s->tempo = undo.tempo;
@@ -305,6 +334,13 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
             s->keyConfidence = undo.keyConfidence;
             s->cues = undo.cues;
             s->chords = undo.chords;
+            if (undo.tracks.has_value())
+            {
+                s->tracks = *undo.tracks;
+                if (undo.stemsTo.isDirectory() && ! undo.stemsFrom.exists())
+                    undo.stemsTo.moveFileTo (undo.stemsFrom);
+                pushMixerToEngine();
+            }
             return err;
         }
     if (applied.isEmpty())
@@ -401,6 +437,116 @@ juce::String AppState::applyStems (SongInfo& s, const AnalysisResult& r, Analysi
                               + juce::String (juce::roundToInt (r.stemConfidence * 100)) + "%");
     pushMixerToEngine();
     requestAllMedia();
+    return {};
+}
+
+juce::String AppState::applyMidi (SongInfo& s, const AnalysisResult& r, AnalysisUndo& undo, juce::StringArray& applied, bool checkOnly)
+{
+    int added = 0;
+    for (const auto& part : r.midi)
+        if (! part.notes.empty() && std::none_of (s.tracks.begin(), s.tracks.end(), [&] (const TrackInfo& t) { return t.aiPart == part.name; }))
+            ++added;
+    if ((int) s.tracks.size() + added + (checkOnly && r.hasStems ? (int) r.stems.size() : 0) > AudioEngine::maxTracks)
+        return "MIDI: too many tracks in this song";
+    if (checkOnly)
+        return {};
+
+    const auto folder = session.getFolder().getChildFile ("midi").getChildFile (s.id)
+                            .getChildFile (juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S"));
+    if (! folder.createDirectory())
+        return "MIDI: cannot create " + folder.getFullPathName();
+    if (! undo.tracks.has_value())
+        undo.tracks = s.tracks;
+
+    juce::StringArray done, notes, empty;
+    for (const auto& part : r.midi)
+    {
+        if (part.notes.empty())
+        {
+            empty.add (part.name);   // nothing heard in this stem: no track
+            continue;
+        }
+        // Where the stem sits on the timeline: its notes are in the stem file's time.
+        const TrackInfo* src = nullptr;
+        for (const auto& t : s.tracks)
+            if ((part.sourceId.isNotEmpty() && t.id == part.sourceId)
+                || (part.sourceId == "stems/" + part.name && t.stemName == part.name))
+                src = &t;
+        const double offset = src != nullptr ? src->mediaStartSeconds : r.sourceStartSec;
+
+        juce::MidiMessageSequence seq;
+        const int channel = part.drums ? 10 : 1;
+        int dropped = 0, written = 0;
+        for (const auto& n : part.notes)
+        {
+            const double b0 = s.tempo.beatAtSeconds (n.startSec + offset);
+            const double b1 = s.tempo.beatAtSeconds (n.endSec + offset);
+            if (b0 < 0.0)
+            {
+                ++dropped;   // before bar 1: a MIDI file has no negative time
+                continue;
+            }
+            const double t0 = std::round (b0 * midiPpq), t1 = std::max (t0 + 1.0, std::round (b1 * midiPpq));
+            seq.addEvent (juce::MidiMessage::noteOn (channel, n.pitch, (juce::uint8) n.velocity), t0);
+            seq.addEvent (juce::MidiMessage::noteOff (channel, n.pitch), t1);
+            ++written;
+        }
+        seq.updateMatchedPairs();
+        juce::MidiMessageSequence meta;
+        meta.addEvent (juce::MidiMessage::textMetaEvent (3, "B4ND AI " + part.name), 0.0);
+        meta.addEvent (juce::MidiMessage::tempoMetaEvent (juce::roundToInt (60'000'000.0 / s.tempo.bpmAtBeat (0.0))), 0.0);
+        juce::MidiFile mf;
+        mf.setTicksPerQuarterNote (midiPpq);
+        mf.addTrack (meta);
+        mf.addTrack (seq);
+        const auto file = folder.getChildFile (part.name + ".mid");
+        {
+            juce::FileOutputStream out (file);
+            if (! out.openedOk() || ! mf.writeTo (out, 1))
+                return "MIDI: cannot write " + file.getFullPathName();
+        }
+
+        TrackInfo* t = nullptr;
+        for (auto& x : s.tracks)
+            if (x.aiPart == part.name)
+                t = &x;   // converted again: keep its instrument, fader, mute and solo
+        if (t == nullptr)
+        {
+            TrackInfo nt;
+            nt.id = newUuid();
+            nt.name = part.name.substring (0, 1).toUpperCase() + part.name.substring (1) + " (MIDI)";
+            nt.kind = TrackKind::MidiVsti;   // no instrument yet: plays nothing until one is chosen
+            nt.destination = "No instrument";
+            nt.mute = true;
+            nt.midiChannel = part.drums ? 10 : 0;
+            nt.aiPart = part.name;
+            s.tracks.push_back (nt);
+            t = &s.tracks.back();
+        }
+        t->midiPath = file.getFullPathName();
+        t->aiConfidence = (float) std::max (0.0, part.confidence);
+        juce::StringArray warn;
+        if (part.confidence < 0.5)
+            warn.add ("low transcription confidence");
+        if (dropped > 0)
+            warn.add (juce::String (dropped) + " notes before bar 1 left out");
+        if (part.drums)
+            warn.add ("kick / snare / hi-hat only");
+        t->aiWarning = warn.joinIntoString ("; ");
+        loadMidiFile (*t, s);
+        done.add (part.name);
+        notes.add (part.name + " " + juce::String (written));
+    }
+    if (done.isEmpty())
+    {
+        folder.deleteRecursively();
+        applied.add ("MIDI: no notes found in any stem");
+        return {};
+    }
+    applied.add (juce::String (done.size()) + " MIDI parts (" + notes.joinIntoString (", ") + " notes, muted"
+                 + (empty.isEmpty() ? juce::String() : "; no notes: " + empty.joinIntoString (", ")) + ")");
+    juce::Logger::writeToLog ("AI MIDI -> " + folder.getFullPathName() + ": " + notes.joinIntoString (", "));
+    pushMixerToEngine();
     return {};
 }
 

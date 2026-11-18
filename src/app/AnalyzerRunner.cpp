@@ -25,21 +25,24 @@ bool validSection (const juce::String& s)
     return ok.contains (s);
 }
 
-// Share of the whole run per analyzer task, for one progress bar (measured on a 4 min song).
-// Stems run first and take most of the time when asked for.
-float overallProgress (const juce::String& task, float p, bool withStems, bool withAnalysis)
+// Share of the whole run per analyzer task, for one progress bar. The analyzer runs stems, then
+// MIDI, then the analysis (measured on a 4 min song: stems take most of the time).
+float overallProgress (const juce::String& task, float p, bool withStems, bool withMidi, bool withAnalysis)
 {
     static const std::map<juce::String, std::pair<float, float>> w {
         { "load", { 0.00f, 0.05f } }, { "features", { 0.05f, 0.35f } }, { "tempo", { 0.40f, 0.25f } },
         { "key", { 0.65f, 0.05f } }, { "chords", { 0.70f, 0.15f } }, { "structure", { 0.85f, 0.15f } } };
     p = juce::jlimit (0.0f, 1.0f, p);
-    const float stemShare = ! withStems ? 0.0f : withAnalysis ? 0.8f : 1.0f;
+    const float ws = withStems ? 8.0f : 0.0f, wm = withMidi ? 2.0f : 0.0f, wa = withAnalysis ? 1.0f : 0.0f;
+    const float total = std::max (1e-6f, ws + wm + wa);
     if (task == "stems")
-        return stemShare * p;
+        return ws / total * p;
+    if (task == "midi")
+        return (ws + wm * p) / total;
     const auto it = w.find (task);
     if (it == w.end())
         return -1.0f;
-    return stemShare + (1.0f - stemShare) * (it->second.first + it->second.second * p);
+    return (ws + wm + wa * (it->second.first + it->second.second * p)) / total;
 }
 
 bool stemNameOk (const juce::String& n)
@@ -232,6 +235,38 @@ AnalysisResult AnalysisResult::parse (const juce::String& json)
         r.stemConfidence = juce::jlimit (0.3, 0.9, 0.3 + (-10.0 - r.stemResidualDb) / 30.0 * 0.6);
         r.hasStems = ! r.stems.empty();
     }
+    if (const auto& m = v["midi"]; m.isObject())
+    {
+        if (auto* tracks = m["tracks"].getArray())
+            for (const auto& t : *tracks)
+            {
+                MidiPart part;
+                part.name = t["name"].toString().substring (0, 32);
+                part.sourceId = t["sourceId"].toString().substring (0, 64);
+                part.program = juce::jlimit (0, 127, (int) num (t["program"], 0.0));
+                part.drums = (bool) t["drums"];
+                part.confidence = juce::jlimit (-1.0, 1.0, num (t["confidence"]));
+                if (! stemNameOk (part.name))
+                {
+                    r.errors.add ("midi: ignored a bad part name");
+                    continue;
+                }
+                if (auto* notes = t["notes"].getArray())
+                    for (const auto& n : *notes)
+                    {
+                        auto* a = n.getArray();
+                        if (a == nullptr || a->size() < 5 || part.notes.size() >= 200000)
+                            continue;
+                        MidiNote x { num ((*a)[0], -1.0), num ((*a)[1], -1.0), (int) num ((*a)[2], -1.0),
+                                     (int) num ((*a)[3], -1.0), juce::jlimit (0.0, 1.0, num ((*a)[4], 0.0)) };
+                        if (x.startSec >= 0.0 && x.endSec > x.startSec && x.endSec - x.startSec < 60.0
+                            && x.pitch >= 0 && x.pitch <= 127 && x.velocity >= 1 && x.velocity <= 127)
+                            part.notes.push_back (x);
+                    }
+                r.midi.push_back (std::move (part));
+            }
+        r.hasMidi = ! r.midi.empty();
+    }
     if (const auto& j = v["job"]; j.isObject())
     {
         r.sourceTrackId = j["sourceTrackId"].toString().substring (0, 64);
@@ -242,6 +277,14 @@ AnalysisResult AnalysisResult::parse (const juce::String& json)
         r.versionsJson = juce::JSON::toString (v["versions"], true);
     r.valid = r.status == "done" || r.status == "partial";
     return r;
+}
+
+bool AnalyzerRunner::Job::needsMedia() const
+{
+    for (const auto* t : { "tempo", "key", "chords", "structure", "stems" })
+        if (tasks.contains (t))
+            return true;
+    return false;
 }
 
 AnalyzerRunner::AnalyzerRunner() : juce::Thread ("B4ND analyzer") {}
@@ -360,10 +403,15 @@ juce::String AnalyzerRunner::start (Job j)
 {
     if (isBusy() || isThreadRunning())
         return "An analysis is already running";
-    if (j.media == nullptr || j.media->numFrames <= 0 || j.mediaRate <= 0.0)
-        return "The track's audio is not loaded";
-    if ((double) j.media->numFrames / j.mediaRate + j.mediaStartSec > maxSeconds)
-        return "Longer than 20 minutes: not analysed";
+    if (j.needsMedia())
+    {
+        if (j.media == nullptr || j.media->numFrames <= 0 || j.mediaRate <= 0.0)
+            return "The track's audio is not loaded";
+        if ((double) j.media->numFrames / j.mediaRate + j.mediaStartSec > maxSeconds)
+            return "Longer than 20 minutes: not analysed";
+    }
+    if (j.tasks.contains ("midi") && j.midiInputs.empty() && ! j.tasks.contains ("stems"))
+        return "Nothing to convert to MIDI: separate stems first";
     if (! j.outDir.createDirectory())
         return "Cannot create " + j.outDir.getFullPathName();
     stopThread (1000);
@@ -518,13 +566,15 @@ void AnalyzerRunner::run()
     const auto jobFile = j.outDir.getChildFile ("job.json");
     const auto resultFile = j.outDir.getChildFile ("result.json");
     juce::String error;
-    if (! writeInputWav (j, wav, error))
+    const bool needsMedia = j.needsMedia();
+    if (needsMedia && ! writeInputWav (j, wav, error))
     {
         wav.deleteFile();
         setState (cancelRequested ? State::Cancelled : State::Failed, error);
         return;
     }
     const bool withStems = j.tasks.contains ("stems");
+    const bool withMidi = j.tasks.contains ("midi");
     bool withAnalysis = false;
     for (const auto* t : { "tempo", "key", "chords", "structure" })
         withAnalysis = withAnalysis || j.tasks.contains (t);
@@ -544,7 +594,20 @@ void AnalyzerRunner::run()
     j.media.reset();   // the WAVs are written: do not hold the decoded audio longer than needed
 
     auto* o = new juce::DynamicObject();
-    o->setProperty ("input", wav.getFileName());
+    o->setProperty ("input", needsMedia ? wav.getFileName() : juce::String());
+    if (withMidi)
+    {
+        juce::Array<juce::var> inputs;
+        for (const auto& m : j.midiInputs)
+        {
+            auto* x = new juce::DynamicObject();
+            x->setProperty ("name", m.name);
+            x->setProperty ("path", m.path);
+            x->setProperty ("id", m.id);
+            inputs.add (juce::var (x));
+        }
+        o->setProperty ("midiInputs", inputs);
+    }
     juce::Array<juce::var> tasks;
     for (const auto& t : j.tasks)
         tasks.add (t);
@@ -619,7 +682,7 @@ void AnalyzerRunner::run()
                 continue;
             if (v["task"].isString())
             {
-                const auto p = overallProgress (v["task"].toString(), (float) num (v["progress"], 0.0), withStems, withAnalysis);
+                const auto p = overallProgress (v["task"].toString(), (float) num (v["progress"], 0.0), withStems, withMidi, withAnalysis);
                 std::lock_guard<std::mutex> g (lock);
                 status.task = v["task"].toString();
                 if (p >= 0.0f)

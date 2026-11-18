@@ -57,6 +57,7 @@ struct TrackInfo
     float aiConfidence = -1.0f;        // 0..1, < 0: not AI-made
     juce::String aiWarning;            // shown with a warning icon; empty: none
     bool isStem() const noexcept { return stemName.isNotEmpty(); }
+    juce::String aiPart;               // MIDI converted from a stem (bass, drums, ...); empty: not AI MIDI
 
     // --- external MIDI (MidiExternal tracks) ---
     juce::String midiPath;             // .mid file; empty: none
@@ -317,6 +318,7 @@ public:
     {
         bool withTempo = true, withTimeSig = true, withKey = true, withCues = true, withChords = true;
         bool withStems = true;       // add the separated stems as (muted) tracks; the original stays
+        bool withMidi = true;        // add the converted parts as (muted) MIDI tracks
         double bpm = 0.0;            // > 0: one constant tempo at this BPM instead of the analysed map
         double tempoScale = 1.0;     // 2 or 0.5: the analyser picked half / double tempo
         double gridStartSec = -1.0;  // >= 0: bar 1 starts here instead
@@ -462,6 +464,7 @@ private:
     };
     std::optional<AnalysisUndo> analysisUndo;
     juce::String applyStems (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
+    juce::String applyMidi (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

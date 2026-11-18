@@ -115,15 +115,15 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
     analyzeButton.setColour (juce::TextButton::buttonColourId, theme::accent.darker (0.4f));
     applyButton.setColour (juce::TextButton::buttonColourId, theme::play.darker (0.5f));
     for (auto* t : { &taskTempo, &taskKey, &taskChords, &taskSections, &taskStems, &taskMidi,
-                     &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems })
+                     &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems, &useMidi })
     {
         t->setToggleState (true, juce::dontSendNotification);
         t->setWantsKeyboardFocus (false);
         addAndMakeVisible (*t);
     }
     taskMidi.setToggleState (false, juce::dontSendNotification);
-    taskMidi.setEnabled (false);
-    taskMidi.setTooltip ("Comes with a later phase (docs/09)");
+    taskMidi.setTooltip ("Convert the song's stem tracks to MIDI (bass / vocals: one note at a time, piano / guitar / other: "
+                         "chords, drums: kick / snare / hi-hat). The parts are added as muted MIDI tracks without an instrument.");
     taskStems.setToggleState (false, juce::dontSendNotification);   // minutes on a CPU: only when asked for
     taskStems.setTooltip (stemsTip);
     for (auto* e : { &bpmEditor, &gridEditor })
@@ -171,6 +171,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
         if (taskChords.getToggleState()) tasks.add ("chords");
         if (taskSections.getToggleState()) tasks.add ("structure");
         if (taskStems.getToggleState() && taskStems.isEnabled()) tasks.add ("stems");
+        if (taskMidi.getToggleState() && taskMidi.isEnabled()) tasks.add ("midi");
         if (tasks.isEmpty())
             return setMessage ("Choose at least one analysis.", true);
         const auto err = state.startAnalysis (sourceBox.getSelectedId() - 1, tasks);
@@ -191,7 +192,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
 
     state.addChangeListener (this);
     startTimerHz (4);
-    setSize (1000, 760);
+    setSize (1000, 800);
     refresh();
     probeAnalyzer();
 }
@@ -250,6 +251,8 @@ void AnalysisPanel::probeAnalyzer()
                     safe->stemsAvailable = st.isObject() && (bool) st["available"];
                     safe->stemsReason = ! st.isObject() ? juce::String ("this analyzer version has no stem separation")
                                                         : st["reason"].toString();
+                    safe->pitchedMidi = v["midi"].isObject() && (bool) v["midi"]["pitched"];
+                    safe->analyzerInfo << (safe->pitchedMidi ? ", MIDI: Basic Pitch" : ", MIDI: drums only (no onnxruntime)");
                     safe->analyzerInfo << (safe->stemsAvailable ? ", stems: Demucs " + st["demucs"].toString()
                                                                       + (st["repo"].isString() ? " (model included)" : " (model downloads on first use)")
                                                                 : ", stems: not available");
@@ -320,6 +323,7 @@ void AnalysisPanel::loadDraft (const AnalysisResult& r)
     useChords.setToggleState (r.hasChords, juce::dontSendNotification);
     useCues.setToggleState (r.hasSections, juce::dontSendNotification);
     useStems.setToggleState (r.hasStems, juce::dontSendNotification);
+    useMidi.setToggleState (r.hasMidi, juce::dontSendNotification);
 }
 
 void AnalysisPanel::refresh()
@@ -349,12 +353,13 @@ void AnalysisPanel::refresh()
     analyzeButton.setEnabled (! busy && ! locked && song != nullptr);
     cancelButton.setEnabled (busy);
     taskStems.setEnabled (stemsAvailable && ! busy);
+    taskMidi.setEnabled (! busy);
     taskStems.setTooltip (stemsAvailable || ! analyzerChecked ? juce::String (stemsTip) : "Stems are not available: " + stemsReason);
     analyzerButton.setEnabled (! busy && ! state.isLiveMode());
     const bool hasResult = r != nullptr;
     for (auto* c : std::initializer_list<juce::Component*> { &applyButton, &halfButton, &doubleButton, &earlierButton, &laterButton,
                                                              &bpmEditor, &gridEditor, &timeSigBox, &keyBox, &useTempo, &useTimeSig,
-                                                             &useKey, &useChords, &useCues, &useStems, &sectionList })
+                                                             &useKey, &useChords, &useCues, &useStems, &useMidi, &sectionList })
         c->setEnabled (hasResult && ! locked && ! busy);
     undoButton.setEnabled (state.canUndoAnalysisApply() && ! locked);
     halfButton.setToggleState (tempoScale < 0.75, juce::dontSendNotification);
@@ -384,6 +389,7 @@ void AnalysisPanel::apply()
     a.withChords = useChords.getToggleState();
     a.withCues = useCues.getToggleState();
     a.withStems = useStems.getToggleState();
+    a.withMidi = useMidi.getToggleState();
     a.tempoScale = tempoScale;
     const double typed = bpmEditor.getText().getDoubleValue();
     if (r->hasTempo && typed >= 20.0 && std::abs (typed - r->bpm * tempoScale) > 0.005)
@@ -403,7 +409,17 @@ void AnalysisPanel::apply()
         if (d.include && d.s.label.trim().isNotEmpty())
             a.sections.push_back (d.s);
     const auto err = state.applyAnalysis (a);
-    setMessage (err.isEmpty() ? "Applied to the song. AI cues and stems are marked (stems start muted); UNDO APPLY restores the song." : err, err.isNotEmpty());
+    setMessage (err.isEmpty() ? "Applied to the song. AI cues, stems and MIDI are marked (new tracks start muted); UNDO APPLY restores the song." : err, err.isNotEmpty());
+}
+
+void AnalysisPanel::preselectMidi()
+{
+    midiRequested = true;
+    taskMidi.setToggleState (true, juce::dontSendNotification);
+    const auto* song = state.getCurrentSong();
+    if (song != nullptr && std::none_of (song->tracks.begin(), song->tracks.end(), [] (const TrackInfo& t) { return t.isStem(); }))
+        setMessage ("Audio to MIDI works on stem tracks: tick Stems too, or separate the stems first.", false);
+    refresh();
 }
 
 void AnalysisPanel::preselectStems()
@@ -418,7 +434,7 @@ void AnalysisPanel::preselectStems()
 
 juce::String AnalysisPanel::applyAll()
 {
-    for (auto* t : { &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems })
+    for (auto* t : { &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems, &useMidi })
         t->setToggleState (true, juce::dontSendNotification);
     apply();
     return messageIsError ? message : juce::String();
@@ -557,6 +573,18 @@ void AnalysisPanel::paint (juce::Graphics& g)
                                      + (r->stemWarnings.isEmpty() ? juce::String() : "  ! " + r->stemWarnings.joinIntoString ("; ")),
                   r->stemConfidence);
         }
+        if (r->hasMidi)
+        {
+            juce::StringArray parts;
+            double sum = 0.0;
+            int n = 0;
+            for (const auto& m : r->midi)
+            {
+                parts.add (m.name + " " + juce::String ((int) m.notes.size()));
+                if (! m.notes.empty()) { sum += std::max (0.0, m.confidence); ++n; }
+            }
+            line (midiInfoArea, parts.joinIntoString (", ") + " notes -> muted MIDI tracks", n > 0 ? sum / n : -1.0);
+        }
         if (! r->errors.isEmpty())
         {
             g.setColour (theme::warn);
@@ -676,6 +704,11 @@ void AnalysisPanel::resized()
         auto x = row();
         useStems.setBounds (x.removeFromLeft (110));
         stemsInfoArea = x;
+    }
+    {
+        auto x = row();
+        useMidi.setBounds (x.removeFromLeft (110));
+        midiInfoArea = x;
     }
     errorsArea = left.removeFromTop (40);
     sectionsHeader = r.removeFromTop (22);

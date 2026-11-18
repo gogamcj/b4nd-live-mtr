@@ -258,7 +258,10 @@ public:
                 std::printf ("    track \"%s\" %s %.1f dB%s%s%s%s\n", t.name.toRawUTF8(), nameForTrackKind (t.kind).toRawUTF8(),
                              (double) t.volumeDb, t.mute ? " MUTE" : "", t.solo ? " SOLO" : "",
                              t.mediaPath.isNotEmpty() ? (" media=" + juce::File (t.mediaPath).getFileName()).toRawUTF8() : "",
-                             ! t.isStem() ? ""
+                             t.aiPart.isNotEmpty() ? (" AI MIDI " + t.aiPart + " notes=" + juce::String (t.midiNotes) + " ai="
+                                                      + juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
+                                                      + (t.aiWarning.isNotEmpty() ? " WARNING: " + t.aiWarning : juce::String())).toRawUTF8()
+                             : ! t.isStem() ? ""
                                           : (" STEM of " + juce::File (t.stemSourcePath).getFileName() + " ai="
                                              + juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
                                              + (t.aiWarning.isNotEmpty() ? " WARNING: " + t.aiWarning : juce::String())).toRawUTF8());
@@ -449,6 +452,13 @@ private:
                              "%d chords, %d sections\n", r->bpm, r->bpmConfidence * 100.0, r->gridStartSec, r->numerator,
                              r->denominator, r->timeSigConfidence * 100.0, (int) r->tempoMap.size(), r->key.toRawUTF8(),
                              r->keyConfidence * 100.0, (int) r->chords.size(), (int) r->sections.size());
+                if (r->hasMidi)
+                {
+                    juce::String list;
+                    for (const auto& m : r->midi)
+                        list << m.name << " " << (int) m.notes.size() << " notes (" << juce::roundToInt (m.confidence * 100.0) << "%), ";
+                    std::printf ("analysis midi: %s\n", list.toRawUTF8());
+                }
                 if (r->hasStems)
                 {
                     juce::String list;

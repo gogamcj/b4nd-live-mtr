@@ -52,8 +52,14 @@ SidePanel::SidePanel (AppState& s) : state (s)
         if (auto* p = getAnalysisWindowContent())
             p->preselectStems();
     };
-    aiButtons[5]->setEnabled (false);   // Phase 10
-    aiButtons[5]->setTooltip ("Arrives in Phase 10 (Basic Pitch / CREPE)");
+    aiButtons[5]->setTooltip ("Convert the stem tracks to MIDI (Basic Pitch; drums: kick / snare / hi-hat). "
+                              "The parts are added as muted MIDI tracks.");
+    aiButtons[5]->onClick = [this]
+    {
+        showAnalysisWindow (state);
+        if (auto* p = getAnalysisWindowContent())
+            p->preselectMidi();
+    };
 
     newButton.onClick  = [this] { projectCommands::newProject (state); };
     openButton.onClick = [this] { projectCommands::openProject (state); };
@@ -91,7 +97,7 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
         repaint();
     }
     const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
-    for (int i = 0; i <= 4 && i < aiButtons.size(); ++i)
+    for (int i = 0; i <= 5 && i < aiButtons.size(); ++i)
         aiButtons[i]->setEnabled (! state.isLiveMode());
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);

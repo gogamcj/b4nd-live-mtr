@@ -42,8 +42,9 @@ jobs:
       - name: Analyzer (Python) unit tests
         shell: pwsh
         run: |
-          python -m pip install --quiet numpy scipy soundfile pyinstaller
+          python -m pip install --quiet numpy scipy soundfile pyinstaller onnxruntime
           cd analyzer
+          $env:B4ND_REQUIRE_ONNX = "1"
           python -m unittest discover -s tests -t . -v
 
       - name: Configure
@@ -76,12 +77,14 @@ jobs:
           $dir = "build/src/app/B4ND_LIVE_MTR_artefacts/Release"
           pyinstaller --noconfirm --onedir --name b4nd-analyzer --distpath "$dir" --workpath build/pyinstaller `
             --specpath build/pyinstaller --paths analyzer --exclude-module tkinter `
-            --collect-submodules demucs --collect-data demucs --hidden-import yaml analyzer/pyinstaller_entry.py
+            --collect-submodules demucs --collect-data demucs --hidden-import yaml --collect-binaries onnxruntime `
+            --add-data "$PWD/analyzer/b4nd_analyzer/models;b4nd_analyzer/models" analyzer/pyinstaller_entry.py
           # The model ships with the analyzer: the band PC separates without internet.
           python analyzer/tools/fetch_demucs_model.py "$dir/b4nd-analyzer/models"
           & "$dir/b4nd-analyzer/b4nd-analyzer.exe" info | Tee-Object -Variable info
           if ($LASTEXITCODE -ne 0) { throw "standalone analyzer does not run" }
           if (-not ("$info" -match '"available": true')) { throw "stems not available in the standalone analyzer" }
+          if (-not ("$info" -match '"pitched": true')) { throw "Basic Pitch not available in the standalone analyzer" }
 
       - name: AI analysis end to end (standalone analyzer, apply, save)
         shell: pwsh
@@ -119,6 +122,23 @@ jobs:
           $stems | ForEach-Object { "$($_.FullName) $($_.Length)" }
           if ($stems.Count -lt 3) { throw "stem files missing" }
           if (Test-Path "no-torch-cache/hub/checkpoints") { throw "the model was downloaded instead of the bundled one used" }
+
+      - name: Audio to MIDI end to end (standalone analyzer, stems -> MIDI tracks)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-midi.png','--analysis',
+                 '--project', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--analyze-tasks', 'midi', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "MIDI run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy|MIDI" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*MIDI: .*bass [1-9]" -Quiet)) { throw "no bass notes" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to .*MIDI parts \(" -Quiet)) { throw "MIDI not applied" }
+          $mids = Get-ChildItem -Recurse "ai-test.b4nd/midi" -Filter *.mid
+          $mids | ForEach-Object { "$($_.FullName) $($_.Length)" }
+          if ($mids.Count -lt 3) { throw "MIDI files missing" }
 
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
@@ -217,9 +237,9 @@ jobs:
 
       - name: Analyzer (Python) unit tests
         run: |
-          # numpy + scipy only: the WAV fallback reader (no soundfile) is what this job checks.
-          python -m pip install --quiet numpy scipy
-          cd analyzer && python -m unittest discover -s tests -t . -v
+          # numpy + scipy (+ onnxruntime for Basic Pitch): the WAV fallback reader (no soundfile) is what this job checks.
+          python -m pip install --quiet numpy scipy onnxruntime
+          cd analyzer && B4ND_REQUIRE_ONNX=1 python -m unittest discover -s tests -t . -v
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -285,6 +305,23 @@ jobs:
           grep -Eq 'track "Other \(stem\)" AUDIO 0.0 dB MUTE media=other.wav STEM of ai-song.wav' stems-reopen.txt
           if grep -q 'track "Vocals (stem)"' stems-reopen.txt; then echo "an empty stem got a track"; exit 1; fi
           grep -q "missing media: 0" stems-reopen.txt
+
+      - name: Audio to MIDI end to end (Demucs stems -> Basic Pitch / drums -> MIDI tracks, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi.png --analysis --project ai-test.b4nd \
+            --analyze --analyze-tasks midi --apply-analysis | tee midi.txt
+          grep -q "analysis: done" midi.txt
+          grep -Eq "analysis midi: .*bass [1-9][0-9]* notes" midi.txt
+          grep -Eq "analysis midi: .*drums [1-9][0-9]* notes" midi.txt
+          grep -q "analysis apply: ok" midi.txt
+          ls -la ai-test.b4nd/midi/*/*
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-midi-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee midi-reopen.txt
+          grep -Eq 'track "Bass \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI bass notes=[1-9][0-9]* ai=[0-9]+%' midi-reopen.txt
+          grep -Eq 'track "Drums \(MIDI\)" VSTi 0.0 dB MUTE AI MIDI drums notes=[1-9][0-9]*' midi-reopen.txt
+          grep -q 'track "ai-song" AUDIO 0.0 dB media=ai-song.wav' midi-reopen.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |

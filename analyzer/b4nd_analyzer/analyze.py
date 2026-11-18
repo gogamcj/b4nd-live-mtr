@@ -11,8 +11,8 @@ import scipy
 from . import __version__, audio, harmony, structure, tempo
 
 ANALYSIS_TASKS = ("tempo", "key", "chords", "structure")
-TASKS = ANALYSIS_TASKS + ("stems",)
-DEFERRED = ("midi",)   # Phase 10
+TASKS = ANALYSIS_TASKS + ("stems", "midi")
+DEFERRED = ()
 
 
 def grid_beats(t: tempo.TempoResult, duration: float) -> np.ndarray:
@@ -34,7 +34,7 @@ def grid_beats(t: tempo.TempoResult, duration: float) -> np.ndarray:
 
 
 def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None, out_dir=None, stems_input=None,
-        separator=None):
+        separator=None, midi_inputs=None):
     """Returns (result dict, list of error strings). Never raises for a failed task.
     Stems are written to out_dir/stems/ from stems_input (the stereo source; default input_path)."""
     result = {"input": input_path, "tasks": list(tasks), "errors": [],
@@ -43,10 +43,12 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None,
     errors = []
     unknown = [t for t in tasks if t not in TASKS]
     for t in unknown:
-        errors.append(f"{t}: not available in this analyzer version" + (" (Phase 10)" if t in DEFERRED else ""))
+        errors.append(f"{t}: not available in this analyzer version")
 
     if "stems" in tasks:
         _run_stems(result, errors, stems_input or input_path, out_dir, emit, log, separator)
+    if "midi" in tasks:
+        _run_midi(result, errors, midi_inputs, out_dir, emit, log)
     if not any(x in tasks for x in ANALYSIS_TASKS):
         result["errors"] = errors
         return result, errors
@@ -151,4 +153,28 @@ def _run_stems(result, errors, path, out_dir, emit, log, separator):
         emit("stems", 1.0)
     except Exception as e:  # noqa: BLE001 - reported, the other tasks still run
         errors.append(f"stems: {e}")
+        log(traceback.format_exc())
+
+
+def _run_midi(result, errors, inputs, out_dir, emit, log):
+    """Audio to MIDI of the given files (the song's stem tracks), or of the stems separated in
+    this same run."""
+    import os
+
+    from . import transcribe
+
+    try:
+        if not inputs and "stems" in result and out_dir:
+            inputs = [{"name": f["name"], "path": os.path.join(out_dir, f["path"]), "id": "stems/" + f["name"]}
+                      for f in result["stems"]["files"] if not f.get("empty")]
+        if not inputs:
+            raise ValueError("nothing to convert (separate stems first)")
+        emit("midi", 0.0)
+        r, errs = transcribe.run_midi(inputs, progress=lambda p: emit("midi", p), log=log)
+        result["midi"] = r
+        result["versions"].update(r.get("versions", {}))
+        errors.extend(errs)
+        emit("midi", 1.0)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"midi: {e}")
         log(traceback.format_exc())

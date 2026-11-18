@@ -189,9 +189,9 @@ void TimelineView::paint (juce::Graphics& g)
         auto badge = hr.removeFromLeft (kindW).withHeight (14).translated (0, 2);
         g.drawRoundedRectangle (badge.toFloat(), 3.0f, 1.0f);
         g.drawText (kind, badge, juce::Justification::centred);
-        if (t.isStem())
+        if (t.isStem() || t.aiPart.isNotEmpty())
         {
-            // AI stem: violet badge with its confidence, "!" when it needs a listen (docs/07).
+            // AI stem / AI MIDI: violet badge with its confidence, "!" when it needs a listen (docs/07).
             const juce::String ai = "AI " + (t.aiConfidence >= 0.0f ? juce::String (juce::roundToInt (t.aiConfidence * 100.0f)) + "%"
                                                                     : juce::String());
             const int aiW = (int) juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), ai) + 10;
@@ -305,7 +305,7 @@ void TimelineView::paint (juce::Graphics& g)
                 }
             }
 
-            if (isExtMidi && t.midiEvents != nullptr && box.getWidth() > 4.0f)
+            if ((isExtMidi || t.kind == TrackKind::MidiVsti) && t.midiEvents != nullptr && box.getWidth() > 4.0f)
             {
                 // Note blocks: pitch range of the file mapped to the lane height.
                 int lo = 127, hi = 0;

@@ -64,8 +64,14 @@ def cmd_run(args) -> int:
     stems_input = job.get("stemsInput") or None
     if stems_input and not os.path.isabs(stems_input):
         stems_input = os.path.join(base, stems_input)
+    midi_inputs = []
+    for m in job.get("midiInputs") or []:
+        if isinstance(m, dict) and m.get("path"):
+            path = m["path"] if os.path.isabs(m["path"]) else os.path.join(base, m["path"])
+            midi_inputs.append({"name": str(m.get("name", "other")), "path": path, "id": str(m.get("id", ""))})
     started = time.time()
-    if not inp or not os.path.isfile(inp):
+    needs_input = any(t in tasks for t in ANALYSIS_TASKS + ("stems",))
+    if needs_input and (not inp or not os.path.isfile(inp)):
         msg = f"input not found: {inp}"
         _emit({"error": msg})
         _write_result(out_dir, {"input": inp, "tasks": tasks, "errors": [msg], "status": "failed"})
@@ -79,7 +85,7 @@ def cmd_run(args) -> int:
 
     try:
         result, errors = run(inp, tasks, emit, log, out_dir=out_dir, stems_input=stems_input,
-                             separator=_test_separator())
+                             separator=_test_separator(), midi_inputs=midi_inputs)
     except Exception as e:  # noqa: BLE001 - unreadable audio etc.
         msg = f"analysis failed: {e}"
         _emit({"error": msg})
@@ -90,6 +96,7 @@ def cmd_run(args) -> int:
     result["status"] = "partial" if errors else "done"
     result["elapsedSec"] = round(time.time() - started, 2)
     result["device"] = result.get("stems", {}).get("versions", {}).get("device", "cpu")
+
     _write_result(out_dir, result)
     _emit({"done": True, "status": result["status"], "errors": errors})
     return 3 if errors else 0
@@ -117,7 +124,10 @@ def cmd_info(_args) -> int:
         sf = None
     from .stems import demucs_info
 
+    from .transcribe import onnx_available
+
     _emit({"b4nd_analyzer": __version__, "tasks": list(TASKS), "deferred": list(DEFERRED), "stems": demucs_info(),
+           "midi": {"pitched": onnx_available(), "drums": True},
            "numpy": numpy.__version__, "scipy": scipy.__version__, "soundfile": sf,
            "python": sys.version.split()[0]})
     return 0

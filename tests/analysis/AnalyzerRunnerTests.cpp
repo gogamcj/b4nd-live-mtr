@@ -342,3 +342,72 @@ TEST_CASE ("Analysis: a stem run writes stereo input, gets the stems back and cl
     CHECK (! dir.getChildFile ("stems_input.wav").exists());   // removed after the run
     CHECK (! dir.getChildFile ("input.wav").exists());
 }
+
+TEST_CASE ("Analysis: MIDI parts are parsed, and impossible notes are dropped")
+{
+    const auto r = AnalysisResult::parse (R"({"status":"done","errors":[],
+        "midi":{"tracks":[
+          {"name":"bass","sourceId":"track-9","program":33,"drums":false,"confidence":0.71,
+           "notes":[[0.5,0.9,40,90,0.8],[1.0,0.9,40,90,0.8],[1.0,1.4,200,90,0.8],[1.5,1.9,41,0,0.5],[2.0,2.4,43,100,0.6],"x",[3.0]]},
+          {"name":"drums","sourceId":"stems/drums","drums":true,"confidence":0.9,"notes":[[0.1,0.16,36,110,0.9]]},
+          {"name":"../evil","notes":[]}]}})");
+    CHECK (r.valid);
+    CHECK (r.hasMidi);
+    CHECK (r.midi.size() == 2);
+    if (r.midi.size() == 2)
+    {
+        CHECK (r.midi[0].notes.size() == 2);   // backwards, pitch 200, velocity 0 and junk are dropped
+        CHECK (r.midi[0].sourceId == "track-9");
+        CHECK (r.midi[0].program == 33);
+        CHECK (r.midi[1].drums);
+        CHECK (r.midi[1].sourceId == "stems/drums");
+    }
+}
+
+TEST_CASE ("Analysis: an audio-to-MIDI run needs no track audio, only its input files")
+{
+    if (! analyzerAvailable())
+    {
+        CHECK (! required());
+        return;
+    }
+    TempDir t;
+    // A drum stem (clicks at 120 BPM, a low accent every 4th): drums need no model, so this runs everywhere.
+    auto drums = clickTrack (44100.0, 6.0, 120.0, 0.5);
+    const auto wavFile = t.dir.getChildFile ("drums.wav");
+    {
+        juce::WavAudioFormat fmt;
+        std::unique_ptr<juce::OutputStream> os (wavFile.createOutputStream().release());
+        auto w = fmt.createWriterFor (os, juce::AudioFormatWriterOptions{}.withSampleRate (44100.0).withNumChannels (2).withBitsPerSample (16));
+        juce::AudioBuffer<float> b (2, (int) drums->numFrames);
+        for (int c = 0; c < 2; ++c)
+            b.copyFrom (c, 0, drums->channels[(size_t) c].data(), (int) drums->numFrames);
+        CHECK (w != nullptr && w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples()));
+    }
+    AnalyzerRunner r;
+    AnalyzerRunner::Job job;
+    job.songId = "song-1";
+    job.outDir = t.dir.getChildFile ("analysis/song-1");
+    job.tasks = { "midi" };
+    CHECK (r.start (job).isNotEmpty());   // nothing to convert
+    job.midiInputs.push_back ({ "drums", wavFile.getFullPathName(), "track-drums" });
+    CHECK (r.start (job).isEmpty());
+    const auto st = waitDone (r, 60.0);
+    CHECK (st.state == AnalyzerRunner::State::Done);
+    if (st.state != AnalyzerRunner::State::Done)
+        std::printf ("  state %d: %s\n", (int) st.state, st.message.toRawUTF8());
+    const auto res = r.getResult();
+    CHECK (res.hasMidi);
+    if (res.hasMidi)
+    {
+        CHECK (res.midi[0].drums);
+        CHECK (res.midi[0].sourceId == "track-drums");
+        int kicks = 0;
+        for (const auto& n : res.midi[0].notes)
+            if (n.pitch == 36) ++kicks;
+        CHECK (res.midi[0].notes.size() >= 8);   // 11 clicks from 0.5 s at 120 BPM
+        CHECK (kicks >= 1);                       // a low accent (the drum classifier itself is tested in Python)
+        std::printf ("  drums: %d notes, %d kicks\n", (int) res.midi[0].notes.size(), kicks);
+    }
+    CHECK (! job.outDir.getChildFile ("input.wav").exists());   // no track audio was written
+}

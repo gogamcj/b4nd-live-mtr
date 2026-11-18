@@ -133,8 +133,8 @@ void ChannelStrip::paint (juce::Graphics& g)
         const auto& t = song->tracks[(size_t) track];
         name = t.name;
         route = state.getTrackDestination (track);
-        if (t.isStem())
-            route = (t.aiWarning.isNotEmpty() ? "! AI STEM\n" : "AI STEM\n") + route;
+        if (t.isStem() || t.aiPart.isNotEmpty())
+            route = (t.aiWarning.isNotEmpty() ? "! " : "") + juce::String (t.isStem() ? "AI STEM\n" : "AI MIDI\n") + route;
         c = colourForTrackKind (t.kind);
     }
 

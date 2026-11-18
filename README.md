@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 9 (AI 스템 분리)
+## 현재 상태: Phase 10 (AI 스템 분리, Audio to MIDI)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -57,6 +57,11 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
   - APPLY TO SONG을 누르면 스템이 음소거된 트랙으로 추가됩니다. 원본 트랙은 그대로 있고, 필요한 스템만 켜서 쓰면 됩니다.
   - 스템 트랙에는 보라색 "AI 신뢰도" 표시가 붙고, 확인이 필요하면 노란 "!"가 붙습니다 (Guitar/Piano는 항상 귀로 확인).
   - Windows 빌드의 분석기에는 Demucs와 모델 파일이 들어 있어 인터넷 없이 동작합니다.
+- Audio to MIDI: 좌측 Audio to MIDI를 누르거나 분석 창에서 "Audio to MIDI"를 켭니다. 곡의 스템 트랙을 MIDI로 바꿉니다.
+  - 베이스·보컬은 한 번에 한 음, 피아노·기타는 화음, 드럼은 킥/스네어/하이햇으로 변환합니다 (Basic Pitch, 모델 포함).
+  - APPLY TO SONG을 누르면 음소거된 MIDI 트랙(악기 없음)으로 추가됩니다. VSTi를 고르면 연주합니다.
+
+![MIDI로 변환한 트랙](docs/images/phase10-midi.png)
 
 ![스템 트랙](docs/images/phase9-stems.png)
 
