@@ -1171,6 +1171,7 @@ void AppState::rebuildPlan()
                 mt.events.erase (std::remove_if (mt.events.begin(), mt.events.end(),
                                                  [] (const MidiSampleEvent& e) { return e.msg.isController (64); }),
                                  mt.events.end());
+            mt.chase = ChaseIndex::build (mt.events);
             plan->midiTracks.push_back (std::move (mt));
             continue;
         }
@@ -1184,6 +1185,7 @@ void AppState::rebuildPlan()
             it.instrument = t.instrument;
             const int ch = juce::jlimit (1, 16, t.midiChannel > 0 ? t.midiChannel : 1) - 1;
             it.events = toSampleEvents (*t.midiEvents, song->tempo, sr, ch);
+            it.chase = ChaseIndex::build (it.events);
             plan->instrumentTracks.push_back (std::move (it));
             continue;
         }

@@ -6,6 +6,7 @@
 
 #include "core/Midi.h"
 #include "core/OutputRouting.h"
+#include "core/MidiChase.h"
 #include "core/TempoMap.h"
 
 namespace b4nd
@@ -52,6 +53,7 @@ struct MidiTrackRuntime
     int port = 0;                          // MIDI output port index (see AudioEngine::maxMidiPorts)
     double sendEarlyMs = 0.0;              // module latency + track offset: positive = send earlier
     std::vector<MidiSampleEvent> events;   // sorted by sample
+    ChaseIndex chase;                      // ChaseIndex::build (events): state after a locate
 };
 
 /** A MIDI port that receives MIDI Clock (24 PPQN) and transport messages (docs/04 §5). */
@@ -83,7 +85,8 @@ struct InstrumentTrackRuntime
     int slot = 0;                          // engine track parameter slot (volume / pan / mute / solo)
     BusKind bus = BusKind::Main;
     std::shared_ptr<InstrumentProcessor> instrument;
-    std::vector<MidiSampleEvent> events;   // sorted by sample
+    std::vector<MidiSampleEvent> events;
+    ChaseIndex chase;   // sorted by sample
 };
 
 struct ClickSound

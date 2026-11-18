@@ -475,6 +475,9 @@ void AudioEngine::releaseMidiNotes() noexcept
     }
     stopMidiClock();
     releaseInstrumentNotes();
+    // Whatever plays next (resume, new position) starts with a chase of the state there.
+    midiExpectedPos = -1;
+    instExpectedPos = -1;
 }
 
 void AudioEngine::releaseInstrumentNotes() noexcept
@@ -535,6 +538,16 @@ void AudioEngine::renderInstruments (int n) noexcept
         auto& notes = instNotes[ti];
 
         int count = 0;
+        if (reseek && pos > 0 && fadeAction == FadeAction::None)   // never while stopping
+            chaser.chase (t.chase, pos, ! silenced, (std::int64_t) (chaseMinRemainingSec * sampleRate), [&] (const MidiBytes& m)
+            {
+                if (count >= maxInstrumentEvents)
+                    return;
+                instMsgs[(size_t) count] = m;
+                instOffsets[(size_t) count] = 0;
+                notes.observe (m);
+                ++count;
+            });
         while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
         {
             const auto& e = t.events[cursor++];
@@ -620,6 +633,15 @@ void AudioEngine::renderMidi (int n) noexcept
         // Lookahead: a module slower than the output latency needs its notes before this block is
         // even due, so events up to (early - latency) ahead are queued now (docs/04 §4).
         const auto aheadSamples = early > latency ? (std::int64_t) ((double) (early - latency) / nsPerSample) + 1 : 0;
+
+        if (reseek && pos > 0 && fadeAction == FadeAction::None)   // never while stopping
+        {
+            // Locate chase: program / controllers as they were at pos, and held long notes again
+            // (not on a muted track). Sent at the start of this block.
+            const auto due = std::max (chunkStartNs, chunkStartNs + latency - early);
+            chaser.chase (t.chase, pos, ! silenced, (std::int64_t) (chaseMinRemainingSec * sampleRate),
+                          [&] (const MidiBytes& m) { pushMidi (due, t.port, m); });
+        }
 
         while (cursor < t.events.size() && t.events[cursor].sample < pos + n + aheadSamples)
         {

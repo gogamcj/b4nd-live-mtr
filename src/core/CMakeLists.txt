@@ -4,7 +4,8 @@ add_library(b4nd_core STATIC
     TimeFormat.cpp
     XrunDetector.cpp
     Midi.cpp
-    SampleClock.cpp)
+    SampleClock.cpp
+    MidiChase.cpp)
 
 target_include_directories(b4nd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_compile_features(b4nd_core PUBLIC cxx_std_17)

@@ -94,6 +94,8 @@ public:
     static constexpr int numBusKinds = 6;   // BusKind values
     static constexpr int maxMidiPorts = 16;
     static constexpr int midiQueueSize = 16384;
+    /** Held notes are restarted after a locate only if at least this much of them is left. */
+    static constexpr double chaseMinRemainingSec = 0.25;
 
     /** The clock used for MidiOutEvent::dueNs (std::chrono::steady_clock). */
     static std::int64_t clockNs() noexcept;
@@ -271,6 +273,7 @@ private:
     std::int64_t clockNextTick = -1;      // next 24-PPQN tick to send; -1 = (re)start from the position
     std::int64_t clockExpectedPos = -1;
     bool clockRunning = false, clockNeedsStart = false;
+    MidiChaser chaser;                    // locate chase scratch (audio thread only)
     std::int64_t chunkStartNs = 0;
     std::atomic<std::int64_t> outputLatencyNs { 0 };
     SampleClock sampleClock;                         // audio thread only

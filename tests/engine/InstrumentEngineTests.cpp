@@ -104,6 +104,7 @@ std::unique_ptr<PlaybackPlan> planWith (std::shared_ptr<FakeInstrument> inst, st
     t.bus = bus;
     t.instrument = std::move (inst);
     t.events = std::move (ev);
+    t.chase = ChaseIndex::build (t.events);
     p->instrumentTracks.push_back (std::move (t));
     return p;
 }
@@ -148,9 +149,11 @@ TEST_CASE ("Instruments: STOP, PAUSE, LOCATE, EMERGENCY and song change release 
         CHECK (r.engine.getActiveInstrumentNotes (0) == 2);
         r.cmd (st, 96000);
         r.run (10);
-        CHECK (inst->sounding == 0);
         CHECK (inst->countIf (&MidiBytes::isNoteOff) == 2);
-        CHECK (r.engine.getActiveInstrumentNotes (0) == 0);
+        // After a locate it plays on: the two held notes are chased at the new position.
+        const int expected = st == EngineCommand::Type::Locate ? 2 : 0;
+        CHECK (inst->sounding == expected);
+        CHECK (r.engine.getActiveInstrumentNotes (0) == expected);
     }
 
     Rig s;
@@ -231,4 +234,20 @@ TEST_CASE ("Instruments: dense MIDI and mixing never allocate on the audio threa
     r.run (20);
     CHECK (guard.count() == 0);
     CHECK (r.engine.getInstrumentEventsDropped() == 0);
+}
+
+TEST_CASE ("Instruments: locate chase gives the instrument its program and held notes at the jump")
+{
+    Rig r;
+    auto inst = std::make_shared<FakeInstrument>();
+    r.engine.setPlan (planWith (inst, { { 0, MidiBytes::make (0xc0, 5) }, on (100, 48), off (240000, 48), on (1000, 60), off (2000, 60) }), sr);
+    r.cmd (EngineCommand::Type::Locate, 96000);
+    r.cmd (EngineCommand::Type::Play);
+    const float peak = r.run (4);
+    CHECK (inst->got.size() >= 2);
+    if (inst->got.size() < 2) return;
+    CHECK (inst->got[0].msg.data[0] == 0xc0 && inst->got[0].offset == 0);
+    CHECK (inst->got[1].msg.isNoteOn() && inst->got[1].msg.data[1] == 48 && inst->got[1].offset == 0);
+    CHECK (inst->countIf (&MidiBytes::isNoteOn) == 1);
+    CHECK (peak > 0.05f);   // the pad sounds right away
 }

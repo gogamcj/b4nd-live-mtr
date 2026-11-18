@@ -76,6 +76,7 @@ std::unique_ptr<PlaybackPlan> planWithNotes (std::vector<MidiSampleEvent> ev, in
     t.port = port;
     t.sendEarlyMs = earlyMs;
     t.events = std::move (ev);
+    t.chase = ChaseIndex::build (t.events);
     p->midiTracks.push_back (std::move (t));
     return p;
 }
@@ -146,7 +147,18 @@ TEST_CASE ("MIDI engine: STOP, PAUSE, LOCATE and EMERGENCY release every soundin
         CHECK (offs == 2);
         CHECK (allOff == 2);       // both used channels
         CHECK (sustainOff == 2);
-        CHECK (r.engine.getActiveMidiNotes (1) == 0);
+        if (st == EngineCommand::Type::Locate)
+        {
+            // Playing on at the new position: the two held notes are chased (started again there).
+            int ons = 0;
+            for (auto& e : r.got) ons += e.msg.isNoteOn() ? 1 : 0;
+            CHECK (ons == 2);
+            CHECK (r.engine.getActiveMidiNotes (1) == 2);
+        }
+        else
+        {
+            CHECK (r.engine.getActiveMidiNotes (1) == 0);
+        }
     }
 }
 
@@ -451,4 +463,39 @@ TEST_CASE ("MIDI clock: follows a tempo change and the offset sends it earlier")
     // Clock 96 = beat 4 at 2.0 s: due = start + 2.0 s + latency - offset
     const double ideal = epoch + (double) playStartSample * 1.0e9 / sr + 2.0e9 + 10.0e6 - 4.0e6;
     CHECK (std::abs ((double) ticks[96].dueNs - ideal) < 0.1e6);
+}
+
+TEST_CASE ("MIDI engine: locate chase sends program / controllers and restarts held notes, not on muted tracks")
+{
+    for (int muted = 0; muted < 2; ++muted)
+    {
+        Rig r;
+        std::vector<MidiSampleEvent> ev {
+            { 0, MidiBytes::make (0xb0, 0, 87) }, { 0, MidiBytes::make (0xc0, 41) },   // bank + program
+            { 10, MidiBytes::make (0xb0, 7, 90) },
+            on (100, 48), off (240000, 48),     // pad held to 5 s
+            on (1000, 60), off (2000, 60),      // short, over
+            on (96000, 64), off (100000, 64),
+        };
+        r.engine.setPlan (planWithNotes (ev), sr);
+        r.engine.setTrackMute (0, muted == 1);
+        r.cmd (EngineCommand::Type::Locate, 48000);   // 1 s, stopped
+        r.cmd (EngineCommand::Type::Play);
+        r.run (2);
+        const auto& g = r.got;
+        CHECK (g.size() >= 3);
+        if (g.size() < 3) continue;
+        CHECK (g[0].msg.data[0] == 0xb0 && g[0].msg.data[1] == 0 && g[0].msg.data[2] == 87);
+        CHECK (g[1].msg.data[0] == 0xc0 && g[1].msg.data[1] == 41);
+        CHECK (g[2].msg.data[0] == 0xb0 && g[2].msg.data[1] == 7);
+        int ons = 0;
+        for (const auto& e : g) ons += e.msg.isNoteOn() ? 1 : 0;
+        CHECK (ons == (muted ? 0 : 1));   // only the pad
+        // and the pad's own note-off still arrives at 5 s (unmuted)
+        r.got.clear();
+        r.run (900);
+        int offs48 = 0;
+        for (const auto& e : r.got) offs48 += (e.msg.isNoteOff() && e.msg.data[1] == 48) ? 1 : 0;
+        CHECK (offs48 == (muted ? 0 : 1));
+    }
 }
