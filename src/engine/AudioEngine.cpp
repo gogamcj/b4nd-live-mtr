@@ -47,6 +47,9 @@ void AudioEngine::prepare (double sr, int maxBlockSize, int numOutputs, int numI
             ch.assign ((size_t) maxBlock, 0.0f);
     smoothL.fill (0.0f);
     smoothR.fill (0.0f);
+    instL.assign ((size_t) maxBlock, 0.0f);
+    instR.assign ((size_t) maxBlock, 0.0f);
+    instExpectedPos = -1;
     clickVoicePos = -1;
     lastRenderEnd = -1;
     currentPlanValid = currentPlan != nullptr && std::abs (currentPlanRate - sampleRate) < 0.5;
@@ -167,6 +170,7 @@ void AudioEngine::handleCommand (const EngineCommand& c) noexcept
                 playAfterStopPosition = target;
             releaseMidiNotes();      // a jump never leaves notes hanging
             midiExpectedPos = -1;
+            instExpectedPos = -1;
         }
             break;
 
@@ -428,6 +432,9 @@ bool AudioEngine::anySoloActive() const noexcept
     for (const auto& t : plan.midiTracks)
         if (t.slot >= 0 && t.slot < maxTracks && trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed))
             return true;
+    for (const auto& t : plan.instrumentTracks)
+        if (t.slot >= 0 && t.slot < maxTracks && trackParams[(size_t) t.slot].solo.load (std::memory_order_relaxed))
+            return true;
     return false;
 }
 
@@ -465,6 +472,122 @@ void AudioEngine::releaseMidiNotes() noexcept
         });
         activeNotesTelemetry[(size_t) port].store (0, std::memory_order_relaxed);
     }
+    releaseInstrumentNotes();
+}
+
+void AudioEngine::releaseInstrumentNotes() noexcept
+{
+    if (currentPlan == nullptr || ! currentPlanValid || instL.empty())
+        return;
+    const auto& plan = *currentPlan;
+    const int n = std::min (maxBlock, 64);
+    for (size_t ti = 0; ti < plan.instrumentTracks.size() && ti < (size_t) maxTracks; ++ti)
+    {
+        auto& tr = instNotes[ti];
+        const auto& t = plan.instrumentTracks[ti];
+        if (! tr.anyActive() || t.instrument == nullptr)
+        {
+            tr.reset();
+            continue;
+        }
+        int count = 0;
+        tr.releaseAll ([&] (const MidiBytes& m)
+        {
+            if (count < maxInstrumentEvents)
+            {
+                instMsgs[(size_t) count] = m;
+                instOffsets[(size_t) count] = 0;
+                ++count;
+            }
+        });
+        // The instrument hears the releases now; this short block is not mixed (we are stopping or jumping).
+        t.instrument->render (instL.data(), instR.data(), n, instMsgs.data(), instOffsets.data(), count);
+        instActiveTelemetry[ti].store (0, std::memory_order_relaxed);
+    }
+}
+
+void AudioEngine::renderInstruments (int n) noexcept
+{
+    const auto& plan = *currentPlan;
+    if (plan.instrumentTracks.empty())
+        return;
+
+    const std::int64_t pos = position.load (std::memory_order_relaxed);
+    const bool reseek = pos != instExpectedPos;
+    const bool anySolo = anySoloActive();
+    const float invN = 1.0f / (float) n;
+
+    for (size_t ti = 0; ti < plan.instrumentTracks.size() && ti < (size_t) maxTracks; ++ti)
+    {
+        const auto& t = plan.instrumentTracks[ti];
+        if (t.instrument == nullptr || t.slot < 0 || t.slot >= maxTracks)
+            continue;
+        auto& cursor = instCursor[ti];
+        if (reseek)
+            cursor = (size_t) (std::lower_bound (t.events.begin(), t.events.end(), pos,
+                                                 [] (const MidiSampleEvent& e, std::int64_t p) { return e.sample < p; })
+                               - t.events.begin());
+        auto& p = trackParams[(size_t) t.slot];
+        const bool silenced = p.mute.load (std::memory_order_relaxed)
+                              || (anySolo && ! p.solo.load (std::memory_order_relaxed));
+        auto& notes = instNotes[ti];
+
+        int count = 0;
+        while (cursor < t.events.size() && t.events[cursor].sample < pos + n)
+        {
+            const auto& e = t.events[cursor++];
+            if (silenced && e.msg.isNoteOn())
+                continue;   // muted: no new notes; releases and controllers still reach the instrument
+            if (e.msg.isNoteOff() && ! notes.isNoteOn (e.msg.channel(), e.msg.data[1]))
+                continue;
+            if (count >= maxInstrumentEvents)
+            {
+                instrumentEventsDropped.fetch_add (1, std::memory_order_relaxed);
+                continue;
+            }
+            instMsgs[(size_t) count] = e.msg;
+            instOffsets[(size_t) count] = (int) std::clamp<std::int64_t> (e.sample - pos, 0, n - 1);
+            notes.observe (e.msg);
+            ++count;
+        }
+
+        if (! t.instrument->render (instL.data(), instR.data(), n, instMsgs.data(), instOffsets.data(), count))
+            continue;   // failed instrument: silent
+
+        const float gain = silenced ? 0.0f : p.gain.load (std::memory_order_relaxed);
+        const float pan = p.pan.load (std::memory_order_relaxed);
+        const bool monoBus = OutputRouting::channelsForBus (t.bus) == 1;
+        const float tL = monoBus ? gain : gain * (pan <= 0.0f ? 1.0f : 1.0f - pan);
+        const float tR = monoBus ? gain : gain * (pan >= 0.0f ? 1.0f : 1.0f + pan);
+        float& curL = smoothL[(size_t) t.slot];
+        float& curR = smoothR[(size_t) t.slot];
+        float* outL = busBuffers[(size_t) t.bus][0].data();
+        float* outR = busBuffers[(size_t) t.bus][1].data();
+        float peak = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            const float k = (float) (i + 1) * invN;
+            const float a = instL[(size_t) i] * (curL + (tL - curL) * k);
+            const float b = instR[(size_t) i] * (curR + (tR - curR) * k);
+            if (monoBus)
+            {
+                const float m = 0.5f * (a + b);
+                outL[i] += m;
+                peak = std::max (peak, std::abs (m));
+            }
+            else
+            {
+                outL[i] += a;
+                outR[i] += b;
+                peak = std::max (peak, std::max (std::abs (a), std::abs (b)));
+            }
+        }
+        curL = tL;
+        curR = tR;
+        atomicMax (p.peak, peak);
+        instActiveTelemetry[ti].store (notes.activeCount(), std::memory_order_relaxed);
+    }
+    instExpectedPos = pos + n;
 }
 
 void AudioEngine::renderMidi (int n) noexcept
@@ -593,6 +716,7 @@ void AudioEngine::renderChunk (float* const* outputs, int numOutputs, int n) noe
         renderTracks (n);
         renderClick (n);
         renderMidi (n);
+        renderInstruments (n);
         lastRenderEnd = pos + n;
     }
 
@@ -676,8 +800,9 @@ void AudioEngine::process (const float* const*, int, float* const* outputs, int 
             }
             else
             {
-                releaseMidiNotes();
+                releaseMidiNotes();   // also releases the old plan's instruments
                 midiExpectedPos = -1;
+                instExpectedPos = -1;
                 currentPlan = next;
                 currentPlanRate = pendingPlanRate.load (std::memory_order_relaxed);
                 currentPlanValid = std::abs (currentPlanRate - sampleRate) < 0.5;

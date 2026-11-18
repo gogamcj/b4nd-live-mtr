@@ -223,7 +223,18 @@ void LiveModeView::paint (juce::Graphics& g)
         else
             pill ("MIDI: " + juce::String (ms.ready) + " MODULE" + (ms.ready > 1 ? "S" : "") + " READY", theme::ok);
     }
-    pill ("VSTi: NONE", theme::textDim);
+    {
+        // Plugins: missing / failed ones in red, not Live Certified ones in amber.
+        const auto ps = state.getPluginSummary();
+        if (ps.instruments == 0)
+            pill ("VSTi: NONE", theme::textDim);
+        else if (ps.problems > 0)
+            pill ("VSTi: " + juce::String (ps.problems) + " NOT LOADED", theme::danger);
+        else if (ps.notCertified > 0)
+            pill ("VSTi: " + juce::String (ps.notCertified) + " NOT LIVE CERTIFIED", theme::warn);
+        else
+            pill ("VSTi: " + juce::String (ps.ready) + " READY", theme::ok);
+    }
     if (state.isEmergencyStopped())
         pill ("EMERGENCY STOPPED", theme::danger);
     else

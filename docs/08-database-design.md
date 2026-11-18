@@ -198,3 +198,10 @@ CREATE TABLE analysis_run (
 - v1 파일을 열면 트랜잭션 하나로 v2로 올린다 (`ALTER TABLE` + `schema_version` 갱신). 단계별 마이그레이션 표(`ProjectDatabase::migrate`)에 이어 붙이는 방식이다
 - v1 파일에서 올린 뒤 데이터가 그대로이고 새 열에 저장할 수 있는지 테스트로 확인했다
 - 열 때 없는 .mid 파일은 누락 미디어 경고에 포함된다
+
+### 스키마 v3 (Phase 5)
+
+- `plugin_slot`에 `state_blob BLOB`(플러그인 `getStateInformation` 결과)과 `description_xml TEXT`(다른 PC에서 같은 플러그인을 찾기 위한 전체 설명)을 추가했다. 처음 설계한 `state_rel_path` 파일 방식은 쓰지 않는다: 상태가 DB 안에 있어야 저장 트랜잭션과 백업에 항상 함께 들어간다 (05 문서 §6)
+- VSTi 트랙은 `track.plugin_slot_id`로 슬롯 하나를 가리키고, `.mid` 경로와 채널은 v2의 열을 그대로 쓴다
+- 플러그인이 없는 PC에서 열고 저장해도 읽어 온 상태를 그대로 다시 저장한다
+- v1/v2 파일은 트랜잭션 하나로 v3까지 올린다

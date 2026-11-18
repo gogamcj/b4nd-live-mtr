@@ -8,6 +8,9 @@
 #include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
 #include "midi/MidiOutputService.h"
+#include "plugins/PluginHost.h"
+
+#include <set>
 
 namespace b4nd
 {
@@ -54,6 +57,17 @@ struct TrackInfo
     juce::String midiError;
     int midiNotes = 0;
     std::shared_ptr<const std::vector<MidiTickEvent>> midiEvents;   // 960 PPQ, song beats
+    // (MidiVsti tracks use midiPath / midiChannel / midiEvents too)
+
+    // --- software instrument (MidiVsti tracks, docs/05) ---
+    juce::String pluginSlotId;         // PluginSlotData::id in the project
+    juce::String pluginUid, pluginName, pluginVendor, pluginDescXml;
+    juce::MemoryBlock pluginState;     // last captured state: saved even when the plugin is missing
+    enum class PluginStatus { None, Ready, Missing, NotScanned, Blacklisted, LoadError, Failed };
+    PluginStatus pluginStatus = PluginStatus::None;
+    juce::String pluginError;
+    bool pluginCertified = false;
+    std::shared_ptr<PluginInstrument> instrument;
 };
 
 struct CuePoint
@@ -203,6 +217,25 @@ public:
     };
     MidiSummary getMidiSummary() const;
 
+    // --- VST3 instruments (docs/05) ---
+    PluginHost& getPluginHost() noexcept { return plugins; }
+    /** Puts a plugin from the catalog on a VSTi track, or adds a new VSTi track (trackIndex < 0).
+        Rejected in Live Mode and while playing. */
+    juce::String setTrackPlugin (int trackIndex, const juce::String& pluginUid);
+    juce::String clearTrackPlugin (int trackIndex);
+    /** Opens the plugin's own editor (rejected in Live Mode). */
+    juce::String showPluginEditor (int trackIndex);
+    /** Tries again to load missing / failed plugins (after a scan, or after installing them). */
+    void reloadPlugins();
+
+    struct PluginSummary
+    {
+        int instruments = 0, ready = 0, notCertified = 0, problems = 0;   // problems: missing / failed / not loaded
+        float maxLoad = 0.0f;                                             // highest plugin DSP load (0..1)
+    };
+    PluginSummary getPluginSummary() const;
+    static juce::String pluginStatusText (const TrackInfo&);
+
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
     void setLiveMode (bool shouldBeLive);
@@ -248,6 +281,12 @@ private:
     void loadMidiFile (TrackInfo&, const SongInfo&);
     void sendTrackVolumeToModule (const TrackInfo&);
     juce::String guardModuleChange() const;
+    void loadInstrument (TrackInfo&);
+    void loadAllInstruments();
+    void prepareInstruments();
+    void captureInstrumentStates();
+    double pluginSampleRate() const;
+    int pluginBlockSize() const;
 
     void markDirty();
     ProjectData toProjectData() const;
@@ -290,6 +329,9 @@ private:
 
     std::vector<ModuleProfile> modules;   // module i = MIDI port slot i
     MidiOutputService midi;
+    PluginHost plugins;
+    bool instrumentStateStale = false;   // a plugin changed: capture its state when stopped
+    std::set<const PluginInstrument*> failureLogged;
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

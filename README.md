@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 4 (외부 MIDI 음원 모듈)
+## 현재 상태: Phase 5 (VST3 악기 호스트)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -34,6 +34,13 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - 외부 MIDI 음원 모듈: 좌측 MIDI MODULES 버튼이나 Ctrl+M으로 모듈을 등록합니다. 포트, 채널, Bank/Program, 볼륨/팬, 지연 보정을 설정하고 TEST NOTE로 확인합니다
 - 포트를 1초마다 확인합니다. 분리되면 빨간색으로 표시하고, 다시 꽂으면 자동으로 다시 열어 프리셋을 재전송합니다
 - `.mid` 파일을 타임라인에 끌어다 놓으면 외부 MIDI 트랙이 됩니다. 정지, 이동, 비상 정지, 장치 분리 때는 Note Off와 All Notes Off를 보내 음이 걸리지 않게 합니다
+- VST3 악기: 좌측 PLUGINS 버튼이나 Ctrl+P로 플러그인을 스캔합니다. 플러그인마다 별도 스캐너 프로그램(`b4nd_plugin_scanner.exe`, 앱 옆에 있어야 함)에서 로드하므로, 스캔 중 죽는 플러그인은 앱을 죽이지 않고 블랙리스트에 오릅니다
+- 검사를 통과한 플러그인은 LIVE CERTIFIED, 아닌 것은 NOT CERTIFIED(리허설용, 공연 모드에서 경고)로 표시됩니다
+- VSTi 트랙에 플러그인을 지정하고 `.mid` 파일을 끌어다 놓으면 연주합니다. EDIT로 플러그인 화면을 엽니다 (공연 모드에서는 닫힘). 플러그인 설정은 프로젝트 DB에 저장되고, 다른 PC에 플러그인이 없으면 PLUGIN MISSING으로 표시하되 설정은 지우지 않습니다
+
+![플러그인 창](docs/images/phase5-plugins.png)
+
+![VSTi 트랙](docs/images/phase5-vsti-track.png)
 
 ![외부 MIDI 모듈 화면](docs/images/phase4-modules.png)
 
@@ -61,6 +68,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | F11 | 공연 모드 전환 |
 | Ctrl+, | 오디오 설정 |
 | Ctrl+M | MIDI 음원 모듈 |
+| Ctrl+P | VST3 플러그인 |
 | Ctrl+S / Ctrl+Shift+S | 저장 / 다른 이름으로 저장 |
 | Ctrl+O / Ctrl+N | 프로젝트 열기 / 새 프로젝트 |
 

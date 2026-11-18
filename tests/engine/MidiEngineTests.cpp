@@ -4,6 +4,7 @@
 #include "TestHarness.h"
 #include "engine/AudioEngine.h"
 
+#include <memory>
 #include <vector>
 
 using namespace b4nd;
@@ -50,7 +51,9 @@ struct Rig
         for (const auto& e : got) n += (e.msg.*pred)() ? 1 : 0;
         return n;
     }
-    AudioEngine engine;
+    // On the heap: the engine is ~600 kB and Windows threads have a 1 MB stack.
+    std::unique_ptr<AudioEngine> enginePtr = std::make_unique<AudioEngine>();
+    AudioEngine& engine = *enginePtr;
     std::vector<float> buf[2];
     float* ptrs[2] {};
     std::vector<MidiOutEvent> got;

@@ -54,6 +54,31 @@ struct MidiTrackRuntime
     std::vector<MidiSampleEvent> events;   // sorted by sample
 };
 
+/**
+    A software instrument (VSTi), implemented outside the engine (src/plugins wraps VST3).
+
+    Realtime contract: render() is called on the audio thread only, never allocates, never
+    blocks, and handles at most the block size the engine was prepared with. It writes
+    (overwrites) `numSamples` samples to outL / outR. `msgs[i]` happens at sample `offsets[i]`
+    (sorted). Returning false means the instrument has failed and is silent from now on.
+*/
+class InstrumentProcessor
+{
+public:
+    virtual ~InstrumentProcessor() = default;
+    virtual bool render (float* outL, float* outR, int numSamples,
+                         const MidiBytes* msgs, const int* offsets, int count) noexcept = 0;
+};
+
+/** A MIDI track that plays a software instrument into a bus. */
+struct InstrumentTrackRuntime
+{
+    int slot = 0;                          // engine track parameter slot (volume / pan / mute / solo)
+    BusKind bus = BusKind::Main;
+    std::shared_ptr<InstrumentProcessor> instrument;
+    std::vector<MidiSampleEvent> events;   // sorted by sample
+};
+
 struct ClickSound
 {
     std::vector<float> accent;   // first beat of the bar
@@ -70,6 +95,7 @@ struct PlaybackPlan
     TempoMap tempo;
     std::vector<TrackRuntime> tracks;
     std::vector<MidiTrackRuntime> midiTracks;
+    std::vector<InstrumentTrackRuntime> instrumentTracks;
     bool hasClick = false;
     int clickSlot = -1;
     ClickSound click;

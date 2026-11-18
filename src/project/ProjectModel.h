@@ -59,9 +59,25 @@ struct TrackData
     std::vector<ClipData> clips;
 
     // MIDI tracks
+    std::string pluginSlotId;      // software instrument (midi_vsti)
     std::string moduleProfileId;   // external module (midi_external)
     int midiChannel = 0;           // 1-16 overrides the profile's channel, 0 = use the profile's
     std::string midiPath;          // .mid file, stored like media paths
+};
+
+/** A plugin instance and its saved state (docs/05 §6). The state is stored in the database
+    (not a side file) so that backups and the save transaction always include it. */
+struct PluginSlotData
+{
+    std::string id;
+    std::string pluginUid;       // format-specific identifier (JUCE PluginDescription::createIdentifierString)
+    std::string pluginName;
+    std::string vendor;
+    std::string format = "VST3";
+    std::string version;
+    std::string presetName;
+    std::string descriptionXml;  // full description, so the plugin can be found again on another PC
+    std::vector<std::uint8_t> state;
 };
 
 struct ClickSettingsData
@@ -122,6 +138,7 @@ struct ProjectData
     std::vector<SetlistData> setlists;   // setlists[0] is the active show order
     std::vector<OutputData> outputs;     // empty: use the device default preset
     std::vector<ModuleProfile> modules;  // external sound modules
+    std::vector<PluginSlotData> plugins; // software instrument instances
 
     const MediaRef* findMedia (const std::string& mediaId) const
     {

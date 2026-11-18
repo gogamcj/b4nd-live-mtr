@@ -2,6 +2,7 @@
 #include "TestHarness.h"
 #include "engine/AudioEngine.h"
 
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -74,7 +75,9 @@ struct Rig
         post (EngineCommand::Type::StartTest, 0, (int) s, output, db);
     }
 
-    AudioEngine engine;
+    // On the heap: the engine is ~600 kB and Windows threads have a 1 MB stack.
+    std::unique_ptr<AudioEngine> enginePtr = std::make_unique<AudioEngine>();
+    AudioEngine& engine = *enginePtr;
     int numOutputs, blockSize;
     std::vector<std::vector<float>> buffers;
     std::vector<float*> ptrs;

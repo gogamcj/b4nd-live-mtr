@@ -74,6 +74,7 @@ ProjectData sampleProject()
         TrackData x;
         x.id = newUuid(); x.name = "Strings"; x.kind = "midi_external"; x.moduleProfileId = "mod-integra";
         x.midiChannel = i == 0 ? 0 : 5; x.midiPath = "media/strings 현악.mid";
+        m.pluginSlotId = "slot-piano-" + std::to_string (i);
         s.tracks = { a, g, c, m, x };
         s.click.countInBars = 2;
         s.click.volumeDb = -9.0;
@@ -86,6 +87,19 @@ ProjectData sampleProject()
     ModuleProfile plain;
     plain.id = "mod-plain"; plain.deviceName = "GM"; plain.portName = "Port 2";
     p.modules = { mod, plain };
+    for (int i = 0; i < 3; ++i)
+    {
+        PluginSlotData ps;
+        ps.id = "slot-piano-" + std::to_string (i);
+        ps.pluginUid = "VST3-B4ND Test Synth-1a2b3c4d-5e6f7a8b";
+        ps.pluginName = "B4ND Test Synth";
+        ps.vendor = "B4ND Test";
+        ps.version = "1.0.0";
+        ps.descriptionXml = "<PLUGIN name=\"B4ND Test Synth\"/>";
+        for (int k = 0; k < 70000 + i; ++k)   // binary, with zero bytes
+            ps.state.push_back ((std::uint8_t) ((k * 31 + i) & 0xff));
+        p.plugins.push_back (ps);
+    }
 
     SetlistData sl;
     sl.id = newUuid(); sl.name = "Main set"; sl.venue = "홍대";
@@ -129,7 +143,7 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
             if (t.id != u.id || t.name != u.name || t.kind != u.kind || t.busKind != u.busKind || t.volumeDb != u.volumeDb
                 || t.pan != u.pan || t.mute != u.mute || t.solo != u.solo || t.destinationLabel != u.destinationLabel
                 || t.clips.size() != u.clips.size() || t.moduleProfileId != u.moduleProfileId || t.midiChannel != u.midiChannel
-            || t.midiPath != u.midiPath)
+            || t.midiPath != u.midiPath || t.pluginSlotId != u.pluginSlotId)
                 return false;
             for (size_t c = 0; c < t.clips.size(); ++c)
                 if (t.clips[c].mediaId != u.clips[c].mediaId || t.clips[c].startSec != u.clips[c].startSec
@@ -137,6 +151,13 @@ bool sameProject (const ProjectData& a, const ProjectData& b)
                     return false;
         }
     }
+    if (a.plugins.size() != b.plugins.size())
+        return false;
+    for (size_t i = 0; i < a.plugins.size(); ++i)
+        if (a.plugins[i].id != b.plugins[i].id || a.plugins[i].pluginUid != b.plugins[i].pluginUid
+            || a.plugins[i].state != b.plugins[i].state || a.plugins[i].descriptionXml != b.plugins[i].descriptionXml
+            || a.plugins[i].vendor != b.plugins[i].vendor)
+            return false;
     if (a.modules.size() != b.modules.size())
         return false;
     for (size_t i = 0; i < a.modules.size(); ++i)
@@ -383,7 +404,7 @@ TEST_CASE ("Project: media paths are stored relative to the package when inside 
     CHECK (missing.size() == 1 && missing[0]->id == "b");
 }
 
-TEST_CASE ("Project: a schema v1 project is upgraded on open and keeps its data")
+TEST_CASE ("Project: a schema v1 project is upgraded step by step on open and keeps its data")
 {
     TempDir t;
     const auto file = t.sub ("old.db");
@@ -392,21 +413,26 @@ TEST_CASE ("Project: a schema v1 project is upgraded on open and keeps its data"
         ProjectDatabase db;
         CHECK (db.open (file, true).ok);
         p.modules.clear();
+        p.plugins.clear();
         for (auto& s : p.songs)
             for (auto& tr : s.tracks)
+            {
                 tr.moduleProfileId.clear();
+                tr.pluginSlotId.clear();
+            }
         CHECK (db.save (p).ok);
     }
     // Turn it back into a v1 file (as written by the Phase 3b build).
     sqlite3* raw = nullptr;
     sqlite3_open (file.c_str(), &raw);
-    CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; UPDATE schema_version SET version = 1;",
+    CHECK (sqlite3_exec (raw, "ALTER TABLE module_profile DROP COLUMN midi_port_id; ALTER TABLE plugin_slot DROP COLUMN state_blob;"
+                              " ALTER TABLE plugin_slot DROP COLUMN description_xml; UPDATE schema_version SET version = 1;",
                          nullptr, nullptr, nullptr) == SQLITE_OK);
     sqlite3_close (raw);
 
     ProjectDatabase db;
     CHECK (db.open (file, false).ok);
-    CHECK (db.getSchemaVersion() == 2);
+    CHECK (db.getSchemaVersion() == ProjectDatabase::currentSchemaVersion);
     ProjectData q;
     CHECK (db.load (q).ok);
     CHECK (sameProject (p, q));

@@ -92,11 +92,36 @@ jobs:
             Write-Output "::warning::No Microsoft GS Wavetable Synth on this runner: real MIDI port open not checked on Windows"
           }
 
+      - name: VST3 host test (scanner process, blacklist, VSTi track)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $dir = "build/src/app/B4ND_LIVE_MTR_artefacts/Release"
+          if (-not (Test-Path "$dir/b4nd_plugin_scanner.exe")) { throw "plugin scanner not copied next to the app" }
+          python tools/make-test-mid.py "$PWD/pads.mid" --bars 16
+          $vst = "$PWD/build/tests/plugins/vst3"
+          $q = { param($s) '"' + $s + '"' }   # Start-Process splits arguments with spaces
+          $a = @('--screenshot','screenshot-plugins.png','--plugins',
+                 '--vsti', (& $q "$vst/B4ND Test Synth.vst3"), '--vsti-midi', (& $q "$PWD/pads.mid"),
+                 '--vsti', (& $q "$vst/B4ND Test Crash.vst3"), '--vsti', (& $q "$vst/B4ND Test Slow.vst3"),
+                 '--save-as', (& $q "$PWD/vsti-test.b4nd"))
+          $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "VSTi run failed: $($p.ExitCode)" }
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-vsti-reopened.png','--size','1600x960','--project',(& $q "$PWD/vsti-test.b4nd"))
+          if ($p.ExitCode -ne 0) { throw "VSTi reopen failed" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Plugin|PLUGIN|Plugins:" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Plugin B4ND Test Synth \(B4ND Test\): LIVE CERTIFIED" -Quiet)) { throw "test synth not certified" }
+          if (-not ($logs | Select-String -Pattern "Plugin BLACKLISTED: .*B4ND Test Crash" -Quiet)) { throw "crashing plugin not blacklisted" }
+          if (-not ($logs | Select-String -Pattern "Plugin B4ND Test Slow \(B4ND Test\): NOT CERTIFIED" -Quiet)) { throw "slow plugin certified" }
+          if (-not ($logs | Select-String -Pattern "Plugins: 2 loaded, 0 not available" -Quiet)) { throw "VSTi tracks not reloaded from the project" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: B4ND-LIVE-MTR-windows-x64${{ matrix.asio == 'on' && '-asio' || '' }}
           path: |
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe
+            build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd_plugin_scanner.exe
             screenshot-*.png
             tools/make-test-wav.py
             tools/make-test-mid.py
@@ -217,6 +242,43 @@ jobs:
           grep -q "previous session closed cleanly: NO" crash.txt
           ls "공연 테스트.b4nd/backups"
           kill $XVFB || true
+
+      - name: VST3 instrument test (scanner process, JACK dummy playback, save / reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          VST="$PWD/build/tests/plugins/vst3"
+          test -x "$(dirname "$APP")/b4nd_plugin_scanner"
+          python3 tools/make-test-mid.py pads.mid --bars 16
+          export JACK_DEFAULT_SERVER=b4ndvst
+          jackd -n b4ndvst -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-vsti.png --size 1600x960 --with-audio \
+            --vsti "$VST/B4ND Test Synth.vst3" --vsti-midi pads.mid --vsti "$VST/B4ND Test Crash.vst3" \
+            --at 3.5 --play 4 --save-as "$PWD/vsti.b4nd" | tee vsti.txt
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-vsti-reopened.png --with-audio \
+            --project "$PWD/vsti.b4nd" --at 3.5 --play 4 | tee vsti2.txt
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-plugins.png --plugins | tee plugins.txt
+          pkill -f "jackd -n b4ndvst" || true
+          peak() { grep "^output $2 " "$1" | sed 's/.*peak //'; }
+          gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+          grep -q "vsti scan B4ND Test Crash.vst3: crashed while loading" vsti.txt
+          grep -q 'B4ND Test Synth \[READY\], 48 notes' vsti.txt
+          grep -q "play: engine active" vsti.txt
+          # The synth is on the Main bus: heard on OUT1 (PA). OUT2 (in-ear) keeps only the click.
+          gt "$(peak vsti.txt 1)" 0.1
+          grep -q "instrument events dropped 0, notes still on after stop 0" vsti.txt
+          grep -q "DSP overloads 0" vsti.txt
+          # Reopened: plugin reloaded with its saved state and plays again
+          grep -qE 'B4ND Test Synth \[READY\], 48 notes, state [1-9][0-9]* bytes' vsti2.txt
+          gt "$(peak vsti2.txt 1)" 0.1
+          grep -q "notes still on after stop 0" vsti2.txt
+          # Plugin missing on "another computer": status shown, saved state kept on save
+          mv "$VST/B4ND Test Synth.vst3" "$VST/hidden"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-vsti-missing.png --live \
+            --project "$PWD/vsti.b4nd" | tee missing.txt
+          mv "$VST/hidden" "$VST/B4ND Test Synth.vst3"
+          grep -qE 'B4ND Test Synth \[PLUGIN MISSING\].*state [1-9][0-9]* bytes' missing.txt
 
       - name: External MIDI test (engine -> MIDI thread -> ALSA virtual MIDI port)
         run: |

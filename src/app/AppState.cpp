@@ -432,7 +432,16 @@ juce::String AppState::getTrackDestination (int trackIndex) const
                + MidiOutputService::statusText (midi.getStatus (m)) + "]";
     }
     if (t.kind == TrackKind::MidiVsti)
-        return t.destination;
+    {
+        if (t.pluginUid.isEmpty())
+            return t.destination.isNotEmpty() ? t.destination : juce::String ("NO PLUGIN");
+        std::vector<int> outs;
+        for (int o = 0; o < routing.getNumOutputs(); ++o)
+            if (const auto& src = routing.getOutput (o).source; src && src->kind == t.bus)
+                outs.push_back (o);
+        return t.pluginName + " -> " + (outs.empty() ? juce::String ("NOT ROUTED") : "OUT " + formatOutputs (outs))
+               + "  [" + pluginStatusText (t) + "]";
+    }
 
     // Click and guide are also mixed into the in-ear monitor bus by the engine.
     const BusKind bus = t.kind == TrackKind::Click ? BusKind::Click : t.kind == TrackKind::Guide ? BusKind::Guide : t.bus;
@@ -804,7 +813,8 @@ juce::String AppState::addMidiFile (const juce::File& file, int trackIndex)
         return file.getFileName() + ": " + check.error;
 
     TrackInfo* t = nullptr;
-    if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()) && s->tracks[(size_t) trackIndex].kind == TrackKind::MidiExternal)
+    if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size())
+        && (s->tracks[(size_t) trackIndex].kind == TrackKind::MidiExternal || s->tracks[(size_t) trackIndex].kind == TrackKind::MidiVsti))
     {
         t = &s->tracks[(size_t) trackIndex];
     }
@@ -850,6 +860,261 @@ AppState::MidiSummary AppState::getMidiSummary() const
                 if (t.midiStatus == TrackInfo::MidiStatus::Missing) ++m.missingFiles;
             }
     return m;
+}
+
+//==============================================================================
+// VST3 instruments (docs/05)
+
+double AppState::pluginSampleRate() const
+{
+    return mediaSampleRate();   // the running device rate, else 48 kHz
+}
+
+int AppState::pluginBlockSize() const
+{
+    // Some drivers deliver blocks larger than the size they report: leave headroom.
+    return juce::jmax (1024, device.getBufferSize());
+}
+
+juce::String AppState::pluginStatusText (const TrackInfo& t)
+{
+    using S = TrackInfo::PluginStatus;
+    switch (t.pluginStatus)
+    {
+        case S::None:        return t.pluginUid.isEmpty() ? "NO PLUGIN" : "NOT LOADED";
+        case S::Ready:       return t.pluginCertified ? "READY" : "READY - NOT CERTIFIED";
+        case S::Missing:     return "PLUGIN MISSING";
+        case S::NotScanned:  return "NOT SCANNED";
+        case S::Blacklisted: return "BLACKLISTED";
+        case S::LoadError:   return "LOAD ERROR";
+        case S::Failed:      return "PLUGIN FAILED";
+    }
+    return {};
+}
+
+void AppState::loadInstrument (TrackInfo& t)
+{
+    if (t.instrument != nullptr)
+        plugins.closeEditor (t.instrument.get());
+    t.instrument.reset();
+    t.pluginError.clear();
+    t.pluginCertified = false;
+    if (t.pluginUid.isEmpty())
+    {
+        t.pluginStatus = TrackInfo::PluginStatus::None;
+        return;
+    }
+    const auto* rec = plugins.resolve (t.pluginUid, t.pluginDescXml);
+    if (rec == nullptr)
+    {
+        // Not in the catalog: either not installed here, or installed but never scanned.
+        // Never load an unscanned plugin into the app (it could crash it): the scan comes first.
+        juce::PluginDescription d;
+        if (auto xml = juce::parseXML (t.pluginDescXml))
+            d.loadFromXml (*xml);
+        const bool fileThere = d.fileOrIdentifier.isNotEmpty() && juce::File (d.fileOrIdentifier).exists();
+        t.pluginStatus = fileThere ? TrackInfo::PluginStatus::NotScanned : TrackInfo::PluginStatus::Missing;
+        t.pluginError = fileThere ? "scan the plugin folder first (Plugins window)" : "not installed on this computer";
+        juce::Logger::writeToLog ("PLUGIN " + juce::String (fileThere ? "NOT SCANNED" : "MISSING") + ": " + t.pluginName
+                                  + " (" + t.pluginVendor + ") on track " + t.name + " - its saved settings are kept");
+        return;
+    }
+    if (! juce::File (rec->file).exists())
+    {
+        t.pluginStatus = TrackInfo::PluginStatus::Missing;
+        t.pluginError = "not installed on this computer (" + rec->file + ")";
+        juce::Logger::writeToLog ("PLUGIN MISSING: " + t.pluginName + " on track " + t.name + " - its saved settings are kept");
+        return;
+    }
+    if (rec->status == PluginRecord::Status::Blacklisted)
+    {
+        t.pluginStatus = TrackInfo::PluginStatus::Blacklisted;
+        t.pluginError = rec->reason;
+        return;
+    }
+    auto r = plugins.load (*rec, pluginSampleRate(), pluginBlockSize());
+    if (r.instrument == nullptr)
+    {
+        t.pluginStatus = TrackInfo::PluginStatus::LoadError;
+        t.pluginError = r.error;
+        juce::Logger::writeToLog ("PLUGIN LOAD ERROR: " + t.pluginName + " on track " + t.name + ": " + r.error);
+        return;
+    }
+    if (rec->uid() != t.pluginUid)
+        juce::Logger::writeToLog ("Plugin " + t.pluginName + " found as " + rec->desc.name + " " + rec->desc.version + " (another version or computer)");
+    if (! t.pluginState.isEmpty() && ! r.instrument->setState (t.pluginState))
+        juce::Logger::writeToLog ("WARNING: " + t.pluginName + " did not accept its saved settings (track " + t.name + ")");
+    r.instrument->takeChanged();   // restoring the state is not a change
+    t.pluginUid = rec->uid();
+    t.pluginName = rec->desc.name;
+    t.pluginVendor = rec->desc.manufacturerName;
+    if (auto xml = rec->desc.createXml())
+        t.pluginDescXml = xml->toString (juce::XmlElement::TextFormat().singleLine().withoutHeader());
+    t.instrument = std::move (r.instrument);
+    t.pluginStatus = TrackInfo::PluginStatus::Ready;
+    t.pluginCertified = rec->status == PluginRecord::Status::Certified;
+    if (! t.pluginCertified)
+        juce::Logger::writeToLog ("Note: " + t.pluginName + " is not Live Certified (" + rec->reason + ")");
+}
+
+void AppState::loadAllInstruments()
+{
+    int loaded = 0, problems = 0;
+    for (auto& s : songs)
+        for (auto& t : s.tracks)
+            if (t.kind == TrackKind::MidiVsti && t.pluginUid.isNotEmpty())
+            {
+                loadInstrument (t);
+                (t.pluginStatus == TrackInfo::PluginStatus::Ready ? loaded : problems)++;
+            }
+    if (loaded + problems > 0)
+        juce::Logger::writeToLog ("Plugins: " + juce::String (loaded) + " loaded, " + juce::String (problems) + " not available");
+}
+
+void AppState::prepareInstruments()
+{
+    const double sr = pluginSampleRate();
+    const int block = pluginBlockSize();
+    for (auto& s : songs)
+        for (auto& t : s.tracks)
+            if (t.instrument != nullptr && ! t.instrument->isPreparedFor (sr, block))
+            {
+                juce::String error;
+                if (! t.instrument->prepare (sr, block, error))
+                {
+                    t.pluginStatus = TrackInfo::PluginStatus::LoadError;
+                    t.pluginError = "prepare failed at " + juce::String (sr, 0) + " Hz: " + error;
+                    juce::Logger::writeToLog ("PLUGIN ERROR: " + t.pluginName + ": " + t.pluginError);
+                }
+            }
+}
+
+void AppState::captureInstrumentStates()
+{
+    for (auto& s : songs)
+        for (auto& t : s.tracks)
+            if (t.instrument != nullptr && ! t.instrument->hasFailed())
+            {
+                auto st = t.instrument->getState();
+                if (! st.isEmpty())
+                    t.pluginState = std::move (st);
+            }
+}
+
+juce::String AppState::setTrackPlugin (int trackIndex, const juce::String& pluginUid)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    auto* s = currentSongMutable();
+    if (s == nullptr)
+        return "No song selected";
+    const auto* rec = plugins.getCatalog().findByUid (pluginUid);
+    if (rec == nullptr)
+        return "Plugin not in the scanned list";
+    TrackInfo* t = nullptr;
+    if (juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()) && s->tracks[(size_t) trackIndex].kind == TrackKind::MidiVsti)
+    {
+        t = &s->tracks[(size_t) trackIndex];
+    }
+    else
+    {
+        if ((int) s->tracks.size() >= AudioEngine::maxTracks)
+            return "Too many tracks in this song";
+        TrackInfo nt;
+        nt.id = newUuid();
+        nt.name = rec->desc.name;
+        nt.kind = TrackKind::MidiVsti;
+        s->tracks.push_back (nt);
+        t = &s->tracks.back();
+        pushMixerToEngine();
+    }
+    if (t->pluginSlotId.isEmpty())
+        t->pluginSlotId = newUuid();
+    t->pluginUid = rec->uid();
+    t->pluginName = rec->desc.name;
+    t->pluginVendor = rec->desc.manufacturerName;
+    t->pluginDescXml.clear();
+    t->pluginState.reset();   // a new plugin starts from its defaults
+    loadInstrument (*t);
+    juce::Logger::writeToLog ("Plugin assigned: " + t->name + " <- " + t->pluginName + " [" + pluginStatusText (*t) + "]");
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return t->pluginStatus == TrackInfo::PluginStatus::Ready ? juce::String() : t->pluginName + ": " + t->pluginError;
+}
+
+juce::String AppState::clearTrackPlugin (int trackIndex)
+{
+    if (auto g = guardModuleChange(); g.isNotEmpty())
+        return g;
+    auto* s = currentSongMutable();
+    if (s == nullptr || ! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+        return "No such track";
+    auto& t = s->tracks[(size_t) trackIndex];
+    if (t.instrument != nullptr)
+        plugins.closeEditor (t.instrument.get());
+    t.instrument.reset();
+    t.pluginUid.clear();
+    t.pluginName.clear();
+    t.pluginVendor.clear();
+    t.pluginDescXml.clear();
+    t.pluginState.reset();
+    t.pluginStatus = TrackInfo::PluginStatus::None;
+    t.pluginError.clear();
+    markDirty();
+    rebuildPlan();
+    sendChangeMessage();
+    return {};
+}
+
+juce::String AppState::showPluginEditor (int trackIndex)
+{
+    if (liveMode)
+        return "Live Mode: plugin editors are closed during a show";
+    auto* s = currentSongMutable();
+    if (s == nullptr || ! juce::isPositiveAndBelow (trackIndex, (int) s->tracks.size()))
+        return "No such track";
+    auto& t = s->tracks[(size_t) trackIndex];
+    if (t.instrument == nullptr || t.instrument->hasFailed())
+        return "The plugin is not loaded: " + pluginStatusText (t);
+    plugins.showEditor (t.instrument, t.name + " - " + t.pluginName);
+    return {};
+}
+
+void AppState::reloadPlugins()
+{
+    if (guardModuleChange().isNotEmpty())
+        return;
+    captureInstrumentStates();
+    for (auto& s : songs)
+        for (auto& t : s.tracks)
+            if (t.kind == TrackKind::MidiVsti && t.pluginUid.isNotEmpty() && t.pluginStatus != TrackInfo::PluginStatus::Ready)
+                loadInstrument (t);
+    rebuildPlan();
+    sendChangeMessage();
+}
+
+AppState::PluginSummary AppState::getPluginSummary() const
+{
+    PluginSummary p;
+    for (const auto& s : songs)
+        for (const auto& t : s.tracks)
+        {
+            if (t.kind != TrackKind::MidiVsti || t.pluginUid.isEmpty())
+                continue;
+            ++p.instruments;
+            if (t.pluginStatus == TrackInfo::PluginStatus::Ready && t.instrument != nullptr && ! t.instrument->hasFailed())
+            {
+                ++p.ready;
+                if (! t.pluginCertified) ++p.notCertified;
+                p.maxLoad = juce::jmax (p.maxLoad, t.instrument->getLoad());
+            }
+            else
+            {
+                ++p.problems;
+            }
+        }
+    return p;
 }
 
 void AppState::pushMixerToEngine()
@@ -908,6 +1173,19 @@ void AppState::rebuildPlan()
             plan->midiTracks.push_back (std::move (mt));
             continue;
         }
+        if (t.kind == TrackKind::MidiVsti)
+        {
+            if (t.instrument == nullptr || t.instrument->hasFailed() || t.midiEvents == nullptr)
+                continue;
+            InstrumentTrackRuntime it;
+            it.slot = i;
+            it.bus = t.bus;
+            it.instrument = t.instrument;
+            const int ch = juce::jlimit (1, 16, t.midiChannel > 0 ? t.midiChannel : 1) - 1;
+            it.events = toSampleEvents (*t.midiEvents, song->tempo, sr, ch);
+            plan->instrumentTracks.push_back (std::move (it));
+            continue;
+        }
         if ((t.kind != TrackKind::Audio && t.kind != TrackKind::Guide) || t.media == nullptr
             || std::abs (t.mediaRate - sr) >= 0.5)
             continue;
@@ -930,6 +1208,14 @@ void AppState::setLiveMode (bool shouldBeLive)
     if (liveMode == shouldBeLive)
         return;
     liveMode = shouldBeLive;
+    if (shouldBeLive)
+    {
+        plugins.closeAllEditors();   // no plugin windows on stage
+        const auto ps = getPluginSummary();
+        if (ps.problems > 0 || ps.notCertified > 0)
+            juce::Logger::writeToLog ("LIVE MODE WARNING: " + juce::String (ps.problems) + " plugin(s) not available, "
+                                      + juce::String (ps.notCertified) + " not Live Certified");
+    }
     routing.setLocked (shouldBeLive);   // no routing edits during a show
     device.setAutoReconnectAllowed (! shouldBeLive);   // on stage, reconnecting is a deliberate action
     juce::Desktop::setScreenSaverEnabled (! shouldBeLive);
@@ -983,6 +1269,7 @@ void AppState::changeListenerCallback (juce::ChangeBroadcaster*)
                 requestAllMedia();   // re-decode at the new rate in the background
                 mediaPool.purgeUnused();
             }
+            prepareInstruments();   // new rate / block size (the engine plays them silent meanwhile)
             rebuildPlan();
         }
         lastDeviceStatus = st;
@@ -995,6 +1282,38 @@ void AppState::timerCallback()
 {
     applyFinishedMedia();
     engine.collectGarbage();
+
+    // Plugins: unsaved changes (editor / presets) and failures in the audio thread.
+    bool pluginEvent = false;
+    for (auto& s : songs)
+        for (auto& t : s.tracks)
+        {
+            if (t.instrument == nullptr)
+                continue;
+            if (t.instrument->takeChanged())
+            {
+                instrumentStateStale = true;
+                markDirty();
+            }
+            if (t.instrument->hasFailed() && t.pluginStatus != TrackInfo::PluginStatus::Failed)
+            {
+                t.pluginStatus = TrackInfo::PluginStatus::Failed;
+                t.pluginError = t.instrument->getFailure();
+                plugins.closeEditor (t.instrument.get());
+                juce::Logger::writeToLog ("PLUGIN FAILED: " + t.pluginName + " on track " + t.name + ": " + t.pluginError
+                                          + " - it is silent now, the rest keeps playing");
+                pluginEvent = true;
+            }
+        }
+    if (pluginEvent)
+        sendChangeMessage();
+    // Plugin state is read only when stopped: some plugins glitch if asked for it while playing.
+    if (instrumentStateStale && transport != TransportState::Playing)
+    {
+        captureInstrumentStates();
+        instrumentStateStale = false;
+        markDirty();
+    }
 
     // Autosave (5 s after the last change) and periodic backups, all on the project IO thread.
     if (session.isOpen())
@@ -1241,12 +1560,29 @@ ProjectData AppState::toProjectData() const
             td.pan = t.pan;
             td.mute = t.mute;
             td.solo = t.solo;
-            if (t.kind == TrackKind::MidiExternal)
+            if (t.kind == TrackKind::MidiExternal || t.kind == TrackKind::MidiVsti)
             {
-                td.moduleProfileId = u8 (t.moduleId);
+                td.moduleProfileId = t.kind == TrackKind::MidiExternal ? u8 (t.moduleId) : std::string();
                 td.midiChannel = t.midiChannel;
                 if (t.midiPath.isNotEmpty())
                     td.midiPath = session.isOpen() ? pkg.toStoredPath (u8 (t.midiPath)) : u8 (t.midiPath);
+            }
+            if (t.kind == TrackKind::MidiVsti && t.pluginUid.isNotEmpty())
+            {
+                // The saved state is the last one captured while stopped (or the loaded one when the
+                // plugin is missing here, so opening on another PC never loses the sound settings).
+                PluginSlotData ps;
+                ps.id = u8 (t.pluginSlotId.isNotEmpty() ? t.pluginSlotId : t.id + "-plugin");
+                ps.pluginUid = u8 (t.pluginUid);
+                ps.pluginName = u8 (t.pluginName);
+                ps.vendor = u8 (t.pluginVendor);
+                ps.descriptionXml = u8 (t.pluginDescXml);
+                if (auto xml = juce::parseXML (t.pluginDescXml))
+                    ps.version = u8 (xml->getStringAttribute ("version"));
+                const auto* bytes = static_cast<const std::uint8_t*> (t.pluginState.getData());
+                ps.state.assign (bytes, bytes + t.pluginState.getSize());
+                td.pluginSlotId = ps.id;
+                p.plugins.push_back (std::move (ps));
             }
             if (t.mediaPath.isNotEmpty())
             {
@@ -1330,9 +1666,22 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
             t.solo = td.solo;
             if (t.kind == TrackKind::Click)
                 t.regions = { { 0.0, s.lengthSeconds } };
-            if (t.kind == TrackKind::MidiExternal)
+            if (t.kind == TrackKind::MidiVsti && ! td.pluginSlotId.empty())
+                for (const auto& ps : p.plugins)
+                    if (ps.id == td.pluginSlotId)
+                    {
+                        t.pluginSlotId = fromU8 (ps.id);
+                        t.pluginUid = fromU8 (ps.pluginUid);
+                        t.pluginName = fromU8 (ps.pluginName);
+                        t.pluginVendor = fromU8 (ps.vendor);
+                        t.pluginDescXml = fromU8 (ps.descriptionXml);
+                        t.pluginState.replaceAll (ps.state.data(), ps.state.size());
+                        break;
+                    }
+            if (t.kind == TrackKind::MidiExternal || t.kind == TrackKind::MidiVsti)
             {
-                t.moduleId = fromU8 (td.moduleProfileId);
+                if (t.kind == TrackKind::MidiExternal)
+                    t.moduleId = fromU8 (td.moduleProfileId);
                 t.midiChannel = juce::jlimit (0, 16, td.midiChannel);
                 if (! td.midiPath.empty())
                     t.midiPath = fromU8 (pkg.toAbsolutePath (td.midiPath));
@@ -1353,6 +1702,8 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
     // Swap the model in. The engine keeps playing nothing: we are stopped (guardProjectChange).
     stop();
     midi.panic();
+    plugins.closeAllEditors();
+    instrumentStateStale = false;
     modules.clear();
     for (const auto& mp : p.modules)
         if ((int) modules.size() < MidiOutputService::maxSlots)
@@ -1370,6 +1721,15 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         for (const auto& t : song.tracks)
             if (t.midiStatus == TrackInfo::MidiStatus::Missing && ! missingOnOpen.contains (t.midiPath))
                 missingOnOpen.add (t.midiPath);
+    loadAllInstruments();
+    for (const auto& song : songs)
+        for (const auto& t : song.tracks)
+            if (t.kind == TrackKind::MidiVsti && t.pluginUid.isNotEmpty() && t.pluginStatus != TrackInfo::PluginStatus::Ready)
+            {
+                const auto what = "Plugin " + t.pluginName + " (" + pluginStatusText (t) + ")";
+                if (! missingOnOpen.contains (what))
+                    missingOnOpen.add (what);
+            }
     mediaPool.purgeUnused();
     requestAllMedia();
     rebuildPlan();
@@ -1424,7 +1784,10 @@ juce::String AppState::openProject (const juce::File& folderOrDb)
     if (auto g = guardProjectChange(); g.isNotEmpty())
         return g;
     if (session.isOpen() && dirty)
+    {
+        captureInstrumentStates();
         session.saveNow (toProjectData());
+    }
     dirty = false;
 
     auto r = session.open (folderOrDb);
@@ -1449,6 +1812,8 @@ juce::String AppState::saveProject()
 {
     if (! session.isOpen())
         return "No project file yet: use Save As";
+    if (transport != TransportState::Playing)
+        captureInstrumentStates();
     auto r = session.saveNow (toProjectData());
     if (! r)
         return fromU8 (r.error);
@@ -1466,6 +1831,7 @@ juce::String AppState::saveProjectAs (const juce::File& folder)
     projectId = newUuid();
     projectName = folder.getFileNameWithoutExtension();
     session.close();
+    captureInstrumentStates();
     auto p = toProjectData();
     if (auto r = session.create (folder, p); ! r)
     {
@@ -1496,8 +1862,12 @@ juce::String AppState::restoreBackup (const juce::String& backupPath)
 
 void AppState::closeProject()
 {
-    if (session.isOpen() && dirty)
+    plugins.closeAllEditors();
+    if (session.isOpen() && (dirty || instrumentStateStale))
+    {
+        captureInstrumentStates();
         session.saveAsync (toProjectData());
+    }
     dirty = false;
     session.close();   // writes the pending snapshot, removes session.lock
 }

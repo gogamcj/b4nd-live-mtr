@@ -141,6 +141,9 @@ public:
     std::uint64_t getMidiDroppedCount() const noexcept { return midiDropped.load (std::memory_order_relaxed); }
     /** Notes currently sounding on a port (as sent by the engine). */
     int getActiveMidiNotes (int port) const noexcept { return port >= 0 && port < maxMidiPorts ? activeNotesTelemetry[(size_t) port].load (std::memory_order_relaxed) : 0; }
+    /** Notes sounding in the plan's instrument track `index` (as sent by the engine). */
+    int getActiveInstrumentNotes (int index) const noexcept { return index >= 0 && index < maxTracks ? instActiveTelemetry[(size_t) index].load (std::memory_order_relaxed) : 0; }
+    std::uint64_t getInstrumentEventsDropped() const noexcept { return instrumentEventsDropped.load (std::memory_order_relaxed); }
     /** In-ear monitor mix: how much click, guide and MR (Main) go into the Monitor bus. */
     void setMonitorMix (float click, float guide, float main) noexcept;
 
@@ -167,6 +170,9 @@ private:
     void renderTracks (int numSamples) noexcept;
     void renderClick (int numSamples) noexcept;
     void renderMidi (int numSamples) noexcept;
+    void renderInstruments (int numSamples) noexcept;
+    /** Note Off / CC64 0 / CC123 into every instrument that has sounding notes (output discarded). */
+    void releaseInstrumentNotes() noexcept;
     /** Note Off for every sounding note, CC64 0 and CC123 on used channels, all ports, sent now. */
     void releaseMidiNotes() noexcept;
     void pushMidi (std::int64_t dueNs, int port, const MidiBytes&) noexcept;
@@ -255,6 +261,17 @@ private:
     std::atomic<std::int64_t> outputLatencyNs { 0 };
     std::atomic<std::uint64_t> midiDropped { 0 };
     std::array<std::atomic<int>, maxMidiPorts> activeNotesTelemetry {};
+
+    // software instruments (audio thread only)
+    static constexpr int maxInstrumentEvents = 2048;   // per track per block; more are dropped
+    std::array<MidiBytes, maxInstrumentEvents> instMsgs {};
+    std::array<int, maxInstrumentEvents> instOffsets {};
+    std::array<std::size_t, maxTracks> instCursor {};
+    std::array<ActiveNoteTracker, maxTracks> instNotes;
+    std::int64_t instExpectedPos = -1;
+    std::vector<float> instL, instR;
+    std::atomic<std::uint64_t> instrumentEventsDropped { 0 };
+    std::array<std::atomic<int>, maxTracks> instActiveTelemetry {};
 
     XrunDetector xruns;
     std::atomic<float> loadTelemetry { 0.0f }, peakLoadTelemetry { 0.0f };

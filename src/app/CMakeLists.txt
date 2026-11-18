@@ -23,7 +23,11 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../audio/AudioDeviceController.cpp
     ../media/MediaLoader.cpp
     ../midi/MidiOutputService.cpp
-    ../midi/MidiFileImport.cpp)
+    ../midi/MidiFileImport.cpp
+    ../plugins/PluginCatalog.cpp
+    ../plugins/PluginInstrument.cpp
+    ../plugins/PluginHost.cpp
+    ../ui/PluginPanel.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -34,7 +38,11 @@ target_compile_definitions(B4ND_LIVE_MTR PRIVATE
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:B4ND_LIVE_MTR,JUCE_VERSION>"
     JUCE_WASAPI=1
     JUCE_DIRECTSOUND=1
-    JUCE_USE_MP3AUDIOFORMAT=1)
+    JUCE_USE_MP3AUDIOFORMAT=1
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_AU=0
+    JUCE_PLUGINHOST_LADSPA=0
+    JUCE_PLUGINHOST_LV2=0)
 
 if(UNIX AND NOT APPLE)
     # Linux is a development target only; JACK makes headless engine testing possible (jackd -d dummy).
@@ -63,7 +71,14 @@ target_link_libraries(B4ND_LIVE_MTR
         juce::juce_gui_extra
         juce::juce_audio_devices
         juce::juce_audio_formats
+        juce::juce_audio_processors
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# The plugin scanner runs as a separate process and must sit next to the app executable.
+add_dependencies(B4ND_LIVE_MTR b4nd_plugin_scanner)
+add_custom_command(TARGET B4ND_LIVE_MTR POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:b4nd_plugin_scanner>" "$<TARGET_FILE_DIR:B4ND_LIVE_MTR>"
+    VERBATIM)

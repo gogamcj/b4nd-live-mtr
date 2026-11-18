@@ -57,6 +57,12 @@ public:
     Stmt& bind (int i, int v)                 { sqlite3_bind_int (s, i, v); return *this; }
     Stmt& bind (int i, bool v)                { sqlite3_bind_int (s, i, v ? 1 : 0); return *this; }
     Stmt& bindNull (int i)                    { sqlite3_bind_null (s, i); return *this; }
+    Stmt& bindBlob (int i, const std::vector<std::uint8_t>& v)
+    {
+        if (v.empty()) sqlite3_bind_null (s, i);
+        else sqlite3_bind_blob (s, i, v.data(), (int) v.size(), SQLITE_TRANSIENT);
+        return *this;
+    }
 
     /** For INSERT/UPDATE: true on SQLITE_DONE, then resets for reuse. */
     bool run()
@@ -79,6 +85,11 @@ public:
     double real (int c) const    { return sqlite3_column_double (s, c); }
     int integer (int c) const    { return sqlite3_column_int (s, c); }
     bool isNull (int c) const    { return sqlite3_column_type (s, c) == SQLITE_NULL; }
+    std::vector<std::uint8_t> blob (int c) const
+    {
+        const auto* p = static_cast<const std::uint8_t*> (sqlite3_column_blob (s, c));
+        return p != nullptr ? std::vector<std::uint8_t> (p, p + sqlite3_column_bytes (s, c)) : std::vector<std::uint8_t>();
+    }
 
     int lastCode() const noexcept { return rc; }
 
@@ -88,7 +99,7 @@ private:
 };
 
 // Schema v2 = docs/08 plus `clip` (audio regions), track.destination_label (v1)
-// and module_profile.midi_port_id (v2).
+// module_profile.midi_port_id (v2), plugin_slot.state_blob / description_xml (v3).
 const char* const schemaV1 = R"SQL(
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 
@@ -165,7 +176,8 @@ CREATE TABLE output_assignment (
 CREATE TABLE plugin_slot (
   id TEXT PRIMARY KEY, plugin_uid TEXT NOT NULL, plugin_name TEXT NOT NULL,
   vendor TEXT, format TEXT DEFAULT 'VST3', version TEXT,
-  state_rel_path TEXT, state_sha256 TEXT, preset_name TEXT
+  state_rel_path TEXT, state_sha256 TEXT, preset_name TEXT,
+  state_blob BLOB, description_xml TEXT
 );
 
 CREATE TABLE module_profile (
@@ -246,7 +258,7 @@ INSERT INTO bus (id, kind, name, channels) VALUES
   ('bus-main', 'main', 'Main', 2), ('bus-click', 'click', 'Click', 1), ('bus-guide', 'guide', 'Guide', 1),
   ('bus-extra', 'extra', 'Extra', 2), ('bus-monitor', 'monitor', 'Monitor', 2), ('bus-aux', 'aux', 'Aux', 2);
 
-INSERT INTO schema_version (version) VALUES (2);
+INSERT INTO schema_version (version) VALUES (3);
 )SQL";
 
 std::string busId (const std::string& kind) { return "bus-" + kind; }
@@ -375,6 +387,8 @@ DbResult ProjectDatabase::migrate()
     struct Step { int from; const char* sql; };
     const Step steps[] = {
         { 1, "ALTER TABLE module_profile ADD COLUMN midi_port_id TEXT; UPDATE schema_version SET version = 2;" },
+        { 2, "ALTER TABLE plugin_slot ADD COLUMN state_blob BLOB; ALTER TABLE plugin_slot ADD COLUMN description_xml TEXT;"
+             " UPDATE schema_version SET version = 3;" },
     };
     for (const auto& st : steps)
     {
@@ -451,7 +465,7 @@ DbResult ProjectDatabase::save (const ProjectData& p)
 
     // Replace everything (cascades remove songs' children). Buses are fixed rows.
     if (! exec ("DELETE FROM setlist; DELETE FROM output_assignment; DELETE FROM song; DELETE FROM project;"
-                " DELETE FROM media_file; DELETE FROM module_profile;"))
+                " DELETE FROM media_file; DELETE FROM module_profile; DELETE FROM plugin_slot;"))
         return fail ("Clearing project");
 
     {
@@ -492,14 +506,23 @@ DbResult ProjectDatabase::save (const ProjectData& p)
         }
     }
 
+    {
+        Stmt ps (db, "INSERT INTO plugin_slot (id, plugin_uid, plugin_name, vendor, format, version, preset_name, state_blob, description_xml)"
+                     " VALUES (?,?,?,?,?,?,?,?,?)");
+        for (const auto& sl : p.plugins)
+            if (! ps.bind (1, sl.id).bind (2, sl.pluginUid).bind (3, sl.pluginName).bindOrNull (4, sl.vendor).bind (5, sl.format)
+                     .bindOrNull (6, sl.version).bindOrNull (7, sl.presetName).bindBlob (8, sl.state).bindOrNull (9, sl.descriptionXml).run())
+                return fail ("Saving plugin " + sl.pluginName);
+    }
+
     Stmt song (db, "INSERT INTO song (id, project_id, title, artist, base_bpm, song_key, time_sig_num, time_sig_den,"
                    " length_sec, last_position_sec, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
     Stmt tempo (db, "INSERT INTO tempo_point (song_id, beat, bpm) VALUES (?,?,?)");
     Stmt sig (db, "INSERT INTO time_sig_point (song_id, bar, numerator, denominator) VALUES (?,?,?,?)");
     Stmt cue (db, "INSERT INTO cue_point (id, song_id, name, section, position_sec, color, sort_order, source) VALUES (?,?,?,?,?,?,?,?)");
     Stmt track (db, "INSERT INTO track (id, song_id, name, sort_order, kind, media_id, volume_db, pan, gain_db, mute, solo, mono,"
-                    " output_bus_id, delay_offset_ms, destination_label, module_profile_id, midi_channel, midi_rel_path)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    " output_bus_id, delay_offset_ms, destination_label, module_profile_id, midi_channel, midi_rel_path, plugin_slot_id)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
     Stmt clip (db, "INSERT INTO clip (id, track_id, media_id, start_sec, offset_sec, length_sec) VALUES (?,?,?,?,?,?)");
     Stmt click (db, "INSERT INTO click_settings (song_id, enabled, count_in_bars, accent_first, sound, volume_db, subdivision)"
                     " VALUES (?,?,?,?,?,?,?)");
@@ -536,7 +559,7 @@ DbResult ProjectDatabase::save (const ProjectData& p)
                        .bindOrNull (6, firstMedia).bind (7, t.volumeDb).bind (8, t.pan).bind (9, t.gainDb)
                        .bind (10, t.mute).bind (11, t.solo).bind (12, t.mono).bind (13, busId (t.busKind))
                        .bind (14, t.delayOffsetMs).bindOrNull (15, t.destinationLabel).bindOrNull (16, t.moduleProfileId)
-                       .bind (17, t.midiChannel).bindOrNull (18, t.midiPath).run())
+                       .bind (17, t.midiChannel).bindOrNull (18, t.midiPath).bindOrNull (19, t.pluginSlotId).run())
                 return fail ("Saving track " + t.name);
             for (const auto& c : t.clips)
                 if (! clip.bind (1, c.id).bind (2, t.id).bind (3, c.mediaId).bind (4, c.startSec)
@@ -629,12 +652,25 @@ DbResult ProjectDatabase::load (ProjectData& out)
         }
     }
 
+    {
+        Stmt ps (db, "SELECT id, plugin_uid, plugin_name, vendor, format, version, preset_name, state_blob, description_xml"
+                     " FROM plugin_slot ORDER BY rowid");
+        while (ps.next())
+        {
+            PluginSlotData sl;
+            sl.id = ps.text (0); sl.pluginUid = ps.text (1); sl.pluginName = ps.text (2); sl.vendor = ps.text (3);
+            sl.format = ps.text (4); sl.version = ps.text (5); sl.presetName = ps.text (6); sl.state = ps.blob (7);
+            sl.descriptionXml = ps.text (8);
+            p.plugins.push_back (std::move (sl));
+        }
+    }
+
     Stmt songs (db, "SELECT id, title, artist, base_bpm, song_key, length_sec, last_position_sec, notes FROM song ORDER BY rowid");
     Stmt tempo (db, "SELECT beat, bpm FROM tempo_point WHERE song_id = ? ORDER BY beat");
     Stmt sig (db, "SELECT bar, numerator, denominator FROM time_sig_point WHERE song_id = ? ORDER BY bar");
     Stmt cue (db, "SELECT id, name, section, position_sec, color, source FROM cue_point WHERE song_id = ? ORDER BY sort_order, position_sec");
     Stmt track (db, "SELECT id, name, kind, volume_db, pan, gain_db, mute, solo, mono, output_bus_id, delay_offset_ms, destination_label,"
-                    " module_profile_id, midi_channel, midi_rel_path FROM track WHERE song_id = ? ORDER BY sort_order");
+                    " module_profile_id, midi_channel, midi_rel_path, plugin_slot_id FROM track WHERE song_id = ? ORDER BY sort_order");
     Stmt clip (db, "SELECT id, media_id, start_sec, offset_sec, length_sec FROM clip WHERE track_id = ? ORDER BY start_sec, rowid");
     Stmt click (db, "SELECT enabled, count_in_bars, accent_first, sound, volume_db, subdivision FROM click_settings WHERE song_id = ?");
     if (! songs.valid() || ! tempo.valid() || ! sig.valid() || ! cue.valid() || ! track.valid() || ! clip.valid() || ! click.valid())
@@ -673,6 +709,7 @@ DbResult ProjectDatabase::load (ProjectData& out)
             t.mute = track.integer (6) != 0; t.solo = track.integer (7) != 0; t.mono = track.integer (8) != 0;
             t.busKind = busKindFromId (track.text (9)); t.delayOffsetMs = track.real (10); t.destinationLabel = track.text (11);
             t.moduleProfileId = track.text (12); t.midiChannel = track.integer (13); t.midiPath = track.text (14);
+            t.pluginSlotId = track.text (15);
             sd.tracks.push_back (std::move (t));
         }
         track.reset();
