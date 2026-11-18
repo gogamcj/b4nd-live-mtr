@@ -10,7 +10,7 @@ namespace b4nd::systemguard
 bool keepAwake (bool on);
 bool isKeepingAwake();
 
-/** Resident memory of this process in bytes (0 when unknown). */
+/** Memory of this process in bytes (0 when unknown): private bytes on Windows, resident set on Linux. */
 std::int64_t residentBytes();
 
 /** Windows: the active power plan, read through the power API (the name comes localised, e.g.

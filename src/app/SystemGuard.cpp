@@ -37,9 +37,11 @@ bool isKeepingAwake() { return awake; }
 std::int64_t residentBytes()
 {
 #if JUCE_WINDOWS
-    PROCESS_MEMORY_COUNTERS pmc {};
-    if (GetProcessMemoryInfo (GetCurrentProcess(), &pmc, sizeof (pmc)))
-        return (std::int64_t) pmc.WorkingSetSize;
+    // Private bytes, not the working set: Windows trims the working set (it went down by 50 MB in
+    // a CI soak), which would hide a leak.
+    PROCESS_MEMORY_COUNTERS_EX pmc {};
+    if (GetProcessMemoryInfo (GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*> (&pmc), sizeof (pmc)))
+        return (std::int64_t) pmc.PrivateUsage;
     return 0;
 #elif JUCE_LINUX
     const auto statm = juce::File ("/proc/self/statm").loadFileAsString();
