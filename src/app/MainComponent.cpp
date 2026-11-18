@@ -5,6 +5,7 @@
 #include "ui/MidiEditorPanel.h"
 #include "ui/FootswitchPanel.h"
 #include "ui/SetlistPanel.h"
+#include "ui/ShowCheckPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
@@ -24,6 +25,7 @@ MainComponent::MainComponent (AppState& s)
 
     transportBar.onLiveModeClicked = [this] { toggleLiveMode(); };
     liveView.onExitClicked = [this] { toggleLiveMode(); };
+    sidePanel.onEnterLive = [this] { toggleLiveMode (true); };
     statusBar.onAudioSettingsRequested = [this] { showAudioSettingsWindow (state); };
 
     setWantsKeyboardFocus (true);
@@ -36,9 +38,21 @@ MainComponent::~MainComponent()
     state.removeChangeListener (this);
 }
 
-void MainComponent::toggleLiveMode()
+void MainComponent::toggleLiveMode (bool skipCheck)
 {
-    state.setLiveMode (! state.isLiveMode());
+    if (state.isLiveMode())
+    {
+        state.setLiveMode (false);
+        return;
+    }
+    if (! skipCheck && AppState::hasBlockers (state.runShowCheck()))
+    {
+        juce::Logger::writeToLog ("LIVE MODE not entered: the show check has red items");
+        showShowCheckWindow (state, [this] { state.setLiveMode (true); });
+        return;
+    }
+    closeShowCheckWindow();
+    state.setLiveMode (true);
 }
 
 void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -88,6 +102,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('p', juce::ModifierKeys::commandModifier, 0)) { showPluginWindow (state); return true; }
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { showFootswitchWindow (state); return true; }
     if (key == juce::KeyPress ('l', juce::ModifierKeys::commandModifier, 0)) { showSetlistWindow (state); return true; }
+    if (key == juce::KeyPress ('k', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) showShowCheckWindow (state, [this] { toggleLiveMode (true); }); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { if (! state.isLiveMode()) showAnalysisWindow (state); return true; }
     if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier, 0))
     {

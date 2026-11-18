@@ -35,9 +35,12 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     AppStateMidiEdit.cpp
     AppStateLive.cpp
     AppStateSetlist.cpp
+    AppStateShow.cpp
+    SystemGuard.cpp
     ../ui/MidiEditorPanel.cpp
     ../ui/FootswitchPanel.cpp
-    ../ui/SetlistPanel.cpp)
+    ../ui/SetlistPanel.cpp
+    ../ui/ShowCheckPanel.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 

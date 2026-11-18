@@ -262,6 +262,59 @@ jobs:
           if (-not ($logs | Select-String -Pattern "Plugin B4ND Test Slow \(B4ND Test\): NOT CERTIFIED" -Quiet)) { throw "slow plugin certified" }
           if (-not ($logs | Select-String -Pattern "Plugins: 2 loaded, 0 not available" -Quiet)) { throw "VSTi tracks not reloaded from the project" }
 
+      - name: Show check, sleep blocking, crash recovery, short soak
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $q = { param($s) '"' + $s + '"' }
+          $logdir = "$env:APPDATA/B4ND LIVE MTR/logs"
+          New-Item -ItemType Directory -Force show-test | Out-Null
+          foreach ($i in 1..3) { python tools/make-test-wav.py "$PWD/show-test/s$i.wav" --rate 48000 --seconds 30 }
+          Push-Location show-test
+          $p = Start-Process -FilePath (Resolve-Path "../$exe") -PassThru -Wait -ArgumentList @('--screenshot','build.png',
+                 '--save-as', (& $q "$PWD/show.b4nd"), '--setlist-ops', 'select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30')
+          Pop-Location
+          if ($p.ExitCode -ne 0) { throw "build run failed: $($p.ExitCode)" }
+          $proj = & $q "$PWD/show-test/show.b4nd"
+          # 1. no audio device on the runner: LIVE MODE is refused, the check window opens
+          Get-ChildItem $logdir -ErrorAction SilentlyContinue | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-show-check.png','--project',$proj,'--show-check','--try-live')
+          if ($p.ExitCode -ne 0) { throw "show check run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Show check|LIVE MODE" | ForEach-Object { $_.Line }
+          foreach ($want in @("Show check: STOP Audio device", "Show check: (OK|CHECK) Windows power plan: ", "LIVE MODE not entered: the show check has red items")) {
+            if (-not ($logs | Select-String -Pattern $want -Quiet)) { throw "missing: $want" }
+          }
+          # 2. Live Mode (forced, as for a rehearsal) blocks sleep and display off through SetThreadExecutionState
+          Get-ChildItem $logdir | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-live-awake.png','--live','--project',$proj)
+          if ($p.ExitCode -ne 0) { throw "live run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          if (-not ($logs | Select-String -Pattern "Power: sleep and display off blocked" -Quiet)) { throw "sleep not blocked" }
+          # 3. killed while playing song 3: the next open goes back there
+          Remove-Item "$env:APPDATA/B4ND LIVE MTR/last-position.txt" -ErrorAction SilentlyContinue
+          $k = Start-Process -FilePath $exe -PassThru -ArgumentList @('--screenshot','killed.png','--project',$proj,'--song','2','--at','5','--play','60')
+          Start-Sleep -Seconds 20
+          Stop-Process -Id $k.Id -Force
+          Get-Content "$env:APPDATA/B4ND LIVE MTR/last-position.txt"
+          Get-ChildItem $logdir | Remove-Item
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','recovered.png','--project',$proj,'--recover')
+          if ($p.ExitCode -ne 0) { throw "recovery run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Recovery" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Recovery: back to .* at 1[5-9]\.[0-9] s" -Quiet)) { throw "not recovered" }
+          # 4. 4 minute soak without an audio device (virtual transport): memory of song loading / unloading
+          Get-ChildItem $logdir | Remove-Item
+          $env:B4ND_MEDIA_BUDGET_MB = "26"
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-soak.png','--project',$proj,
+                 '--soak','4','--soak-song-seconds','15','--soak-csv','soak-windows.csv','--soak-ignore-dropouts')
+          Remove-Item Env:B4ND_MEDIA_BUDGET_MB
+          Get-Content soak-windows.csv
+          $logs = Get-ChildItem $logdir | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Soak" | ForEach-Object { $_.Line }
+          if ($p.ExitCode -ne 0) { throw "soak failed: $($p.ExitCode)" }
+          if (-not ($logs | Select-String -Pattern "Soak result: PASS" -Quiet)) { throw "soak did not pass" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: B4ND-LIVE-MTR-windows-x64${{ matrix.asio == 'on' && '-asio' || '' }}
@@ -271,6 +324,7 @@ jobs:
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd-analyzer/
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/analyzer/
             screenshot-*.png
+            soak-windows.csv
             tools/make-test-wav.py
             tools/make-test-mid.py
 
@@ -762,3 +816,80 @@ jobs:
           assert any(m[0] == 0xB0 and m[1] == 123 for m in msgs), "All Notes Off missing after stop"
           PY
           fi
+
+      - name: Show check and crash recovery (Live Mode refused with missing audio, kill -9 then resume)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p show-test && cd show-test
+          for i in 1 2 3; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 48000 --seconds 30; done
+          rm -rf show.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot build.png --save-as "$PWD/show.b4nd" \
+            --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30" | tee build.txt
+          grep -q "project save: ok" build.txt
+          export JACK_DEFAULT_SERVER=b4ndshow
+          jackd -n b4ndshow -d dummy -r 48000 -p 256 -P 2 -C 2 &
+          sleep 3
+          # everything there and the device running: LIVE MODE goes on
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ok.png --with-audio --project "$PWD/show.b4nd" --try-live | tee ok.txt
+          grep -q "show check: OK    Audio device: " ok.txt
+          grep -q "show check: ready" ok.txt
+          grep -q "try live: Live Mode on" ok.txt
+          # an audio file gone: red item, LIVE MODE refused, the check window opens instead
+          mv s2.wav s2.hidden
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-show-check.png --with-audio \
+            --project "$PWD/show.b4nd" --show-check --try-live | tee missing.txt
+          mv s2.hidden s2.wav
+          grep -q "show check: STOP  Audio files: 1 missing in 1 song" missing.txt
+          grep -q "try live: refused, show check window open" missing.txt
+          pkill -f "jackd -n b4ndshow" || true
+          # no audio device: refused too
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot nodev.png --project "$PWD/show.b4nd" --try-live | tee nodev.txt
+          grep -q "show check: STOP  Audio device: Not running" nodev.txt
+          grep -q "try live: refused" nodev.txt
+          # crash in the middle of song 3: kill -9 while playing, the next open offers to go back there
+          rm -f "$HOME/.config/B4ND LIVE MTR/last-position.txt"
+          Xvfb :97 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          XVFB=$!
+          sleep 1
+          DISPLAY=:97 "$APP" --screenshot killed.png --project "$PWD/show.b4nd" --song 2 --at 5 --play 60 > killed.txt 2>&1 &
+          APPPID=$!
+          sleep 20
+          kill -9 $APPPID
+          kill $XVFB || true
+          cat "$HOME/.config/B4ND LIVE MTR/last-position.txt"
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot recovered.png --project "$PWD/show.b4nd" --recover | tee rec.txt
+          grep -q "previous session closed cleanly: NO" rec.txt
+          grep -Eq 'recovery: the last run stopped in song 3 ".*" at 1[5-9]\.[0-9] s' rec.txt
+          grep -Eq 'recovery: restored, song 3 at 1[5-9]\.[0-9] s' rec.txt
+          # after a clean close there is nothing to offer
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot clean.png --project "$PWD/show.b4nd" | tee clean.txt
+          grep -q "previous session closed cleanly: yes" clean.txt
+          grep -q "recovery: none" clean.txt
+
+      - name: Soak test (12 min, setlist looped, RAM window, JACK dummy 8 outputs)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          mkdir -p soak-test && cd soak-test
+          for i in 1 2 3 4 5; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 48000 --seconds 30; done
+          rm -rf soak.b4nd
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot build.png --save-as "$PWD/soak.b4nd" \
+            --setlist-ops "add:Four,add:Five,select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,select:4,media:s4.wav,select:5,media:s5.wav,wait:30" | tee build.txt
+          grep -q "setlist: 5 songs" build.txt
+          export JACK_DEFAULT_SERVER=b4ndsoak
+          jackd -n b4ndsoak -d dummy -r 48000 -p 256 -P 8 -C 2 &
+          sleep 3
+          # Budget for three of the five songs: every song change also decodes one song and frees
+          # another, so a leak in loading / unloading shows up as growth.
+          # Dropouts are counted and logged but not judged here: the dummy JACK driver on a shared
+          # cloud machine is not real time (late callbacks happen in the middle of songs, without
+          # any song change). Zero dropouts is checked on the band PC (docs/10 §4).
+          B4ND_MEDIA_BUDGET_MB=40 xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot ../screenshot-soak.png --size 1600x960 \
+            --with-audio --project "$PWD/soak.b4nd" --soak 12 --soak-song-seconds 20 --soak-csv ../soak.csv --soak-ignore-dropouts | tee soak.txt
+          pkill -f "jackd -n b4ndsoak" || true
+          cat ../soak.csv
+          grep -q "soak: 12.0 min, 5 songs, next song every 20 s, engine active" soak.txt
+          # only part of the setlist was in RAM at any time (5 songs are about 55 MB)
+          python3 -c "import csv,sys; m=max(int(r['media_ram_mb']) for r in csv.DictReader(open('../soak.csv'))); print('max media in RAM', m, 'MB'); sys.exit(m >= 50)"
+          grep -Eq "soak result: PASS, .* ([3-9][0-9]) songs played" soak.txt

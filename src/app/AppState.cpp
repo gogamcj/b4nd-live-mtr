@@ -235,6 +235,7 @@ void AppState::selectSong (int index)
     position = 0.0;
     trackLevels.fill (0.0f);
     juce::Logger::writeToLog ("Song selected: " + songs[(size_t) index].title);
+    writePositionRecord (true);
     if (mediaWindowed)
         requestAllMedia();   // the next song starts decoding now, far ones leave RAM
     rebuildPlan();   // the engine swaps it in once the stop fade has finished
@@ -250,6 +251,8 @@ void AppState::setTransport (TransportState s)
         return;
     transport = s;
     lastTickMs = juce::Time::getMillisecondCounterHiRes();
+    updateKeepAwake();
+    writePositionRecord (true);
     sendChangeMessage();
 }
 
@@ -340,6 +343,7 @@ bool AppState::startOutputTest (TestSignal signal, int output)
 {
     if (! isEngineActive() || transport == TransportState::Playing)
         return false;
+    outputTestRun = true;
     EngineCommand c;
     c.type = EngineCommand::Type::StartTest;
     c.intValue = (int) signal;
@@ -1460,6 +1464,7 @@ void AppState::setLiveMode (bool shouldBeLive)
     routing.setLocked (shouldBeLive);   // no routing edits during a show
     device.setAutoReconnectAllowed (! shouldBeLive);   // on stage, reconnecting is a deliberate action
     juce::Desktop::setScreenSaverEnabled (! shouldBeLive);
+    updateKeepAwake();
     juce::Logger::writeToLog (shouldBeLive ? "Entered LIVE MODE" : "Left LIVE MODE");
     sendChangeMessage();
 }
@@ -1714,6 +1719,8 @@ void AppState::timerCallback()
     pollMeasurement();
     pollAnalysis();
     engine.collectGarbage();
+    if (transport == TransportState::Playing)
+        writePositionRecord (false);   // every 10 s at most
     if (mediaWindowed && ++purgeTicks >= 60)
     {
         // Songs that left the RAM window are freed here, on the message thread, once the
@@ -2298,9 +2305,14 @@ juce::String AppState::openProject (const juce::File& folderOrDb)
     if (! missingOnOpen.isEmpty())
         juce::Logger::writeToLog ("MEDIA MISSING on open: " + missingOnOpen.joinIntoString (", "));
 
+    // Read where the last run was before opening the songs writes the record again.
+    const auto lastPosition = juce::StringArray::fromLines (getPositionRecordFile().loadFileAsString());
     applyProjectData (r.data, session.getFolder());
     lastBackupMs = juce::Time::getMillisecondCounterHiRes();
     rememberLastProject();
+    recovery = {};
+    if (staleLockOnOpen)
+        readRecoveryRecord (lastPosition);   // the last run crashed: where was it?
     return {};
 }
 

@@ -241,7 +241,25 @@ public:
     /** Takes finished decodes in now (command line tests that wait without the message loop). */
     void pollMediaForTests() { applyFinishedMedia(); }
 
-    // --- setlist (Phase 13) ---
+    // --- show check, recovery, soak (Phase 14) ---
+    struct ShowCheckItem
+    {
+        enum class Level { Ok, Info, Warn, Block } level = Level::Ok;
+        juce::String title, detail;
+    };
+    /** docs/10 §5: what must be right before a show. Block items stop Live Mode (with an
+        explicit override); Warn items are shown. */
+    std::vector<ShowCheckItem> runShowCheck();
+    static bool hasBlockers (const std::vector<ShowCheckItem>&);
+    bool wasOutputTestRun() const noexcept { return outputTestRun; }
+    /** After a crash: the song and position that were playing (from the last run). */
+    struct Recovery { bool available = false; int song = -1; double seconds = 0.0; juce::String title; };
+    const Recovery& getRecovery() const noexcept { return recovery; }
+    void restoreRecovery();
+    void dismissRecovery() { recovery = {}; }
+    static juce::File getPositionRecordFile();
+
+
     /** All rejected in Live Mode and while playing. Empty string on success. */
     juce::String addSong (const juce::String& title, int atIndex = -1);
     juce::String removeSong (int index);
@@ -429,6 +447,13 @@ private:
     bool mediaWindowed = false;
     std::int64_t setlistBytesEstimate = 0;
     int purgeTicks = 0;
+    bool outputTestRun = false;
+    Recovery recovery;
+    double lastPositionWriteMs = 0.0;
+    juce::String lastPositionWritten;
+    void updateKeepAwake();
+    void writePositionRecord (bool force);
+    void readRecoveryRecord (const juce::StringArray& lines);
     std::int64_t estimateSetlistBytes();
     juce::String guardSetlistChange() const;
     void applyFinishedMedia();

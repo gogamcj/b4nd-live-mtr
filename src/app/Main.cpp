@@ -12,6 +12,8 @@
 #include "ui/MidiEditorPanel.h"
 #include "ui/FootswitchPanel.h"
 #include "ui/SetlistPanel.h"
+#include "ui/ShowCheckPanel.h"
+#include "app/SystemGuard.h"
 #include "core/TimeFormat.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -75,6 +77,13 @@ struct ScreenshotRequest
     juce::StringArray footswitchPresses;   // --footswitch-press cc:65:127@0,note:60:100@300,learn:2@...
     juce::String midiEditTrack;    // --midi-edit <track name>: open the MIDI editor on it (and capture it)
     juce::StringArray midiOps;     // --midi-ops all,quantize,transpose:2,vel:+10,delete,undo,play,stop,live,try-save,save ...
+    bool showCheckWindow = false;  // --show-check: run the pre-show check, print it, capture its window
+    bool tryLive = false;          // --try-live: press LIVE MODE as the user would (the show check may refuse)
+    bool recover = false;          // --recover: take the crash-recovery offer (back to where the last run stopped)
+    double soakMinutes = 0.0;      // --soak <minutes>: play the setlist in a loop, log health every minute
+    double soakSongSeconds = 0.0;  // --soak-song-seconds <s>: go to the next song after this long (0: play songs to the end)
+    juce::File soakCsv;            // --soak-csv <file>
+    bool soakIgnoreDropouts = false;   // --soak-ignore-dropouts: count them but do not fail (virtual devices that are not real time)
     juce::StringArray analyzeTasks;   // --analyze-tasks tempo,key,chords,structure,stems (default: all but stems)
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
@@ -99,6 +108,16 @@ struct ScreenshotRequest
             r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         r.footswitchWindow = args.contains ("--footswitch");
         r.setlistWindow = args.contains ("--setlist");
+        r.showCheckWindow = args.contains ("--show-check");
+        r.tryLive = args.contains ("--try-live");
+        r.recover = args.contains ("--recover");
+        if (const int s = args.indexOf ("--soak"); s >= 0 && s + 1 < args.size())
+            r.soakMinutes = args[s + 1].getDoubleValue();
+        if (const int s = args.indexOf ("--soak-song-seconds"); s >= 0 && s + 1 < args.size())
+            r.soakSongSeconds = args[s + 1].getDoubleValue();
+        if (const int s = args.indexOf ("--soak-csv"); s >= 0 && s + 1 < args.size())
+            r.soakCsv = juce::File::getCurrentWorkingDirectory().getChildFile (args[s + 1].unquoted());
+        r.soakIgnoreDropouts = args.contains ("--soak-ignore-dropouts");
         if (const int s = args.indexOf ("--setlist-ops"); s >= 0 && s + 1 < args.size())
             r.setlistOps = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         if (const int s = args.indexOf ("--footswitch-press"); s >= 0 && s + 1 < args.size())
@@ -182,6 +201,10 @@ public:
             const auto err = state->openProject (screenshot->project);
             std::printf ("project open: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
             printProjectSummary();
+            if (const auto& rec = state->getRecovery(); rec.available)
+                std::printf ("recovery: the last run stopped in song %d \"%s\" at %.1f s\n", rec.song + 1, rec.title.toRawUTF8(), rec.seconds);
+            else
+                std::printf ("recovery: none\n");
         }
         else if (! screenshot)
         {
@@ -199,8 +222,16 @@ public:
 
         if (screenshot)
         {
-            state->selectSong (screenshot->song);
-            state->locate (screenshot->atSeconds);
+            if (screenshot->recover && state->getRecovery().available)
+            {
+                state->restoreRecovery();
+                std::printf ("recovery: restored, song %d at %.1f s\n", state->getCurrentSongIndex() + 1, state->getPositionSeconds());
+            }
+            else
+            {
+                state->selectSong (screenshot->song);
+                state->locate (screenshot->atSeconds);
+            }
             window->setFullScreen (false);
             window->setSize (screenshot->width, screenshot->height);
             for (const auto& m : screenshot->media)
@@ -248,7 +279,7 @@ public:
             {
                 // Show the live view at the requested size instead of going full screen.
                 window->getMainComponent().onLiveModeChanged = nullptr;
-                window->getMainComponent().toggleLiveMode();
+                window->getMainComponent().toggleLiveMode (true);
             }
             if (screenshot->modulesWindow)
                 showModuleWindow (*state, 0);
@@ -349,6 +380,134 @@ public:
                          formatSeconds (s.lengthSeconds, false).c_str(), m.tracks, m.ready, m.loading, m.unloaded, m.missing,
                          state->isSongReady (i) ? "" : "  NOT READY");
         }
+    }
+
+    /** --show-check / --try-live: the pre-show check as text. */
+    void printShowCheck()
+    {
+        const auto items = state->runShowCheck();
+        for (const auto& i : items)
+        {
+            using L = AppState::ShowCheckItem::Level;
+            const char* tag = i.level == L::Block ? "STOP" : i.level == L::Warn ? "CHECK" : i.level == L::Info ? "INFO" : "OK";
+            std::printf ("show check: %-5s %s: %s\n", tag, i.title.toRawUTF8(), i.detail.toRawUTF8());
+            juce::Logger::writeToLog ("Show check: " + juce::String (tag) + " " + i.title + ": " + i.detail);
+        }
+        std::printf ("show check: %s\n", AppState::hasBlockers (items) ? "NOT READY (red items)" : "ready");
+        juce::Logger::writeToLog (AppState::hasBlockers (items) ? "Show check: NOT READY (red items)" : "Show check: ready");
+    }
+
+    /** --soak: the setlist played in a loop, health logged every minute (docs/10 §6). */
+    void startSoak()
+    {
+        soakStartMs = juce::Time::getMillisecondCounterHiRes();
+        soakDrops0 = state->getDropoutCount();
+        soakLate0 = engine->getLateCallbackCount();
+        soakOver0 = engine->getOverloadCount();
+        soakMidiLate0 = state->getMidiOutput().getLateCount();
+        soakRss0 = systemguard::residentBytes();
+        soakNextReport = 60.0;
+        soakSongs = 0;
+        soakRssPeak = soakRss0;
+        if (screenshot->soakCsv != juce::File())
+        {
+            screenshot->soakCsv.replaceWithText ("minute,song,dropouts,late_callbacks,overloads,peak_load_pct,midi_late,rss_mb,media_ram_mb,songs_played\n");
+            soakCsvOut = std::make_unique<juce::FileOutputStream> (screenshot->soakCsv);
+            soakCsvOut->setPosition (soakCsvOut->getFile().getSize());
+        }
+        state->selectSong (0);
+        std::printf ("soak: %.1f min, %d songs, %s, engine %s, RSS %.1f MB\n", screenshot->soakMinutes, (int) state->getSongs().size(),
+                     screenshot->soakSongSeconds > 0.0 ? ("next song every " + juce::String (screenshot->soakSongSeconds, 0) + " s").toRawUTF8() : "songs to the end",
+                     state->isEngineActive() ? "active" : "NOT active", (double) soakRss0 / 1048576.0);
+        std::fflush (stdout);
+        startTimer (250);
+    }
+
+    void soakReport (double minutes)
+    {
+        const auto ms = state->getMediaSummary();
+        const auto rss = systemguard::residentBytes();
+        soakRssPeak = juce::jmax (soakRssPeak, rss);
+        if (minutes >= 1.0 && soakRssAt1 == 0)
+            soakRssAt1 = rss;   // the baseline for growth: after the first songs are in RAM
+        const auto drops = state->getDropoutCount() - soakDrops0;
+        const auto late = engine->getLateCallbackCount() - soakLate0;
+        const auto over = engine->getOverloadCount() - soakOver0;
+        const auto midiLate = state->getMidiOutput().getLateCount() - soakMidiLate0;
+        std::printf ("soak %5.1f min: song %d, dropouts %llu (late %llu, overloads %llu), peak load %.1f%%, MIDI late %llu, RSS %.1f MB, "
+                     "media %lld MB, songs played %d\n", minutes, state->getCurrentSongIndex() + 1, (unsigned long long) drops,
+                     (unsigned long long) late, (unsigned long long) over, engine->getPeakLoad() * 100.0, (unsigned long long) midiLate,
+                     (double) rss / 1048576.0, (long long) (ms.ramBytes >> 20), soakSongs);
+        std::fflush (stdout);
+        juce::Logger::writeToLog ("Soak " + juce::String (minutes, 1) + " min: dropouts " + juce::String ((juce::int64) drops)
+                                  + ", RSS " + juce::String ((double) rss / 1048576.0, 1) + " MB");
+        if (soakCsvOut != nullptr)
+        {
+            *soakCsvOut << juce::String (minutes, 1) << "," << (state->getCurrentSongIndex() + 1) << "," << (juce::int64) drops << ","
+                        << (juce::int64) late << "," << (juce::int64) over << "," << juce::String (engine->getPeakLoad() * 100.0, 1) << ","
+                        << (juce::int64) midiLate << "," << juce::String ((double) rss / 1048576.0, 1) << ","
+                        << (juce::int64) (ms.ramBytes >> 20) << "," << soakSongs << "\n";
+            soakCsvOut->flush();
+        }
+    }
+
+    /** true when the soak is over. */
+    bool soakTick (double elapsed)
+    {
+        const double minutes = elapsed / 60.0;
+        if (minutes >= screenshot->soakMinutes)
+        {
+            state->stop();
+            soakReport (minutes);
+            soakCsvOut.reset();
+            const auto drops = state->getDropoutCount() - soakDrops0;
+            const auto base = soakRssAt1 != 0 ? soakRssAt1 : soakRss0;
+            const double growthMb = ((double) systemguard::residentBytes() - (double) base) / 1048576.0;
+            // Ignoring dropouts also allows the virtual transport (a CI machine without an audio device).
+            const bool ok = (drops == 0 || screenshot->soakIgnoreDropouts) && growthMb < 50.0 && soakSongs > 0
+                            && (state->isEngineActive() || screenshot->soakIgnoreDropouts);
+            std::printf ("soak result: %s, %.1f min, %d songs played, dropouts %llu%s, RSS growth after minute 1: %.1f MB (peak %.1f MB)\n",
+                         ok ? "PASS" : "FAIL", minutes, soakSongs, (unsigned long long) drops,
+                         screenshot->soakIgnoreDropouts ? " (not judged: virtual device)" : "", growthMb, (double) soakRssPeak / 1048576.0);
+            juce::Logger::writeToLog (juce::String ("Soak result: ") + (ok ? "PASS" : "FAIL") + ", " + juce::String (soakSongs) + " songs, dropouts "
+                                      + juce::String ((juce::int64) drops) + ", RSS growth " + juce::String (growthMb, 1) + " MB");
+            if (! ok)
+                setApplicationReturnValue (1);
+            return true;
+        }
+        if (elapsed >= soakNextReport)
+        {
+            soakReport (minutes);
+            soakNextReport += 60.0;
+        }
+        const bool playing = state->getTransportState() == TransportState::Playing;
+        if (playing && screenshot->soakSongSeconds > 0.0 && state->getPositionSeconds() >= screenshot->soakSongSeconds)
+            state->stop();
+        if (state->getTransportState() != TransportState::Playing)
+        {
+            if (soakWaitingForSong)
+            {
+                if (state->isSongReady (state->getCurrentSongIndex()))
+                {
+                    state->restart();
+                    state->play();
+                    if (state->getTransportState() == TransportState::Playing)
+                    {
+                        soakWaitingForSong = false;
+                        ++soakSongs;
+                    }
+                }
+            }
+            else
+            {
+                // A song ended (or was cut short): next one, from the top of the setlist after the last.
+                const int n = (int) state->getSongs().size();
+                if (soakSongs > 0)
+                    state->selectSong ((state->getCurrentSongIndex() + 1) % juce::jmax (1, n));
+                soakWaitingForSong = true;
+            }
+        }
+        return false;
     }
 
     /** --setlist-ops: the setlist window's functions (1-based song numbers). */
@@ -499,7 +658,7 @@ public:
             else if (name == "live")
             {
                 window->getMainComponent().onLiveModeChanged = nullptr;   // no full screen in a test
-                window->getMainComponent().toggleLiveMode();
+                window->getMainComponent().toggleLiveMode (true);
                 result = state->isLiveMode() ? "Live Mode on" : "Live Mode off";
             }
             else if (name == "try-save") { const auto err = ed->save(); result = err.isEmpty() ? "saved" : "refused: " + err; }
@@ -718,6 +877,23 @@ private:
                 showFootswitchWindow (*state);
             if (! screenshot->footswitchPresses.isEmpty())
                 runFootswitchPresses();
+            if (screenshot->showCheckWindow || screenshot->tryLive)
+                printShowCheck();
+            if (screenshot->tryLive)
+            {
+                window->getMainComponent().onLiveModeChanged = nullptr;   // no full screen in a test
+                window->getMainComponent().toggleLiveMode();
+                std::printf ("try live: %s\n", state->isLiveMode() ? "Live Mode on" : "refused, show check window open");
+            }
+            if (screenshot->showCheckWindow && getShowCheckWindowContent() == nullptr)
+                showShowCheckWindow (*state, [this] { window->getMainComponent().toggleLiveMode (true); });
+            if (screenshot->soakMinutes > 0.0)
+            {
+                startSoak();
+                phase = 7;
+                phaseStart = now;
+                return;
+            }
             if (screenshot->countIn >= 0 || screenshot->clickSub > 0)
             {
                 auto c = state->getClickSettings();
@@ -736,6 +912,15 @@ private:
             }
             phase = 1;
             phaseStart = now;
+            return;
+        }
+        if (phase == 7)   // soak
+        {
+            if (! soakTick (elapsed))
+                return;
+            phase = 2;
+            phaseStart = now;
+            startTimer (100);
             return;
         }
         if (phase == 4)   // latency measurement
@@ -830,6 +1015,8 @@ private:
             comp = getSetlistWindowContent();
         if (screenshot->footswitchWindow && getFootswitchWindowContent() != nullptr)
             comp = getFootswitchWindowContent();
+        if (screenshot->showCheckWindow && getShowCheckWindowContent() != nullptr)
+            comp = getShowCheckWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))
@@ -856,6 +1043,12 @@ private:
     std::optional<ScreenshotRequest> screenshot;
     int phase = 0;
     double phaseStart = 0.0;
+    double soakStartMs = 0.0, soakNextReport = 60.0;
+    std::uint64_t soakDrops0 = 0, soakLate0 = 0, soakOver0 = 0, soakMidiLate0 = 0;
+    std::int64_t soakRss0 = 0, soakRssAt1 = 0, soakRssPeak = 0;
+    int soakSongs = 0;
+    bool soakWaitingForSong = true;
+    std::unique_ptr<juce::FileOutputStream> soakCsvOut;
     std::array<float, 16> outputPeaks {};
 };
 

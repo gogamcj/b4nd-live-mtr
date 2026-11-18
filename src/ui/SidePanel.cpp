@@ -1,4 +1,5 @@
 #include "ui/SidePanel.h"
+#include "ui/ShowCheckPanel.h"
 #include "core/TimeFormat.h"
 #include "ui/AnalysisPanel.h"
 #include "ui/FootswitchPanel.h"
@@ -75,9 +76,11 @@ SidePanel::SidePanel (AppState& s) : state (s)
     pluginsButton.setTooltip ("VST3 plugins: scan, Live Certified status, which plugin each VSTi track plays (Ctrl+P)");
     setlistButton.onClick = [this] { showSetlistWindow (state); };
     setlistButton.setTooltip ("Setlist: order, add / delete songs, start times, total, which songs are in RAM (Ctrl+L)");
+    showCheckButton.onClick = [this] { showShowCheckWindow (state, onEnterLive); };
+    showCheckButton.setTooltip ("Pre-show check: audio device, output test, audio files, RAM, MIDI modules, VSTi, footswitch, power plan (Ctrl+K)");
     footswitchButton.onClick = [this] { showFootswitchWindow (state); };
     footswitchButton.setTooltip ("Footswitch / MIDI control: inputs, pedal mapping, MIDI Learn (Ctrl+F)");
-    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton, &setlistButton })
+    for (auto* b : { &newButton, &openButton, &saveButton, &modulesButton, &pluginsButton, &footswitchButton, &setlistButton, &showCheckButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
@@ -253,6 +256,7 @@ void SidePanel::resized()
     auto ai = r.removeFromBottom (30 + n * (buttonH + 4) + 10);
     totalArea = r.removeFromBottom (30);
     setlistButton.setBounds (totalArea.removeFromRight (110).reduced (4, 3));
+    showCheckButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     footswitchButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     pluginsButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
     modulesButton.setBounds (r.removeFromBottom (34).reduced (10, 3));
