@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 5 (VST3 악기 호스트)
+## 현재 상태: Phase 6 (오디오·MIDI 동기화)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -37,6 +37,14 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - VST3 악기: 좌측 PLUGINS 버튼이나 Ctrl+P로 플러그인을 스캔합니다. 플러그인마다 별도 스캐너 프로그램(`b4nd_plugin_scanner.exe`, 앱 옆에 있어야 함)에서 로드하므로, 스캔 중 죽는 플러그인은 앱을 죽이지 않고 블랙리스트에 오릅니다
 - 검사를 통과한 플러그인은 LIVE CERTIFIED, 아닌 것은 NOT CERTIFIED(리허설용, 공연 모드에서 경고)로 표시됩니다
 - VSTi 트랙에 플러그인을 지정하고 `.mid` 파일을 끌어다 놓으면 연주합니다. EDIT로 플러그인 화면을 엽니다 (공연 모드에서는 닫힘). 플러그인 설정은 프로젝트 DB에 저장되고, 다른 PC에 플러그인이 없으면 PLUGIN MISSING으로 표시하되 설정은 지우지 않습니다
+
+- 외부 모듈의 MIDI 시각은 콜백 지터를 걸러 낸 오디오 시계로 계산합니다. 지연이 큰 모듈은 그만큼 미리 보냅니다
+- MIDI Clock: 모듈 프로필에서 "Send MIDI Clock"을 켜면 Start/Stop/Continue/Song Position과 템포를 따르는 클럭을 보냅니다
+- 곡 중간으로 이동하거나 일시정지 후 다시 재생하면, 그 위치의 음색(Program/CC)과 길게 눌려 있어야 할 음을 다시 보냅니다
+- 지연이 있는 VSTi는 MIDI를 그만큼 먼저 받아 소리가 MR과 맞습니다 (PDC)
+- 지연 측정: 오디오 설정 창(Ctrl+,) LATENCY에서 인이어 출력을 입력에 케이블로 연결하고 Measure Round Trip. 그다음 MIDI MODULES 창에서 모듈 출력을 입력에 연결하고 MEASURE DELAY를 누르면 모듈 지연이 Delay ms에 기록됩니다. 측정 틱은 PA 출력으로 나가지 않고, 정지 중에만 동작합니다
+
+![지연 측정](docs/images/phase6-latency.png)
 
 ![플러그인 창](docs/images/phase5-plugins.png)
 
