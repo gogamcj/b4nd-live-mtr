@@ -38,6 +38,9 @@ private:
     static constexpr int headerWidth = 210;
     static constexpr int rulerHeight = 26;
     static constexpr int cueHeight = 22;
+    /** Chord strip under the cues, only for songs with analysed chords. */
+    int chordHeight() const { const auto* s = state.getCurrentSong(); return s != nullptr && ! s->chords.empty() ? 16 : 0; }
+    int topHeight() const { return rulerHeight + cueHeight + chordHeight(); }
 
     AppState& state;
     float lastPlayheadX = -1.0f;

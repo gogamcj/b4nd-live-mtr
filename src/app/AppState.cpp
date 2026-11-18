@@ -1332,6 +1332,11 @@ void AppState::setLiveMode (bool shouldBeLive)
     if (shouldBeLive)
     {
         cancelMeasurement();
+        if (analyzer.isBusy())
+        {
+            analyzer.cancel();   // no analysis running on stage: it takes CPU from the audio
+            juce::Logger::writeToLog ("Analysis cancelled: entering Live Mode");
+        }
         plugins.closeAllEditors();   // no plugin windows on stage
         const auto ps = getPluginSummary();
         if (ps.problems > 0 || ps.notCertified > 0)
@@ -1593,6 +1598,7 @@ void AppState::timerCallback()
 {
     applyFinishedMedia();
     pollMeasurement();
+    pollAnalysis();
     engine.collectGarbage();
 
     // Plugins: unsaved changes (editor / presets) and failures in the audio thread.
@@ -1860,12 +1866,20 @@ ProjectData AppState::toProjectData() const
         sd.lengthSec = s.lengthSeconds;
         sd.tempoPoints = s.tempo.getTempoPoints();
         sd.timeSigPoints = s.tempo.getTimeSigPoints();
+        sd.gridOffsetSec = s.tempo.getOffsetSeconds();
+        sd.bpmConfidence = s.bpmConfidence;
+        sd.keyConfidence = s.keyConfidence;
+        sd.chords = s.chords;
+        sd.analysisRuns = s.analysisRuns;
         for (const auto& c : s.cues)
         {
             CueData cd;
             cd.id = newUuid();
             cd.name = u8 (c.name);
             cd.positionSec = c.seconds;
+            static const juce::StringArray sections { "intro", "verse", "pre_chorus", "chorus", "bridge", "solo", "outro", "custom" };
+            cd.section = sections.contains (c.section) ? u8 (c.section) : std::string ("custom");
+            cd.source = c.source == "ai" ? "ai" : "user";
             sd.cues.push_back (cd);
         }
         for (const auto& t : s.tracks)
@@ -1973,8 +1987,14 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
         s.tempo.setTempoPoints (sd.tempoPoints.empty() ? std::vector<TempoPoint> { { 0.0, sd.baseBpm > 0.0 ? sd.baseBpm : 120.0 } } : sd.tempoPoints);
         if (! sd.timeSigPoints.empty())
             s.tempo.setTimeSigPoints (sd.timeSigPoints);
+        s.tempo.setOffsetSeconds (sd.gridOffsetSec);
+        s.bpmConfidence = sd.bpmConfidence;
+        s.keyConfidence = sd.keyConfidence;
+        s.chords = sd.chords;
+        s.analysisRuns = sd.analysisRuns;
         for (const auto& c : sd.cues)
-            s.cues.push_back ({ fromU8 (c.name), c.positionSec });
+            s.cues.push_back ({ fromU8 (c.name), c.positionSec, c.section.empty() ? juce::String ("custom") : fromU8 (c.section),
+                                c.source == "ai" ? "ai" : "user" });
         for (const auto& td : sd.tracks)
         {
             TrackInfo t;

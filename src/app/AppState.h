@@ -5,11 +5,14 @@
 #include "audio/AudioDeviceController.h"
 #include "core/OutputRouting.h"
 #include "core/TempoMap.h"
+#include "app/AnalyzerRunner.h"
 #include "app/ProjectSession.h"
 #include "media/MediaLoader.h"
 #include "midi/MidiOutputService.h"
 #include "plugins/PluginHost.h"
 
+#include <map>
+#include <optional>
 #include <set>
 
 namespace b4nd
@@ -74,6 +77,8 @@ struct CuePoint
 {
     juce::String name;
     double seconds = 0.0;
+    juce::String section = "custom";   // intro | verse | pre_chorus | chorus | bridge | solo | outro | custom
+    juce::String source = "user";      // user | ai (from analysis, until the user edits it)
 };
 
 struct SongInfo
@@ -87,6 +92,12 @@ struct SongInfo
     std::vector<TrackInfo> tracks;
     std::vector<CuePoint> cues;
     ClickSettingsData click;           // tone, accent, subdivision, count-in (saved per song)
+
+    // --- analysis (docs/07): drafts the user accepted, with their confidences ---
+    double bpmConfidence = -1.0;       // < 0: not from analysis
+    double keyConfidence = -1.0;
+    std::vector<ChordData> chords;     // shown on the timeline, never played
+    std::vector<AnalysisRunData> analysisRuns;
 };
 
 enum class TransportState
@@ -279,6 +290,37 @@ public:
     PluginSummary getPluginSummary() const;
     static juce::String pluginStatusText (const TrackInfo&);
 
+    // --- song analysis (docs/07): offline, separate process, results are drafts ---
+    /** The audio track analysed by default: the first Main-bus audio track with loaded media
+        (one called Original / Mix / MR first), or -1. */
+    int findAnalysisSourceTrack() const;
+    /** Analyses a track of the current song (default: findAnalysisSourceTrack). Needs a saved
+        project (results go to analysis/<song-id>/), not in Live Mode, not while playing. */
+    juce::String startAnalysis (int trackIndex = -1, juce::StringArray tasks = {});
+    void cancelAnalysis();
+    AnalyzerRunner::Status getAnalysisStatus() const { return analyzer.getStatus(); }
+    AnalyzerRunner& getAnalyzer() noexcept { return analyzer; }
+    /** Last analysis result of the current song (from this session or its result.json), or nullptr. */
+    const AnalysisResult* getAnalysisResult();
+
+    /** What to take from the result, and the user's corrections. */
+    struct AnalysisApply
+    {
+        bool withTempo = true, withTimeSig = true, withKey = true, withCues = true, withChords = true;
+        double bpm = 0.0;            // > 0: one constant tempo at this BPM instead of the analysed map
+        double tempoScale = 1.0;     // 2 or 0.5: the analyser picked half / double tempo
+        double gridStartSec = -1.0;  // >= 0: bar 1 starts here instead
+        int numerator = 0;           // > 0: instead of the analysed time signature
+        juce::String key;            // not empty: instead of the analysed key
+        bool useEditedSections = false;
+        std::vector<AnalysisResult::Section> sections;   // edited list (names, removed rows)
+    };
+    /** Writes the accepted parts into the current song (stopped, not in Live Mode). AI cues of an
+        earlier apply are replaced, the user's own cues are kept. One level of undo. */
+    juce::String applyAnalysis (const AnalysisApply&);
+    bool canUndoAnalysisApply() const;
+    juce::String undoAnalysisApply();
+
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
     void setLiveMode (bool shouldBeLive);
@@ -390,6 +432,21 @@ private:
     PluginHost plugins;
     bool instrumentStateStale = false;   // a plugin changed: capture its state when stopped
     std::set<const PluginInstrument*> failureLogged;
+    void pollAnalysis();
+    AnalyzerRunner analyzer;
+    AnalyzerRunner::State lastAnalysisState = AnalyzerRunner::State::Idle;
+    juce::String analysisStartedAt, analysisTasks;
+    std::map<juce::String, AnalysisResult> analysisResults;   // song id -> last result
+    struct AnalysisUndo
+    {
+        juce::String songId;
+        TempoMap tempo;
+        juce::String key;
+        double bpmConfidence = -1.0, keyConfidence = -1.0;
+        std::vector<CuePoint> cues;
+        std::vector<ChordData> chords;
+    };
+    std::optional<AnalysisUndo> analysisUndo;
     MediaPool mediaPool;   // last: its thread stops first on destruction
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppState)

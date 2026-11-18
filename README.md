@@ -19,7 +19,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | 09 | [단계별 개발 계획](docs/09-development-plan.md) |
 | 10 | [테스트 계획](docs/10-test-plan.md) |
 
-## 현재 상태: Phase 7 (믹서와 클릭)
+## 현재 상태: Phase 8 (AI 분석: BPM, Key, 코드, 구조)
 
 - 다크 테마 메인 화면: 상단 트랜스포트/BPM/Key/박자, 좌측 프로젝트·AI 메뉴, 중앙 멀티트랙 타임라인, 하단 믹서·8채널 출력 미터·장치 상태
 - 전체 화면 공연 모드 (F11)
@@ -47,6 +47,15 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - PA(Main) 출력에는 -0.3 dBFS 리미터가 기본으로 걸려 있습니다. 마스터 스트립의 LIM으로 끄고 켜며(공연 모드에서는 잠김), CLIP은 Main 믹스가 0 dBFS를 넘었을 때 켜집니다
 - 상단 CLICK 버튼: 곡마다 카운트인(0/1/2/4마디), 8분·16분 분할, 첫 박 악센트, 음색(Beep/Wood/Stick)을 고릅니다. 카운트인 중에는 BAR . BEAT 칸에 COUNT-IN이 표시됩니다
 - 외부 모듈의 오디오 출력을 오디오 인터페이스 입력에 연결했다면 MIDI MODULES 창의 Audio return에서 그 입력을 고르세요. 믹서에 RETURN 스트립이 생기고 PA로 나갑니다
+
+- AI 분석: 좌측 AI ANALYSIS의 BPM / Beat / Key 등을 누르거나 Ctrl+Shift+A로 엽니다.
+  - 곡의 MR 트랙을 분석해 BPM, 마디 1 위치, 박자, Key, 코드, 구간(Intro/Verse/Chorus...)을 신뢰도와 함께 보여 줍니다.
+  - 결과는 초안입니다. 고친 뒤 APPLY TO SONG을 눌러야 곡에 들어가고, UNDO APPLY로 되돌릴 수 있습니다.
+  - 분석기는 앱 옆의 `b4nd-analyzer` 폴더(Windows 빌드에 포함, Python 불필요)나 Python 3 + numpy + scipy로 실행됩니다. 공연 모드에서는 쓸 수 없습니다.
+
+![AI 분석 창](docs/images/phase8-analysis.png)
+
+![코드 줄과 AI 큐](docs/images/phase8-timeline.png)
 
 ![믹서와 모듈 리턴](docs/images/phase7-mixer-return.png)
 
@@ -83,6 +92,7 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 | Ctrl+, | 오디오 설정 |
 | Ctrl+M | MIDI 음원 모듈 |
 | Ctrl+P | VST3 플러그인 |
+| Ctrl+Shift+A | AI 분석 |
 | Ctrl+S / Ctrl+Shift+S | 저장 / 다른 이름으로 저장 |
 | Ctrl+O / Ctrl+N | 프로젝트 열기 / 새 프로젝트 |
 
@@ -105,7 +115,9 @@ cmake --preset windows-msvc-asio
 cmake --build --preset windows-msvc-asio
 ```
 
-GitHub Actions가 매 push/PR마다 Windows(MSVC)와 Linux에서 빌드·테스트하고, Windows 실행 파일과 UI 스크린샷을 Artifact로 올립니다.
+GitHub Actions가 매 push/PR마다 Windows(MSVC)와 Linux에서 빌드·테스트하고, Windows 실행 파일(단독 실행 분석기 포함)과 UI 스크린샷을 Artifact로 올립니다.
+
+분석기만 따로 테스트하려면: `cd analyzer && python -m unittest discover -s tests -t .` (numpy, scipy 필요)
 
 ## 라이선스 메모
 

@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <algorithm>
 #include <optional>
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -7,6 +8,7 @@
 #include "app/MainWindow.h"
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
+#include "ui/AnalysisPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/B4ndLookAndFeel.h"
@@ -58,6 +60,10 @@ struct ScreenshotRequest
     int countIn = -1;       // --count-in <bars>: click count-in for the current song
     int clickSub = 0;       // --click-sub <1|2|4>
     juce::File project, saveAs;
+    bool analysisWindow = false;   // --analysis: show (and capture) the AI analysis window
+    bool analyze = false;          // --analyze: analyse the current song once its media is loaded
+    bool applyAnalysis = false;    // --apply-analysis: then apply everything and save
+    juce::String analyzer;         // --analyzer <program or python>
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
     {
@@ -71,6 +77,11 @@ struct ScreenshotRequest
         r.settings = args.contains ("--audio-settings");
         r.modulesWindow = args.contains ("--modules");
         r.pluginsWindow = args.contains ("--plugins");
+        r.analysisWindow = args.contains ("--analysis");
+        r.analyze = args.contains ("--analyze");
+        r.applyAnalysis = args.contains ("--apply-analysis");
+        if (const int s = args.indexOf ("--analyzer"); s >= 0 && s + 1 < args.size())
+            r.analyzer = args[s + 1].unquoted();
         if (const int s = args.indexOf ("--size"); s >= 0 && s + 1 < args.size())
         {
             r.width = juce::jmax (640, args[s + 1].upToFirstOccurrenceOf ("x", false, true).getIntValue());
@@ -218,6 +229,10 @@ public:
                 showModuleWindow (*state, 0);
             if (screenshot->pluginsWindow)
                 showPluginWindow (*state);
+            if (screenshot->analyzer.isNotEmpty())
+                state->getAnalyzer().setCommand (juce::File::getCurrentWorkingDirectory().getChildFile (screenshot->analyzer).getFullPathName());
+            if (screenshot->analysisWindow)
+                showAnalysisWindow (*state);
             startTimer (100);
         }
     }
@@ -232,6 +247,8 @@ public:
         {
             std::printf ("  song \"%s\" %.1f BPM %.1f s, %d tracks\n", s.title.toRawUTF8(), s.tempo.bpmAtBeat (0.0),
                          s.lengthSeconds, (int) s.tracks.size());
+            if (! s.analysisRuns.empty() || s.tempo.getOffsetSeconds() > 0.0 || ! s.chords.empty())
+                printSongAnalysis (s);
             for (const auto& t : s.tracks)
                 std::printf ("    track \"%s\" %s %.1f dB%s%s%s\n", t.name.toRawUTF8(), nameForTrackKind (t.kind).toRawUTF8(),
                              (double) t.volumeDb, t.mute ? " MUTE" : "", t.solo ? " SOLO" : "",
@@ -239,6 +256,24 @@ public:
         }
         if (state->getPluginSummary().instruments > 0)
             printPluginSummary();
+    }
+
+    static void printSongAnalysis (const SongInfo& s)
+    {
+        const auto& tp = s.tempo.getTempoPoints();
+        const auto sig = s.tempo.barBeatAtBeat (0.0);
+        std::printf ("    analysis: %.3f BPM (%d tempo points), bar 1 at %.4f s, %d/%d, key %s, %d cues (%d ai), %d chords, %d runs%s\n",
+                     tp.front().bpm, (int) tp.size(), s.tempo.getOffsetSeconds(), sig.numerator, sig.denominator,
+                     s.key.toRawUTF8(), (int) s.cues.size(),
+                     (int) std::count_if (s.cues.begin(), s.cues.end(), [] (const CuePoint& c) { return c.source == "ai"; }),
+                     (int) s.chords.size(), (int) s.analysisRuns.size(),
+                     s.analysisRuns.empty() ? "" : (" (last: " + juce::String (s.analysisRuns.back().status) + ")").toRawUTF8());
+        juce::String cues, chords;
+        for (const auto& c : s.cues)
+            cues << c.name << "@" << juce::String (c.seconds, 2) << " ";
+        for (size_t i = 0; i < s.chords.size() && i < 12; ++i)
+            chords << juce::String::fromUTF8 (s.chords[i].chord.c_str()) << " ";
+        std::printf ("    cues: %s\n    chords: %s\n", cues.toRawUTF8(), chords.toRawUTF8());
     }
 
     void addVstiTrack (const juce::String& pluginFile, const juce::String& midiFile)
@@ -306,6 +341,7 @@ public:
         closeAudioSettingsWindow();
         closeModuleWindow();
         closePluginWindow();
+        closeAnalysisWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -372,6 +408,59 @@ private:
                 }
                 setApplicationReturnValue (1);
             }
+            if (screenshot->analyze)
+            {
+                const auto err = state->startAnalysis();
+                std::printf ("analysis: start %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+                if (err.isEmpty())
+                {
+                    phase = 5;
+                    phaseStart = now;
+                    return;
+                }
+                setApplicationReturnValue (1);
+            }
+            phase = 6;
+        }
+        if (phase == 5)   // analysis running (separate process)
+        {
+            if (state->getAnalyzer().isBusy() && elapsed < 600.0)
+                return;
+            if (state->getAnalyzer().isBusy())
+                state->cancelAnalysis();
+            const auto st = state->getAnalysisStatus();
+            std::printf ("analysis: %s in %.1f s (exit code %d)%s%s\n",
+                         st.state == AnalyzerRunner::State::Done ? "done" : "FAILED", st.elapsedSec, st.exitCode,
+                         st.message.isNotEmpty() ? ": " : "", st.message.toRawUTF8());
+            if (const auto* r = state->getAnalysisResult(); r != nullptr && st.state == AnalyzerRunner::State::Done)
+            {
+                std::printf ("analysis result: %.3f BPM (%.0f%%), bar 1 at %.4f s, %d/%d (%.0f%%), %d tempo points, key %s (%.0f%%), "
+                             "%d chords, %d sections\n", r->bpm, r->bpmConfidence * 100.0, r->gridStartSec, r->numerator,
+                             r->denominator, r->timeSigConfidence * 100.0, (int) r->tempoMap.size(), r->key.toRawUTF8(),
+                             r->keyConfidence * 100.0, (int) r->chords.size(), (int) r->sections.size());
+                if (screenshot->applyAnalysis)
+                {
+                    const auto err = getAnalysisWindowContent() != nullptr ? getAnalysisWindowContent()->applyAll()
+                                                                           : state->applyAnalysis ({});
+                    std::printf ("analysis apply: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+                    if (err.isNotEmpty())
+                        setApplicationReturnValue (1);
+                    if (const auto* s = state->getCurrentSong())
+                        printSongAnalysis (*s);
+                    if (state->hasProjectFile())
+                    {
+                        const auto e2 = state->saveProject();
+                        std::printf ("project save: %s\n", e2.isEmpty() ? "ok" : e2.toRawUTF8());
+                    }
+                }
+            }
+            else
+                setApplicationReturnValue (1);
+            phase = 6;
+            phaseStart = now;
+        }
+        if (phase == 6)
+        {
             if (screenshot->countIn >= 0 || screenshot->clickSub > 0)
             {
                 auto c = state->getClickSettings();
@@ -476,6 +565,8 @@ private:
             comp = getModuleWindowContent();
         if (screenshot->pluginsWindow && getPluginWindowContent() != nullptr)
             comp = getPluginWindowContent();
+        if (screenshot->analysisWindow && getAnalysisWindowContent() != nullptr)
+            comp = getAnalysisWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))

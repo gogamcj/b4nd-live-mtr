@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -25,11 +26,23 @@ def _emit(obj):
     sys.stdout.flush()
 
 
+def _finite(x):
+    """NaN / inf are not JSON: they become null so that the MTR can still read the rest."""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _finite(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_finite(v) for v in x]
+    return x
+
+
 def _write_result(out_dir, result):
+    result = _finite(result)
     os.makedirs(out_dir, exist_ok=True)
     tmp = os.path.join(out_dir, "result.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=1, ensure_ascii=False)
+        json.dump(result, f, indent=1, ensure_ascii=False, allow_nan=False)
     os.replace(tmp, os.path.join(out_dir, "result.json"))
 
 

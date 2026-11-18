@@ -22,7 +22,7 @@ void TimelineView::changeListenerCallback (juce::ChangeBroadcaster*)
 
 juce::Rectangle<int> TimelineView::laneArea() const
 {
-    return getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedTop (rulerHeight + cueHeight);
+    return getLocalBounds().withTrimmedLeft (headerWidth).withTrimmedTop (topHeight());
 }
 
 int TimelineView::trackHeight() const
@@ -112,15 +112,49 @@ void TimelineView::paint (juce::Graphics& g)
         const float x0 = xForSeconds (song->cues[i].seconds);
         const float x1 = i + 1 < song->cues.size() ? xForSeconds (song->cues[i + 1].seconds) : xForSeconds (song->lengthSeconds);
         auto box = juce::Rectangle<float> (x0, (float) cues.getY() + 2.0f, juce::jmax (2.0f, x1 - x0 - 2.0f), (float) cueHeight - 4.0f);
-        g.setColour (theme::accent.withAlpha (i % 2 == 0 ? 0.22f : 0.14f));
+        const bool ai = song->cues[i].source == "ai";   // analysis draft: violet, marked "AI"
+        g.setColour ((ai ? theme::trackVsti : theme::accent).withAlpha (i % 2 == 0 ? 0.24f : 0.15f));
         g.fillRoundedRectangle (box, 3.0f);
         g.setColour (theme::text);
         g.setFont (theme::font (11.0f, true));
-        g.drawFittedText (song->cues[i].name, box.toNearestInt().reduced (5, 0), juce::Justification::centredLeft, 1);
+        g.drawFittedText (song->cues[i].name + (ai ? "  AI" : ""), box.toNearestInt().reduced (5, 0), juce::Justification::centredLeft, 1);
+    }
+
+    // --- chord strip (analysis draft: shown, never played) ---
+    if (const int ch = chordHeight(); ch > 0)
+    {
+        auto strip = juce::Rectangle<int> (lanes.getX(), rulerHeight + cueHeight, lanes.getWidth(), ch);
+        g.setColour (theme::panelInset.darker (0.2f));
+        g.fillRect (strip);
+        g.setFont (theme::mono (10.0f, true));
+        float lastTextEnd = -1.0e9f;
+        for (const auto& c : song->chords)
+        {
+            const float x0 = xForSeconds (c.startSec), x1 = xForSeconds (c.endSec);
+            if (x1 < (float) strip.getX() || x0 > (float) strip.getRight())
+                continue;
+            const auto name = juce::String::fromUTF8 (c.chord.c_str());
+            const bool sure = c.confidence < 0.0 || c.confidence >= 0.7;
+            g.setColour (theme::outline);
+            g.drawVerticalLine ((int) x0, (float) strip.getY() + 2.0f, (float) strip.getBottom() - 2.0f);
+            if (name == "N" || x0 < lastTextEnd)
+                continue;   // no label where it would overlap the previous one
+            g.setColour (sure ? theme::textDim : theme::warn);
+            g.drawText (name, (int) x0 + 3, strip.getY(), juce::jmax (24, (int) (x1 - x0) - 4), ch, juce::Justification::centredLeft);
+            lastTextEnd = x0 + 6.0f + (float) name.length() * 7.0f;
+        }
+    }
+
+    // Lead-in before bar 1 (the music starts later than the file): shaded on the ruler.
+    if (const double off = song->tempo.getOffsetSeconds(); off > 0.0)
+    {
+        const float x = xForSeconds (off);
+        g.setColour (theme::background.withAlpha (0.45f));
+        g.fillRect (juce::Rectangle<float> ((float) lanes.getX(), 0.0f, juce::jmax (0.0f, x - (float) lanes.getX()), (float) rulerHeight));
     }
 
     // --- header column top-left corner ---
-    auto corner = juce::Rectangle<int> (0, 0, headerWidth, rulerHeight + cueHeight);
+    auto corner = juce::Rectangle<int> (0, 0, headerWidth, topHeight());
     g.setColour (theme::panel);
     g.fillRect (corner);
     g.setColour (theme::textDim);
@@ -346,7 +380,7 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (e.x >= headerWidth && e.y < rulerHeight + cueHeight)
+    if (e.x >= headerWidth && e.y < topHeight())
     {
         // jump to the cue segment that was clicked
         const double t = secondsForX ((float) e.x);
@@ -359,9 +393,9 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (e.x < headerWidth && e.y >= rulerHeight + cueHeight)
+    if (e.x < headerWidth && e.y >= topHeight())
     {
-        const int track = (e.y - (rulerHeight + cueHeight)) / trackHeight();
+        const int track = (e.y - (topHeight())) / trackHeight();
         if (! juce::isPositiveAndBelow (track, (int) song->tracks.size()))
             return;
         const int msLeft = headerWidth - 8 - 44;
@@ -375,7 +409,7 @@ void TimelineView::mouseDown (const juce::MouseEvent& e)
 int TimelineView::trackAtY (int y) const
 {
     const auto* song = state.getCurrentSong();
-    const int top = rulerHeight + cueHeight;
+    const int top = topHeight();
     if (song == nullptr || y < top)
         return -1;
     const int t = (y - top) / trackHeight();

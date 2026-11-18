@@ -219,3 +219,13 @@ CREATE TABLE analysis_run (
 - `click_settings`(곡마다, 설계 때부터 있던 표)를 실제로 쓴다: `count_in_bars`, `accent_first`, `sound`(default | wood | stick), `subdivision`(1, 2, 4). `volume_db`는 쓰지 않는다 (클릭 트랙 페이더가 레벨)
 - v4 → v5 업그레이드에서 `count_in_bars`를 모두 0으로 바꾼다. 예전 빌드는 기본값 1을 저장했지만 카운트인을 하지 않았다. 열자마자 곡이 1마디 늦게 시작하는 일이 없게 하기 위해서다. 새 기본값도 0이다
 - 테스트: v5 열 왕복, v1 → v5, v4 → v5에서 카운트인만 0이 되고 다른 클릭 설정은 유지
+
+### Phase 8 (스키마 변경 없음, v5 그대로)
+
+처음부터 있던 열과 테이블을 이제 사용한다.
+- `song.start_offset_sec`: 마디 1 첫 박의 곡 시간(그리드 시작). 그 앞은 음수 박이다
+- `song.bpm_confidence`, `song.key_confidence`: 분석에서 적용한 값의 신뢰도. 손으로 고친 값이나 분석하지 않은 곡은 NULL이다
+- `chord_event`: 코드 타임라인. 표시용이며 재생에는 쓰지 않는다
+- `analysis_run`: 분석 기록. 시작·종료 시각, 상태(done/partial/failed/cancelled), 작업 목록, `analysis/<song-id>/result.json` 경로, 분석기 버전(JSON). 곡마다 최근 20개만 남긴다
+- `cue_point.section`, `cue_point.source`: 분석에서 온 큐는 `source = 'ai'`. 다시 적용하면 AI 큐만 바뀌고 사용자 큐는 남는다
+- 테스트: 위 값의 왕복과, 0 신뢰도와 NULL(값 없음)의 구분

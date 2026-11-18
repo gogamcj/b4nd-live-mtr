@@ -113,3 +113,18 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultFileTests(unittest.TestCase):
+    def test_non_finite_numbers_become_null(self):
+        from b4nd_analyzer import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            cli._write_result(d, {"bpm": {"value": float("nan"), "confidence": float("inf")}, "x": [1.0, float("-inf")]})
+            with open(os.path.join(d, "result.json"), encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn("NaN", text)
+            self.assertNotIn("Infinity", text)
+            r = json.loads(text)
+            self.assertIsNone(r["bpm"]["value"])
+            self.assertEqual(r["x"], [1.0, None])

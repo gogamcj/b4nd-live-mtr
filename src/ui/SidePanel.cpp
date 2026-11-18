@@ -1,5 +1,6 @@
 #include "ui/SidePanel.h"
 #include "core/TimeFormat.h"
+#include "ui/AnalysisPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -21,9 +22,32 @@ SidePanel::SidePanel (AppState& s) : state (s)
     {
         auto* b = aiButtons.add (new juce::TextButton (name));
         b->setWantsKeyboardFocus (false);
-        b->setEnabled (false);   // AI engine arrives in Phase 8-10
-        b->setTooltip ("Available from Phase 8 (AI analyzer). Disabled in Live Mode.");
         addAndMakeVisible (b);
+    }
+    aiButtons[0]->setTooltip ("Adds an audio file to the current song as a new audio track (or drop it on the timeline)");
+    aiButtons[0]->onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Import a song (audio file)", juce::File(), "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg");
+        juce::Component::SafePointer<SidePanel> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe == nullptr || fc.getResult() == juce::File())
+                                      return;
+                                  if (auto err = safe->state.addAudioFile (fc.getResult()); err.isNotEmpty())
+                                      juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Import", err);
+                              });
+    };
+    for (int i = 1; i <= 3; ++i)
+    {
+        aiButtons[i]->setTooltip ("AI analysis of the current song: tempo, bars, key, chords, sections (Ctrl+Shift+A). "
+                                  "Results are drafts you check before applying.");
+        aiButtons[i]->onClick = [this] { showAnalysisWindow (state); };
+    }
+    for (int i = 4; i <= 5; ++i)
+    {
+        aiButtons[i]->setEnabled (false);   // Phase 9 / 10
+        aiButtons[i]->setTooltip (i == 4 ? "Arrives in Phase 9 (Demucs stems)" : "Arrives in Phase 10 (Basic Pitch / CREPE)");
     }
 
     newButton.onClick  = [this] { projectCommands::newProject (state); };
@@ -62,6 +86,8 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
         repaint();
     }
     const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
+    for (int i = 0; i <= 3 && i < aiButtons.size(); ++i)
+        aiButtons[i]->setEnabled (! state.isLiveMode());
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);
     saveButton.setButtonText (state.isDirty() ? "SAVE *" : "SAVE");
@@ -159,7 +185,7 @@ void SidePanel::paint (juce::Graphics& g)
     };
 
     header (songHeader, "SETLIST");
-    header (aiHeader, state.isLiveMode() ? "AI ANALYSIS  (locked in Live Mode)" : "AI ANALYSIS  (Phase 8+)");
+    header (aiHeader, state.isLiveMode() ? "AI ANALYSIS  (locked in Live Mode)" : "AI ANALYSIS");
 
     g.setColour (theme::textDim);
     g.setFont (theme::font (11.0f));

@@ -35,6 +35,17 @@ jobs:
           Write-Host "ASIO SDK root: $root"
           "B4ND_ASIO_SDK_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Analyzer (Python) unit tests
+        shell: pwsh
+        run: |
+          python -m pip install --quiet numpy scipy soundfile pyinstaller
+          cd analyzer
+          python -m unittest discover -s tests -t . -v
+
       - name: Configure
         shell: pwsh
         run: |
@@ -48,7 +59,36 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Unit tests (core + realtime engine)
+        env:
+          B4ND_REQUIRE_ANALYZER: '1'
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Standalone analyzer (PyInstaller, no Python needed on the band PC)
+        shell: pwsh
+        run: |
+          $dir = "build/src/app/B4ND_LIVE_MTR_artefacts/Release"
+          pyinstaller --noconfirm --onedir --name b4nd-analyzer --distpath "$dir" --workpath build/pyinstaller `
+            --specpath build/pyinstaller --paths analyzer --exclude-module tkinter analyzer/pyinstaller_entry.py
+          & "$dir/b4nd-analyzer/b4nd-analyzer.exe" info
+          if ($LASTEXITCODE -ne 0) { throw "standalone analyzer does not run" }
+
+      - name: AI analysis end to end (standalone analyzer, apply, save)
+        shell: pwsh
+        run: |
+          $exe = "build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe"
+          $env:PYTHONPATH = "$PWD/analyzer"
+          python -m b4nd_analyzer synth --out "$PWD/ai-song.wav" --truth "$PWD/ai-truth.json" --bpm 128 --lead-in 0.6
+          Remove-Item Env:PYTHONPATH
+          $q = { param($s) '"' + $s + '"' }
+          $p = Start-Process -FilePath $exe -PassThru -Wait -ArgumentList @('--screenshot','screenshot-analysis.png','--analysis',
+                 '--media', (& $q "$PWD/ai-song.wav"), '--save-as', (& $q "$PWD/ai-test.b4nd"), '--analyze', '--apply-analysis')
+          if ($p.ExitCode -ne 0) { throw "analysis run failed: $($p.ExitCode)" }
+          $logs = Get-ChildItem "$env:APPDATA/B4ND LIVE MTR/logs" | ForEach-Object { Get-Content $_.FullName }
+          $logs | Select-String -Pattern "Analy" | ForEach-Object { $_.Line }
+          if (-not ($logs | Select-String -Pattern "Analysis started: .* using Standalone: " -Quiet)) { throw "standalone analyzer not used" }
+          if (-not ($logs | Select-String -Pattern "Analysis DONE in .*: 128\.0\d BPM .* bar 1 at 0\.6\d\d s, 4/4, A minor" -Quiet)) { throw "wrong analysis result" }
+          if (-not ($logs | Select-String -Pattern "Analysis applied to " -Quiet)) { throw "analysis not applied" }
+          if (-not (Test-Path "ai-test.b4nd/analysis")) { throw "analysis folder not in the package" }
 
       - name: Launch app and capture UI (smoke test)
         shell: pwsh
@@ -122,6 +162,8 @@ jobs:
           path: |
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.exe
             build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd_plugin_scanner.exe
+            build/src/app/B4ND_LIVE_MTR_artefacts/Release/b4nd-analyzer/
+            build/src/app/B4ND_LIVE_MTR_artefacts/Release/analyzer/
             screenshot-*.png
             tools/make-test-wav.py
             tools/make-test-mid.py
@@ -139,6 +181,16 @@ jobs:
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev \
             libxrender-dev libgl1-mesa-dev libjack-jackd2-dev jackd2 xvfb alsa-utils
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Analyzer (Python) unit tests
+        run: |
+          # numpy + scipy only: the WAV fallback reader (no soundfile) is what this job checks.
+          python -m pip install --quiet numpy scipy
+          cd analyzer && python -m unittest discover -s tests -t . -v
+
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
@@ -146,7 +198,32 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Unit tests (core + realtime engine)
+        env:
+          B4ND_REQUIRE_ANALYZER: '1'
         run: ctest --test-dir build --output-on-failure
+
+      - name: AI analysis end to end (analyse, apply, save, reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          PYTHONPATH=analyzer python -m b4nd_analyzer synth --out ai-song.wav --truth ai-truth.json --bpm 128 --lead-in 0.6
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis.png --analysis --media ai-song.wav \
+            --save-as ai-test.b4nd --analyze --apply-analysis | tee analysis.txt
+          grep -q "analysis: done" analysis.txt
+          grep -Eq "analysis result: 128\.0[0-9]+ BPM .*bar 1 at 0\.6[0-9]+ s, 4/4" analysis.txt
+          grep -q "analysis apply: ok" analysis.txt
+          grep -q "project save: ok" analysis.txt
+          test -f ai-test.b4nd/analysis/*/result.json
+          # Reopened: the grid start, chords and AI cues come back from the database.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis-reopened.png --size 1600x960 \
+            --project ai-test.b4nd --at 10 | tee analysis-reopen.txt
+          grep -Eq "analysis: 128\.0[0-9]+ BPM \(1 tempo points\), bar 1 at 0\.6[0-9]+ s, 4/4, key A minor, [0-9]+ cues \(6 ai\), 3[0-9] chords, 1 runs \(last: done\)" analysis-reopen.txt
+          # No analyzer: a clear failure, exit code 1, the song untouched.
+          if xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-analysis-missing.png --media ai-song.wav \
+               --save-as ai-missing.b4nd --analyzer /nonexistent/b4nd-analyzer --analyze | tee analysis-missing.txt; then
+            echo "expected a failure without an analyzer"; exit 1
+          fi
+          grep -q "analysis: FAILED.*NOT FOUND" analysis-missing.txt
 
       - name: Launch app under Xvfb (smoke test)
         run: |

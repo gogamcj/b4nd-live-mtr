@@ -1,6 +1,7 @@
 #include "app/MainComponent.h"
 #include "ui/AudioSettingsPanel.h"
 #include "ui/ModulePanel.h"
+#include "ui/AnalysisPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
@@ -82,6 +83,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress (',', juce::ModifierKeys::commandModifier, 0)) { showAudioSettingsWindow (state); return true; }
     if (key == juce::KeyPress ('m', juce::ModifierKeys::commandModifier, 0)) { showModuleWindow (state); return true; }
     if (key == juce::KeyPress ('p', juce::ModifierKeys::commandModifier, 0)) { showPluginWindow (state); return true; }
+    if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { if (! state.isLiveMode()) showAnalysisWindow (state); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { projectCommands::save (state); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { projectCommands::saveAs (state); return true; }
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) projectCommands::openProject (state); return true; }

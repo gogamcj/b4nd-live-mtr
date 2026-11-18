@@ -8,6 +8,8 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     MainWindow.cpp
     MainComponent.cpp
     AppState.cpp
+    AppStateAnalysis.cpp
+    AnalyzerRunner.cpp
     ProjectSession.cpp
     ../ui/B4ndLookAndFeel.cpp
     ../ui/TransportBar.cpp
@@ -27,7 +29,8 @@ target_sources(B4ND_LIVE_MTR PRIVATE
     ../plugins/PluginCatalog.cpp
     ../plugins/PluginInstrument.cpp
     ../plugins/PluginHost.cpp
-    ../ui/PluginPanel.cpp)
+    ../ui/PluginPanel.cpp
+    ../ui/AnalysisPanel.cpp)
 
 target_include_directories(B4ND_LIVE_MTR PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
@@ -76,6 +79,14 @@ target_link_libraries(B4ND_LIVE_MTR
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# The analyzer (Python package, docs/07) is copied next to the app: analyzer/b4nd_analyzer.
+# A standalone build (b4nd-analyzer/, PyInstaller, made in CI) can sit there too.
+target_compile_definitions(B4ND_LIVE_MTR PRIVATE B4ND_SOURCE_ANALYZER_DIR="${PROJECT_SOURCE_DIR}/analyzer")
+add_custom_command(TARGET B4ND_LIVE_MTR POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/analyzer/b4nd_analyzer"
+            "$<TARGET_FILE_DIR:B4ND_LIVE_MTR>/analyzer/b4nd_analyzer"
+    VERBATIM)
 
 # The plugin scanner runs as a separate process and must sit next to the app executable.
 add_dependencies(B4ND_LIVE_MTR b4nd_plugin_scanner)
