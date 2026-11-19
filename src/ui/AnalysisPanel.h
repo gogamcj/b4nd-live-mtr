@@ -47,12 +47,16 @@ private:
     double draftBeatSeconds() const;
     juce::String lockReason() const;
     void setMessage (const juce::String&, bool isError);
+    void chooseAnalyzerProgram();
+    /** What to do before ANALYZE can work (empty: ready). */
+    juce::StringArray nextSteps (bool& ready) const;
 
     AppState& state;
 
     juce::TextButton analyzerButton { "ANALYZER..." }, checkButton { "CHECK" }, analyzeButton { "ANALYZE" },
                      cancelButton { "CANCEL" }, applyButton { "APPLY TO SONG" }, undoButton { "UNDO APPLY" },
-                     halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" };
+                     halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" },
+                     importButton { "ADD SONG AUDIO FILE..." };
     juce::ComboBox sourceBox, timeSigBox, keyBox;
     juce::ToggleButton taskTempo { "Tempo / beats / bars" }, taskKey { "Key" }, taskChords { "Chords" },
                        taskSections { "Sections (cues)" }, taskStems { "Stems (Demucs, slow)" }, taskMidi { "Audio to MIDI (from stems)" };
@@ -60,6 +64,7 @@ private:
     juce::TextEditor bpmEditor, gridEditor;
     juce::ListBox sectionList { "sections", this };
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::String sourceSig;   // tracks and their media state the source list was built for
 
     // The draft the user edits (from the last result).
     struct DraftSection { AnalysisResult::Section s; bool include = true; };
