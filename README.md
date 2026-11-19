@@ -49,6 +49,8 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - 외부 모듈의 오디오 출력을 오디오 인터페이스 입력에 연결했다면 MIDI MODULES 창의 Audio return에서 그 입력을 고르세요. 믹서에 RETURN 스트립이 생기고 PA로 나갑니다
 
 - AI 분석: 좌측 AI ANALYSIS의 BPM / Beat / Key 등을 누르거나 Ctrl+Shift+A로 엽니다.
+  - 순서: 프로젝트 저장(NEW) → 분석 창의 ADD SONG AUDIO FILE...로 노래 파일 추가(또는 타임라인에 끌어다 놓기) → 로딩이 끝나면 ANALYZE → 확인 후 APPLY TO SONG. 결과가 없을 때 창 오른쪽에 아직 할 일이 표시됩니다.
+  - ANALYZER... 는 분석 프로그램을 고르는 버튼이고 보통 Automatic 그대로 둡니다 (노래를 고르는 곳이 아닙니다).
   - 곡의 MR 트랙을 분석해 BPM, 마디 1 위치, 박자, Key, 코드, 구간(Intro/Verse/Chorus...)을 신뢰도와 함께 보여 줍니다.
   - 결과는 초안입니다. 고친 뒤 APPLY TO SONG을 눌러야 곡에 들어가고, UNDO APPLY로 되돌릴 수 있습니다.
   - 분석기는 앱 옆의 `b4nd-analyzer` 폴더(Windows 빌드에 포함, Python 불필요)나 Python 3 + numpy + scipy로 실행됩니다. 공연 모드에서는 쓸 수 없습니다.

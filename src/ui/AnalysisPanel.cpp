@@ -107,7 +107,7 @@ private:
 AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
 {
     for (auto* b : { &analyzerButton, &checkButton, &analyzeButton, &cancelButton, &applyButton, &undoButton,
-                     &halfButton, &doubleButton, &earlierButton, &laterButton })
+                     &halfButton, &doubleButton, &earlierButton, &laterButton, &importButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -148,21 +148,57 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
     sectionList.setColour (juce::ListBox::backgroundColourId, theme::panelInset);
     addAndMakeVisible (sectionList);
 
-    analyzerButton.setTooltip ("Choose the analyzer: the standalone b4nd-analyzer program, or a Python 3 with numpy and scipy");
+    analyzerButton.setTooltip ("Which analyzer program runs the analysis (normally automatic: the one included with the app). "
+                               "This is not where you choose the song.");
     analyzerButton.onClick = [this]
     {
-        chooser = std::make_unique<juce::FileChooser> ("Analyzer program or python executable", juce::File(), "*");
+        juce::PopupMenu m;
+        const bool automatic = state.getAnalyzer().getCommand().isEmpty();
+        m.addItem (1, "Automatic (the analyzer included with the app)", true, automatic);
+        m.addItem (2, "Choose another analyzer program...", true, ! automatic);
+        juce::Component::SafePointer<AnalysisPanel> safe (this);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&analyzerButton), [safe] (int id)
+        {
+            if (safe == nullptr || id == 0)
+                return;
+            if (id == 1)
+            {
+                safe->state.getAnalyzer().setCommand ({});
+                safe->setMessage ({}, false);
+                safe->probeAnalyzer();
+            }
+            else
+                safe->chooseAnalyzerProgram();
+        });
+    };
+    importButton.setTooltip ("Adds an audio file (MP3 / WAV / FLAC) to the current song as a new track and selects it for analysis. "
+                             "Dropping the file on the timeline does the same.");
+    importButton.onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Song audio file to analyse", juce::File(), "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg");
         juce::Component::SafePointer<AnalysisPanel> safe (this);
         chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [safe] (const juce::FileChooser& fc)
                               {
                                   if (safe == nullptr || fc.getResult() == juce::File())
                                       return;
-                                  safe->state.getAnalyzer().setCommand (fc.getResult().getFullPathName());
-                                  safe->probeAnalyzer();
+                                  if (auto err = safe->state.addAudioFile (fc.getResult()); err.isNotEmpty())
+                                  {
+                                      safe->setMessage (err, true);
+                                      return;
+                                  }
+                                  // The new track is the last one: analyse it.
+                                  if (const auto* song = safe->state.getCurrentSong(); song != nullptr && ! song->tracks.empty())
+                                  {
+                                      safe->fillSourceBox();
+                                      safe->sourceBox.setSelectedId ((int) song->tracks.size(), juce::dontSendNotification);
+                                  }
+                                  safe->setMessage ("Added " + fc.getResult().getFileName() + ". It is loading; press ANALYZE when it shows READY.", false);
+                                  safe->repaint();
                               });
     };
     checkButton.onClick = [this] { probeAnalyzer(); };
+    sourceBox.onChange = [this] { repaint(); };
     analyzeButton.onClick = [this]
     {
         juce::StringArray tasks;
@@ -216,6 +252,55 @@ void AnalysisPanel::setMessage (const juce::String& text, bool isError)
     message = text;
     messageIsError = isError;
     repaint();
+}
+
+void AnalysisPanel::chooseAnalyzerProgram()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Analyzer program (b4nd-analyzer.exe) or python.exe", juce::File(), "*");
+    juce::Component::SafePointer<AnalysisPanel> safe (this);
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || fc.getResult() == juce::File())
+                                  return;
+                              const auto f = fc.getResult();
+                              // People pick their song here: say where the song goes instead of breaking the analyzer.
+                              if (f.hasFileExtension ("wav;mp3;flac;aif;aiff;ogg;m4a;aac;wma"))
+                              {
+                                  juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "This is a song, not the analyzer",
+                                      "ANALYZER... only chooses the analysis program, and is normally left on Automatic.\n\n"
+                                      "To analyse " + f.getFileName() + ": press ADD SONG AUDIO FILE... in this window "
+                                      "(or drop the file on the timeline), wait until it is loaded, then press ANALYZE.");
+                                  return;
+                              }
+                              safe->state.getAnalyzer().setCommand (f.getFullPathName());
+                              safe->probeAnalyzer();
+                          });
+}
+
+juce::StringArray AnalysisPanel::nextSteps (bool& ready) const
+{
+    juce::StringArray steps;
+    ready = false;
+    const auto* song = state.getCurrentSong();
+    if (! state.hasProjectFile())
+        steps.add ("1. Save the project: NEW (top left) or Ctrl+Shift+S. The results are stored in the project folder.");
+    const int idx = sourceBox.getSelectedId() - 1;
+    const TrackInfo* t = song != nullptr && juce::isPositiveAndBelow (idx, (int) song->tracks.size()) ? &song->tracks[(size_t) idx] : nullptr;
+    if (t == nullptr || t->mediaStatus != TrackInfo::MediaStatus::Ready)
+    {
+        if (t != nullptr && t->mediaStatus == TrackInfo::MediaStatus::Loading)
+            steps.add (juce::String (steps.size() + 1) + ". Wait: " + t->name + " is still loading.");
+        else
+            steps.add (juce::String (steps.size() + 1) + ". Add the song's audio: ADD SONG AUDIO FILE... (or drop the MP3 / WAV on the timeline), "
+                       "then pick that track in the list above.");
+    }
+    if (analyzerChecked && analyzerInfo.isEmpty())
+        steps.add (juce::String (steps.size() + 1) + ". The analyzer does not start: ANALYZER... > Automatic.");
+    ready = steps.isEmpty();
+    steps.add (juce::String (steps.size() + 1) + ". Tick what you want (Stems take several minutes), press ANALYZE.");
+    steps.add (juce::String (steps.size() + 1) + ". Check the results, fix them if needed, press APPLY TO SONG.");
+    return steps;
 }
 
 void AnalysisPanel::probeAnalyzer()
@@ -296,6 +381,8 @@ void AnalysisPanel::fillSourceBox()
     }
     const int def = state.findAnalysisSourceTrack();
     sourceBox.setSelectedId (keep > 0 && sourceBox.indexOfItemId (keep) >= 0 ? keep : def + 1, juce::dontSendNotification);
+    if (sourceBox.getSelectedId() == 0 && sourceBox.getNumItems() > 0)
+        sourceBox.setSelectedItemIndex (0, juce::dontSendNotification);
 }
 
 void AnalysisPanel::loadDraft (const AnalysisResult& r)
@@ -348,6 +435,17 @@ void AnalysisPanel::refresh()
             gridEditor.clear();
         }
     }
+    {
+        juce::String sig;
+        if (song != nullptr)
+            for (const auto& t : song->tracks)
+                sig << t.id << (int) t.mediaStatus << ";";
+        if (sig != sourceSig)
+        {
+            sourceSig = sig;
+            fillSourceBox();   // "(no audio loaded)" goes away when the file is in RAM
+        }
+    }
     const bool busy = st.state == AnalyzerRunner::State::Preparing || st.state == AnalyzerRunner::State::Running;
     const bool locked = lockReason().isNotEmpty();
     analyzeButton.setEnabled (! busy && ! locked && song != nullptr);
@@ -357,6 +455,8 @@ void AnalysisPanel::refresh()
     taskStems.setTooltip (stemsAvailable || ! analyzerChecked ? juce::String (stemsTip) : "Stems are not available: " + stemsReason);
     analyzerButton.setEnabled (! busy && ! state.isLiveMode());
     const bool hasResult = r != nullptr;
+    sectionList.setVisible (hasResult);
+    importButton.setEnabled (! busy && ! locked);
     for (auto* c : std::initializer_list<juce::Component*> { &applyButton, &halfButton, &doubleButton, &earlierButton, &laterButton,
                                                              &bpmEditor, &gridEditor, &timeSigBox, &keyBox, &useTempo, &useTimeSig,
                                                              &useKey, &useChords, &useCues, &useStems, &useMidi, &sectionList })
@@ -512,9 +612,22 @@ void AnalysisPanel::paint (juce::Graphics& g)
     g.setFont (theme::font (13.0f));
     if (r == nullptr)
     {
-        g.setColour (theme::textDim);
-        g.drawFittedText ("No analysis yet for this song. Results are drafts: check them before APPLY.", resultsArea,
-                          juce::Justification::centred, 2);
+        bool ready = false;
+        const auto steps = nextSteps (ready);
+        auto area = sectionList.getBounds().reduced (14, 12);
+        g.setColour (theme::panelInset);
+        g.fillRect (sectionList.getBounds());
+        g.setColour (ready ? theme::ok : theme::warn);
+        g.setFont (theme::font (15.0f, true));
+        g.drawText (ready ? "READY TO ANALYSE" : "BEFORE YOU CAN ANALYSE", area.removeFromTop (26), juce::Justification::centredLeft);
+        area.removeFromTop (6);
+        g.setFont (theme::font (13.0f));
+        for (int i = 0; i < steps.size(); ++i)
+        {
+            const bool todo = ! ready && i < steps.size() - 2;
+            g.setColour (todo ? theme::text : theme::textDim);
+            g.drawFittedText (steps[i], area.removeFromTop (48), juce::Justification::topLeft, 3, 1.0f);
+        }
     }
     else
     {
@@ -630,7 +743,8 @@ void AnalysisPanel::resized()
         t->setBounds (src.removeFromLeft (t == &taskTempo ? 170 : t == &taskSections ? 140 : 80));
     }
     auto src2 = r.removeFromTop (26);
-    src2.removeFromLeft (312);
+    importButton.setBounds (src2.removeFromLeft (300));
+    src2.removeFromLeft (12);
     taskStems.setBounds (src2.removeFromLeft (150));
     taskMidi.setBounds (src2.removeFromLeft (200));
     r.removeFromTop (6);
