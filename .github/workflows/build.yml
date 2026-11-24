@@ -430,6 +430,13 @@ jobs:
           cat ../soak-macos.csv
           grep -q "soak result: PASS" soak.txt
 
+      - name: Crash reports (on failure)
+        if: failure()
+        run: |
+          for f in "$HOME/Library/B4ND LIVE MTR/logs"/crash-*.txt; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
+          for f in "$HOME/Library/Logs/DiagnosticReports"/B4ND*; do [ -f "$f" ] && { echo "== $f"; head -c 20000 "$f"; }; done
+          true
+
       - name: Package the app (zip)
         if: always()
         run: |
