@@ -176,8 +176,12 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         getLogDirectory().createDirectory();
-        logger.reset (juce::FileLogger::createDateStampedLogger ("B4ND LIVE MTR/logs", "b4nd_", ".log",
-                                                                 "B4ND LIVE MTR " + getApplicationVersion()));
+        // An explicit folder (not createDateStampedLogger): on macOS that one writes to ~/Library/Logs,
+        // away from the crash reports and settings in the app data folder.
+        logger = std::make_unique<juce::FileLogger> (
+            getLogDirectory().getChildFile ("b4nd_" + juce::Time::getCurrentTime().formatted ("%Y-%m-%d_%H-%M-%S") + ".log")
+                .getNonexistentSibling(),
+            "B4ND LIVE MTR " + getApplicationVersion(), 0);
         juce::Logger::setCurrentLogger (logger.get());
         juce::Logger::writeToLog ("OS: " + juce::SystemStats::getOperatingSystemName()
                                   + "  CPU: " + juce::SystemStats::getCpuModel()
