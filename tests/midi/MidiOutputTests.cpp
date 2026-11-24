@@ -379,6 +379,11 @@ TEST_CASE ("MIDI out: engine events played in real time arrive on time, module d
     engine.prepare (sr, block, 2, 0);
     engine.setRouting (OutputRouting::createForDevice (2));
     engine.setOutputLatencyMs (5.0);
+    // The expected times below come from the raw wall clock of each block. The jitter filter
+    // (tested in tests/engine/MidiEngineTests.cpp) would place a block that the scheduler started
+    // late at its smoothed, earlier time, so the note looks "early" against the raw reference
+    // (seen on macOS CI runners). Compare like with like.
+    engine.setClockSmoothing (false);
 
     auto plan = std::make_unique<PlaybackPlan>();
     plan->lengthSamples = (std::int64_t) (sr * 10);
