@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
+# macOS 11 (Big Sur) or newer: std::filesystem, Apple Silicon and Intel. Set before project().
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
+endif()
+
 project(B4ND_LIVE_MTR VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)

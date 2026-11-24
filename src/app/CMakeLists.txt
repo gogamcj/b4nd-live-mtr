@@ -1,6 +1,11 @@
 juce_add_gui_app(B4ND_LIVE_MTR
     PRODUCT_NAME "B4ND LIVE MTR"
     COMPANY_NAME "B4ND"
+    BUNDLE_ID "com.b4nd.livemtr"
+    # macOS: audio inputs (module returns, latency probe) need the microphone permission,
+    # otherwise CoreAudio delivers silence on every input.
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "B4ND LIVE MTR listens to the audio interface inputs (sound module returns and the latency test)."
     VERSION ${PROJECT_VERSION})
 
 target_sources(B4ND_LIVE_MTR PRIVATE
@@ -56,6 +61,10 @@ target_compile_definitions(B4ND_LIVE_MTR PRIVATE
     JUCE_PLUGINHOST_AU=0
     JUCE_PLUGINHOST_LADSPA=0
     JUCE_PLUGINHOST_LV2=0)
+
+# macOS: CoreAudio + CoreMIDI (JUCE defaults; the WASAPI / DirectSound flags only matter on
+# Windows). VST3 only, like Windows: AU stays off (one plugin format, one tested behaviour).
+# VST3 folders searched: /Library/Audio/Plug-Ins/VST3 and ~/Library/Audio/Plug-Ins/VST3.
 
 if(UNIX AND NOT APPLE)
     # Linux is a development target only; JACK makes headless engine testing possible (jackd -d dummy).

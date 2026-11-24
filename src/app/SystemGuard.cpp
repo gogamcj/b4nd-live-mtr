@@ -10,6 +10,11 @@
  #include <vector>
  #pragma comment (lib, "psapi.lib")
  #pragma comment (lib, "powrprof.lib")
+#elif JUCE_MAC
+ #include <IOKit/pwr_mgt/IOPMLib.h>
+ #include <IOKit/ps/IOPowerSources.h>
+ #include <IOKit/ps/IOPSKeys.h>
+ #include <mach/mach.h>
 #elif JUCE_LINUX
  #include <unistd.h>
 #endif
@@ -18,6 +23,9 @@ namespace b4nd::systemguard
 {
 
 static bool awake = false;
+#if JUCE_MAC
+static IOPMAssertionID sleepAssertion = kIOPMNullAssertionID;
+#endif
 
 bool keepAwake (bool on)
 {
@@ -25,6 +33,22 @@ bool keepAwake (bool on)
     const auto r = SetThreadExecutionState (on ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) : ES_CONTINUOUS);
     awake = on && r != 0;
     return r != 0;
+#elif JUCE_MAC
+    // "PreventUserIdleDisplaySleep" keeps both the display and the system awake (lid open).
+    if (on && sleepAssertion == kIOPMNullAssertionID)
+    {
+        const auto reason = CFSTR ("B4ND LIVE MTR: show running");
+        if (IOPMAssertionCreateWithName (kIOPMAssertionTypePreventUserIdleDisplaySleep, kIOPMAssertionLevelOn,
+                                         reason, &sleepAssertion) != kIOReturnSuccess)
+            sleepAssertion = kIOPMNullAssertionID;
+    }
+    else if (! on && sleepAssertion != kIOPMNullAssertionID)
+    {
+        IOPMAssertionRelease (sleepAssertion);
+        sleepAssertion = kIOPMNullAssertionID;
+    }
+    awake = sleepAssertion != kIOPMNullAssertionID;
+    return on ? awake : true;
 #else
     awake = false;
     juce::ignoreUnused (on);
@@ -49,6 +73,14 @@ std::int64_t residentBytes()
     if (parts.size() < 2)
         return 0;
     return parts[1].getLargeIntValue() * (std::int64_t) juce::jmax (1L, sysconf (_SC_PAGESIZE));
+#elif JUCE_MAC
+    // The physical footprint is what Activity Monitor shows as "Memory": compressed and swapped
+    // pages count too, so a leak cannot hide behind macOS memory compression.
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info (mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t> (&info), &count) == KERN_SUCCESS)
+        return (std::int64_t) info.phys_footprint;
+    return 0;
 #else
     return 0;
 #endif
@@ -78,6 +110,22 @@ PowerPlan activePowerPlan()
                                || plan.name.contains (juce::CharPointer_UTF8 ("\xea\xb3\xa0\xec\x84\xb1\xeb\x8a\xa5"));   // "고성능"
 #endif
     return plan;
+}
+
+int onBatteryPower()
+{
+#if JUCE_MAC
+    CFTypeRef info = IOPSCopyPowerSourcesInfo();
+    if (info == nullptr)
+        return -1;
+    int result = -1;
+    if (CFStringRef type = IOPSGetProvidingPowerSourceType (info); type != nullptr)
+        result = CFStringCompare (type, CFSTR (kIOPMBatteryPowerKey), 0) == kCFCompareEqualTo ? 1 : 0;
+    CFRelease (info);
+    return result;
+#else
+    return -1;
+#endif
 }
 
 } // namespace b4nd::systemguard

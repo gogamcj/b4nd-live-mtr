@@ -328,6 +328,142 @@ jobs:
             tools/make-test-wav.py
             tools/make-test-mid.py
 
+  macos:
+    name: macOS (Apple clang, Apple Silicon)
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Ninja
+        run: command -v ninja || brew install ninja
+
+      - name: Analyzer (Python) unit tests
+        run: |
+          python -m pip install --quiet numpy scipy soundfile onnxruntime
+          cd analyzer && B4ND_REQUIRE_ONNX=1 python -m unittest discover -s tests -t . -v
+
+      - name: Configure
+        run: cmake --preset macos
+
+      - name: Build
+        run: cmake --build --preset macos --parallel
+
+      - name: Unit tests (core + realtime engine + VST3 host)
+        env:
+          B4ND_REQUIRE_ANALYZER: '1'
+        run: ctest --test-dir build/macos --output-on-failure
+
+      - name: App bundle check (scanner, analyzer, microphone permission)
+        run: |
+          BUNDLE="build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.app"
+          test -x "$BUNDLE/Contents/MacOS/B4ND LIVE MTR"
+          test -x "$BUNDLE/Contents/MacOS/b4nd_plugin_scanner"
+          test -d "$BUNDLE/Contents/MacOS/analyzer/b4nd_analyzer"
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$BUNDLE/Contents/Info.plist" | grep -q com.b4nd.livemtr
+
+      - name: Launch app and capture UI (smoke test, CoreAudio device scan)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.app/Contents/MacOS/B4ND LIVE MTR"
+          python3 tools/make-test-wav.py test-backing.wav --rate 44100 --seconds 20
+          "$APP" --screenshot screenshot-macos.png --size 1600x960 --at 75
+          "$APP" --screenshot screenshot-macos-live.png --live --size 1600x960 --at 75
+          "$APP" --screenshot screenshot-macos-audio-settings.png --audio-settings --with-audio
+          "$APP" --screenshot screenshot-macos-media.png --size 1600x960 --media "$PWD/test-backing.wav" \
+            --save-as "$PWD/mac-test.b4nd" | tee save.txt
+          grep -q "project save-as: ok" save.txt
+          test -f mac-test.b4nd/project.db
+          test ! -e mac-test.b4nd/session.lock
+          "$APP" --screenshot screenshot-macos-reopened.png --project "$PWD/mac-test.b4nd" | tee reopen.txt
+          grep -q "project open: ok" reopen.txt
+          ls screenshot-macos*.png
+          # Logs and settings live in ~/Library/B4ND LIVE MTR on macOS
+          ls "$HOME/Library/B4ND LIVE MTR/logs"
+          grep -h "OS: " "$HOME/Library/B4ND LIVE MTR/logs/"*.log | tail -1
+          grep -h "Audio" "$HOME/Library/B4ND LIVE MTR/logs/"*.log | tail -20 || true
+
+      - name: VST3 host test (bundles, scanner process, blacklist, VSTi track, save / reopen)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.app/Contents/MacOS/B4ND LIVE MTR"
+          VST="$PWD/build/macos/tests/plugins/vst3"
+          ls "$VST"
+          test -d "$VST/B4ND Test Synth.vst3/Contents/MacOS"
+          python3 tools/make-test-mid.py pads.mid --bars 16
+          "$APP" --screenshot screenshot-macos-plugins.png --plugins \
+            --vsti "$VST/B4ND Test Synth.vst3" --vsti-midi "$PWD/pads.mid" --vsti "$VST/B4ND Test Crash.vst3" \
+            --save-as "$PWD/vsti.b4nd" | tee vsti.txt
+          grep -q "vsti scan B4ND Test Crash.vst3: crashed while loading" vsti.txt
+          grep -q 'B4ND Test Synth \[READY\], 48 notes' vsti.txt
+          "$APP" --screenshot screenshot-macos-vsti-reopened.png --size 1600x960 --project "$PWD/vsti.b4nd" | tee vsti2.txt
+          grep -qE 'B4ND Test Synth \[READY\], 48 notes, state [1-9][0-9]* bytes' vsti2.txt
+
+      - name: Show check, sleep blocking (IOKit), short soak (memory)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.app/Contents/MacOS/B4ND LIVE MTR"
+          LOGS="$HOME/Library/B4ND LIVE MTR/logs"
+          mkdir -p show-test && cd show-test
+          for i in 1 2 3; do python3 ../tools/make-test-wav.py "s$i.wav" --rate 48000 --seconds 30; done
+          "$APP" --screenshot build.png --save-as "$PWD/show.b4nd" \
+            --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30" | tee build.txt
+          grep -Eq "project save(-as)?: ok" build.txt
+          # no audio device opened: LIVE MODE is refused
+          if ! "$APP" --screenshot ../screenshot-macos-show-check.png --project "$PWD/show.b4nd" --show-check --try-live > check.txt 2>&1; then
+            cat check.txt
+            echo "::group::show check under lldb (backtrace)"
+            lldb --batch -o "process handle SIGKILL -s false" -o run -k "thread backtrace all" -k quit -- \
+              "$APP" --screenshot ../screenshot-macos-show-check.png --project "$PWD/show.b4nd" --show-check --try-live || true
+            echo "::endgroup::"
+            sleep 15
+            ls -la "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports 2>/dev/null | tail -20 || true
+            exit 1
+          fi
+          cat check.txt
+          grep -q "show check: STOP  Audio device: Not running" check.txt
+          grep -q "try live: refused" check.txt
+          # forced Live Mode holds an IOKit power assertion
+          rm -f "$LOGS"/*.log
+          "$APP" --screenshot live.png --live --project "$PWD/show.b4nd"
+          grep -q "Power: sleep and display off blocked" "$LOGS"/*.log
+          # 3 minute soak without an audio device: memory of song loading / unloading (phys_footprint)
+          rm -f "$LOGS"/*.log
+          B4ND_MEDIA_BUDGET_MB=26 "$APP" --screenshot ../screenshot-macos-soak.png --project "$PWD/show.b4nd" \
+            --soak 3 --soak-song-seconds 15 --soak-csv ../soak-macos.csv --soak-ignore-dropouts | tee soak.txt
+          cat ../soak-macos.csv
+          grep -q "soak result: PASS" soak.txt
+
+      - name: Crash reports (on failure)
+        if: failure()
+        run: |
+          for f in "$HOME/Library/B4ND LIVE MTR/logs"/crash-*.txt; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
+          for f in "$HOME/Library/Logs/DiagnosticReports"/B4ND* /Library/Logs/DiagnosticReports/B4ND*; do [ -f "$f" ] && { echo "== $f"; head -c 20000 "$f"; }; done
+          true
+
+      - name: Package the app (zip)
+        if: always()
+        run: |
+          DIR="build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release"
+          if [ -d "$DIR/B4ND LIVE MTR.app" ]; then
+            ditto -c -k --keepParent "$DIR/B4ND LIVE MTR.app" B4ND-LIVE-MTR-macos.zip
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: B4ND-LIVE-MTR-macos-arm64
+          path: |
+            B4ND-LIVE-MTR-macos.zip
+            screenshot-macos*.png
+            soak-macos.csv
+
   linux:
     name: Linux (GCC, dev check)
     runs-on: ubuntu-24.04

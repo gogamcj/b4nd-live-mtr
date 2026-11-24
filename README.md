@@ -1,7 +1,7 @@
 # B4ND LIVE MTR
 
 AI Song Analyzer + Hybrid MIDI/VSTi + Professional Live MTR.
-B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연을 위한 Windows 전용 멀티트랙 재생 프로그램입니다.
+B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연을 위한 멀티트랙 재생 프로그램입니다. 공연 PC는 Windows 10/11(ASIO)이 기준이고, macOS(MacBook, CoreAudio)에서도 빌드·실행됩니다.
 **기능 개수보다 실제 공연 중 끊김 없는 재생을 최우선**으로 합니다.
 
 ## 설계 문서
@@ -114,7 +114,23 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 
 ![공연 모드](docs/images/phase1-live.png)
 
+### 생성된 MIDI에 VST 악기 넣기
+
+Audio to MIDI(또는 직접 만든 `.mid`)로 생긴 MIDI 트랙은 **VSTi 트랙**입니다. 처음에는 악기 없이 음소거 상태로 들어옵니다.
+
+1. 악기 플러그인(VST3)을 설치합니다. Windows: `C:\Program Files\Common Files\VST3`, macOS: `/Library/Audio/Plug-Ins/VST3` 또는 `~/Library/Audio/Plug-Ins/VST3`. 다른 폴더에 있으면 플러그인 창의 + FOLDER로 추가합니다.
+2. Ctrl+P(macOS는 ⌘P)로 플러그인 창을 열고 SCAN NEW / CHANGED를 누릅니다. 각 플러그인은 별도 스캐너 프로그램에서 검사되며, LIVE CERTIFIED가 공연용으로 안전한 플러그인입니다.
+3. 창 아래 "VSTi TRACKS IN THIS SONG"에 `Bass (MIDI)`, `Drums (MIDI)` 같은 트랙이 보입니다. 트랙 줄의 목록에서 악기를 고르면 바로 로드됩니다 (정지 상태, 공연 모드가 아닐 때만). EDIT로 플러그인 화면을 열어 음색을 고릅니다.
+4. 믹서에서 그 트랙의 M(음소거)을 끄면 재생됩니다. VSTi 소리는 Main 버스(PA)로 나가고, 2출력 장치(UR22C)에서는 OUT1 MR 믹스에 합쳐집니다.
+5. 새 VSTi 트랙이 필요하면 플러그인을 고르고 + ADD VSTi TRACK WITH SELECTED를 누른 뒤 `.mid` 파일을 그 트랙에 끌어다 놓습니다.
+
+- 드럼 MIDI는 GM 드럼 배치(킥 36, 스네어 38, 클로즈드 하이햇 42)로 나옵니다. GM 배치를 쓰는 드럼 VSTi는 그대로, 아닌 것은 플러그인의 GM 맵을 켭니다.
+- 플러그인 상태(음색)는 프로젝트에 저장됩니다. 다른 컴퓨터에 그 플러그인이 없으면 PLUGIN MISSING으로 표시되고 설정은 지워지지 않습니다.
+- 외부 음원 모듈로 보내고 싶으면 그 `.mid`를 타임라인 빈 곳에 끌어다 놓아 외부 MIDI 트랙으로 만듭니다 (docs/04).
+
 ### 단축키
+
+macOS에서는 Ctrl 대신 ⌘(Command)를 누릅니다.
 
 | 키 | 동작 |
 |----|------|
@@ -156,9 +172,31 @@ cmake --preset windows-msvc-asio
 cmake --build --preset windows-msvc-asio
 ```
 
-GitHub Actions가 매 push/PR마다 Windows(MSVC)와 Linux에서 빌드·테스트하고, Windows 실행 파일(단독 실행 분석기 포함)과 UI 스크린샷을 Artifact로 올립니다.
+GitHub Actions가 매 push/PR마다 Windows(MSVC), macOS, Linux에서 빌드·테스트하고, Windows 실행 파일(단독 실행 분석기 포함)과 UI 스크린샷을 Artifact로 올립니다.
 
 분석기만 따로 테스트하려면: `cd analyzer && python -m unittest discover -s tests -t .` (numpy, scipy 필요)
+
+## 빌드 (macOS 11 이상, MacBook: Apple Silicon / Intel)
+
+필요: Xcode Command Line Tools(`xcode-select --install`), [Homebrew](https://brew.sh)의 CMake와 Ninja. JUCE는 CMake가 자동으로 받습니다.
+
+```sh
+brew install cmake ninja
+git clone https://github.com/gogamcj/b4nd-live-mtr.git && cd b4nd-live-mtr
+cmake --preset macos
+cmake --build --preset macos
+ctest --test-dir build/macos
+open "build/macos/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR.app"
+```
+
+- 오디오는 CoreAudio입니다. UR22C, Focusrite 등 USB 인터페이스는 드라이버 없이(클래스 컴플라이언트) 보이며, 출력 2개면 Windows와 똑같이 2출력 분할(OUT1 PA / OUT2 인이어), 8개 이상이면 8출력 라우팅을 씁니다.
+- 처음 오디오 입력을 열 때 마이크 권한을 묻습니다. 허용해야 모듈 리턴과 지연 측정이 동작합니다 (시스템 설정 > 개인정보 보호 및 보안 > 마이크).
+- VST3만 지원합니다 (AU는 쓰지 않습니다). 플러그인 폴더: `/Library/Audio/Plug-Ins/VST3`, `~/Library/Audio/Plug-Ins/VST3`.
+- 설정·로그·플러그인 목록은 `~/Library/B4ND LIVE MTR/`, 프로젝트 기본 폴더는 `~/Documents/B4ND Projects`입니다.
+- 공연 모드와 재생 중에는 잠자기와 화면 꺼짐을 막습니다. 공연 전 점검에서 배터리로 동작 중이면 경고합니다 (전원 어댑터 연결, 저전력 모드 끄기).
+- AI 분석기: macOS용 단독 실행 분석기는 아직 없습니다. Homebrew나 python.org의 Python 3에 `pip3 install numpy scipy soundfile onnxruntime`(스템 분리는 `torch demucs`도)을 설치하면 앱이 찾아 씁니다.
+- GitHub Actions의 macOS 작업이 빌드한 앱을 `B4ND-LIVE-MTR-macos-arm64` Artifact(zip)로 올립니다. 서명되지 않은 앱이라 처음 열 때 막히면 `xattr -dr com.apple.quarantine "B4ND LIVE MTR.app"` 후 다시 엽니다.
+- 한계: Windows에서는 플러그인이 재생 중 크래시하면 그 트랙만 끄고 버티지만(SEH), macOS에서는 앱이 같이 종료됩니다. 공연에는 LIVE CERTIFIED 플러그인만 쓰세요. 다음 실행 시 마지막 곡과 위치로 돌아갈 수 있습니다.
 
 ## 라이선스 메모
 

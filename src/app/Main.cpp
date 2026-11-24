@@ -29,10 +29,14 @@ static juce::File getLogDirectory()
         .getChildFile ("logs");
 }
 
+// Resolved once at start-up: in a signal handler getSpecialLocation is not safe (on macOS it calls
+// into Objective-C, which can dead-lock or abort when the crash happened inside the runtime).
+static juce::File crashLogDirectory;
+
 static void crashHandler (void*)
 {
     // Best effort: write the stack trace next to the normal log (Logging & Recovery Engine, docs/01).
-    auto f = getLogDirectory().getChildFile ("crash-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S") + ".txt");
+    auto f = crashLogDirectory.getChildFile ("crash-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S") + ".txt");
     f.replaceWithText (juce::SystemStats::getStackBacktrace());
 }
 
@@ -176,8 +180,13 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         getLogDirectory().createDirectory();
-        logger.reset (juce::FileLogger::createDateStampedLogger ("B4ND LIVE MTR/logs", "b4nd_", ".log",
-                                                                 "B4ND LIVE MTR " + getApplicationVersion()));
+        crashLogDirectory = getLogDirectory();
+        // An explicit folder (not createDateStampedLogger): on macOS that one writes to ~/Library/Logs,
+        // away from the crash reports and settings in the app data folder.
+        logger = std::make_unique<juce::FileLogger> (
+            getLogDirectory().getChildFile ("b4nd_" + juce::Time::getCurrentTime().formatted ("%Y-%m-%d_%H-%M-%S") + ".log")
+                .getNonexistentSibling(),
+            "B4ND LIVE MTR " + getApplicationVersion(), 0);
         juce::Logger::setCurrentLogger (logger.get());
         juce::Logger::writeToLog ("OS: " + juce::SystemStats::getOperatingSystemName()
                                   + "  CPU: " + juce::SystemStats::getCpuModel()
@@ -722,6 +731,7 @@ public:
         closeMidiEditor();
         closeFootswitchWindow();
         closeSetlistWindow();
+        closeShowCheckWindow();   // a window left to static destruction outlives JUCE (crash at exit on macOS)
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();

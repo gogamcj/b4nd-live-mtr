@@ -102,6 +102,10 @@ std::vector<AppState::ShowCheckItem> AppState::runShowCheck()
     add (powerPlan.highPerformance ? L::Ok : L::Warn, "Windows power plan",
          (powerPlan.name.isEmpty() ? juce::String ("unknown") : powerPlan.name)
              + (powerPlan.highPerformance ? "" : " (choose High performance in the Windows power options)"));
+#elif JUCE_MAC
+    if (const int battery = systemguard::onBatteryPower(); battery >= 0)
+        add (battery == 1 ? L::Warn : L::Ok, "Power", battery == 1 ? juce::String ("on battery (connect the power adapter, turn Low Power Mode off)")
+                                                                   : juce::String ("power adapter"));
 #endif
     add (L::Info, "Sleep / screen saver", "blocked automatically in Live Mode and while playing"
                                               + juce::String (systemguard::isKeepingAwake() ? " (now: blocked)" : ""));

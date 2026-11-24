@@ -97,8 +97,18 @@ juce::String onPath (const juce::String& name)
     const auto dirs = juce::StringArray::fromTokens (path, ";", "\"");
     const juce::StringArray exts { ".exe", ".bat", "" };
    #else
-    const auto dirs = juce::StringArray::fromTokens (path, ":", "");
+    auto dirs = juce::StringArray::fromTokens (path, ":", "");
     const juce::StringArray exts { "" };
+    #if JUCE_MAC
+    // An app started from the Finder gets PATH=/usr/bin:/bin:/usr/sbin:/sbin, where python3 is
+    // Apple's (no numpy). Look where Homebrew and python.org install Python first, /usr/bin last.
+    const bool hadSystem = dirs.contains ("/usr/bin");
+    dirs.removeString ("/usr/bin");
+    for (const auto* d : { "/opt/homebrew/bin", "/usr/local/bin", "/Library/Frameworks/Python.framework/Versions/Current/bin" })
+        dirs.addIfNotAlreadyThere (d);
+    if (hadSystem)
+        dirs.add ("/usr/bin");
+    #endif
    #endif
     for (const auto& d : dirs)
     {

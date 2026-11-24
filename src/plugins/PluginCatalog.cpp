@@ -180,7 +180,12 @@ static juce::Time modTime (const juce::File& f)
     // A VST3 bundle is a folder: use its binary when there is one.
     if (f.isDirectory())
     {
+       #if JUCE_MAC
+        // macOS bundles keep the binary without an extension in Contents/MacOS.
+        const auto files = f.getChildFile ("Contents").getChildFile ("MacOS").findChildFiles (juce::File::findFiles, true, "*");
+       #else
         const auto files = f.getChildFile ("Contents").findChildFiles (juce::File::findFiles, true, "*.so;*.vst3;*.dll");
+       #endif
         juce::Time t = f.getLastModificationTime();
         for (const auto& x : files)
             t = juce::jmax (t, x.getLastModificationTime());
