@@ -29,10 +29,14 @@ static juce::File getLogDirectory()
         .getChildFile ("logs");
 }
 
+// Resolved once at start-up: in a signal handler getSpecialLocation is not safe (on macOS it calls
+// into Objective-C, which can dead-lock or abort when the crash happened inside the runtime).
+static juce::File crashLogDirectory;
+
 static void crashHandler (void*)
 {
     // Best effort: write the stack trace next to the normal log (Logging & Recovery Engine, docs/01).
-    auto f = getLogDirectory().getChildFile ("crash-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S") + ".txt");
+    auto f = crashLogDirectory.getChildFile ("crash-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S") + ".txt");
     f.replaceWithText (juce::SystemStats::getStackBacktrace());
 }
 
@@ -176,6 +180,7 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         getLogDirectory().createDirectory();
+        crashLogDirectory = getLogDirectory();
         // An explicit folder (not createDateStampedLogger): on macOS that one writes to ~/Library/Logs,
         // away from the crash reports and settings in the app data folder.
         logger = std::make_unique<juce::FileLogger> (
@@ -726,6 +731,7 @@ public:
         closeMidiEditor();
         closeFootswitchWindow();
         closeSetlistWindow();
+        closeShowCheckWindow();   // a window left to static destruction outlives JUCE (crash at exit on macOS)
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
