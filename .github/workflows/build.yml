@@ -416,7 +416,17 @@ jobs:
             --setlist-ops "select:1,media:s1.wav,select:2,media:s2.wav,select:3,media:s3.wav,wait:30" | tee build.txt
           grep -Eq "project save(-as)?: ok" build.txt
           # no audio device opened: LIVE MODE is refused
-          "$APP" --screenshot ../screenshot-macos-show-check.png --project "$PWD/show.b4nd" --show-check --try-live | tee check.txt
+          if ! "$APP" --screenshot ../screenshot-macos-show-check.png --project "$PWD/show.b4nd" --show-check --try-live > check.txt 2>&1; then
+            cat check.txt
+            echo "::group::show check under lldb (backtrace)"
+            lldb --batch -o "process handle SIGKILL -s false" -o run -k "thread backtrace all" -k quit -- \
+              "$APP" --screenshot ../screenshot-macos-show-check.png --project "$PWD/show.b4nd" --show-check --try-live || true
+            echo "::endgroup::"
+            sleep 15
+            ls -la "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports 2>/dev/null | tail -20 || true
+            exit 1
+          fi
+          cat check.txt
           grep -q "show check: STOP  Audio device: Not running" check.txt
           grep -q "try live: refused" check.txt
           # forced Live Mode holds an IOKit power assertion
@@ -434,7 +444,7 @@ jobs:
         if: failure()
         run: |
           for f in "$HOME/Library/B4ND LIVE MTR/logs"/crash-*.txt; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
-          for f in "$HOME/Library/Logs/DiagnosticReports"/B4ND*; do [ -f "$f" ] && { echo "== $f"; head -c 20000 "$f"; }; done
+          for f in "$HOME/Library/Logs/DiagnosticReports"/B4ND* /Library/Logs/DiagnosticReports/B4ND*; do [ -f "$f" ] && { echo "== $f"; head -c 20000 "$f"; }; done
           true
 
       - name: Package the app (zip)
