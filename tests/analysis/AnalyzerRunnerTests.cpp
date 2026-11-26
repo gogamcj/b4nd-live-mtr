@@ -290,6 +290,15 @@ TEST_CASE ("Analysis: stem entries are checked before their paths are used")
     CHECK (r.sourceTrackId == "track-7");
     CHECK_NEAR (r.sourceStartSec, 1.25, 1e-9);
 
+    // Finer parts (task "stemsplit") carry the stem they came from; a bad parent is dropped.
+    const auto parts = AnalysisResult::parse (R"({"status":"done","stems":{"residualDb":-40,"files":[
+        {"name":"guitar","path":"stems/guitar.wav","energyDb":-9.0},
+        {"name":"guitar_left","parent":"guitar","path":"stems/guitar_left.wav","energyDb":-13.0},
+        {"name":"synth_pad","parent":"../other","path":"stems/synth_pad.wav","energyDb":-20.0,"empty":true}]}})");
+    CHECK (parts.stems.size() == 3);
+    CHECK (parts.stems.size() == 3 && parts.stems[0].parent.isEmpty() && parts.stems[1].parent == "guitar"
+           && parts.stems[2].parent.isEmpty() && parts.stems[2].empty);
+
     const auto bad = AnalysisResult::parse (R"({"status":"done","stems":{"residualDb":-8,"files":[{"name":"bass","path":"stems/bass.wav"}]}})");
     CHECK_NEAR (bad.stemConfidence, 0.3, 1e-9);   // stems that do not add up to the mix: low
 }

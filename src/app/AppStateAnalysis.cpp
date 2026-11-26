@@ -23,7 +23,15 @@ juce::File analysisDir (const juce::File& package, const juce::String& songId)
 
 juce::String stemTitle (const juce::String& name)
 {
-    return name.substring (0, 1).toUpperCase() + name.substring (1) + " (stem)";
+    // Finer parts (analyzer task "stemsplit"): split by stereo position / sustain, so named by that.
+    static const std::pair<const char*, const char*> parts[] = {
+        { "guitar_left", "Guitar L" }, { "guitar_center", "Guitar C" }, { "guitar_right", "Guitar R" },
+        { "synth_pad", "Synth pad" }, { "other_rest", "Other rest" } };
+    for (const auto& [n, title] : parts)
+        if (name == n)
+            return juce::String (title) + " (stem)";
+    const auto words = name.replaceCharacter ('_', ' ');
+    return words.substring (0, 1).toUpperCase() + words.substring (1) + " (stem)";
 }
 
 /** One line for the track's warning icon, or "" (docs/07: low quality -> warning). */
@@ -34,8 +42,12 @@ juce::String stemWarning (const AnalysisResult& r, const AnalysisResult::Stem& s
         w.add ("the stems do not add up to the mix (" + juce::String (r.stemResidualDb, 1) + " dB)");
     if (st.clipped)
         w.add ("clipped");
-    if (st.name == "piano" || st.name == "guitar")
+    if (st.name == "piano" || st.name.startsWith ("guitar"))
         w.add ("piano / guitar separation is the weakest part of the model: check by ear");
+    if (st.name.startsWith ("guitar_"))
+        w.add ("split by stereo position (left / center / right), not by lead / rhythm");
+    else if (st.parent.isNotEmpty())
+        w.add ("split from " + st.parent + " by how long notes are held");
     return w.joinIntoString ("; ");
 }
 } // namespace

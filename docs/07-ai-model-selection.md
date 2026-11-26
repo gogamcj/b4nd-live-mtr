@@ -131,6 +131,43 @@ Phase 8에서는 위 선정표의 1순위 모델(Beat This!, allin1)을 아직 �
   - 다시 분리하면 이전 실행의 스템 폴더는 디스크에 남는다(약 곡당 200 MB). 지금은 손으로 지운다.
   - Windows 단독 실행 분석기는 PyTorch가 들어가서 크다(수백 MB).
 
+## 7b. 세부 스템: 기타 L/C/R, 신디 패드 (2026-11-26)
+
+요청: 기타가 한 스템으로만 나온다. 1st / 2nd 기타, 신디 패드를 따로 받고 싶다.
+
+- 모델 조사 (2026-11)
+  - 공개 모델 중 리드/리듬(1st/2nd) 기타나 신디 패드를 나누는 모델은 없다. htdemucs_6s, BS-RoFormer SW(6 stem, MIT 표기) 모두 guitar 하나에서 끝난다. MVSep의 기타 모델도 guitar / other 두 개이고 웹 서비스로만 쓸 수 있다.
+  - MVSep 자체 측정 guitar SDR: Demucs4HT 6s 5.2 dB, BS-RoFormer SW 9.1 dB. 기타 스템 자체의 품질은 BS-RoFormer SW가 확실히 낫다 → 별도 작업 후보(아래 "다음 단계").
+- 방식 (`analyzer/b4nd_analyzer/stemsplit.py`, 작업 이름 `stemsplit`, numpy/scipy만 사용, 모델 다운로드 없음)
+  - 기타 → `guitar_left` / `guitar_center` / `guitar_right` (트랙 이름 Guitar L / C / R)
+    - STFT(4096, hop 1024) 각 점에서 두 채널의 코히어런스(1 bin × 9 frame ≈ 210 ms 평균)를 본다.
+    - 한 소리가 어딘가에 패닝된 부분(코히어런스 높음)은 좌우 레벨 차이(pan index)로 L / C / R에 나눈다. ±0.12부터 ±0.45까지 부드럽게 넘어간다(50 % 패닝된 기타도 그쪽으로 간다).
+    - 좌우가 다른 소리인 부분(코히어런스 낮음)은 채널을 그대로 따라간다: 왼쪽 채널 → L, 오른쪽 → R. 하드 패닝된 두 기타가 같은 대역에서 겹쳐도 섞이지 않게 하는 부분이다.
+  - other → `synth_pad` / `other_rest` (Synth pad / Other rest)
+    - 크기 스펙트럼의 시간 방향 메디안(0.8 s)과 주파수 방향 메디안(250 Hz)으로 나눈 소프트 마스크(HPSS). 0.8 s 넘게 끄는 화음은 pad로, 짧은 아르페지오·플럭·히트·효과음은 rest로.
+  - 마스크는 모든 점에서 합이 1이라서 나눈 파트를 더하면 원래 스템이 된다(테스트로 확인). 30초 단위로 처리하고 크로스페이드로 잇는다.
+  - 원래 Guitar / Other 스템은 항상 남긴다. 결과의 잔차는 원래 6개 스템으로만 계산한다.
+  - 스템보다 24 dB 넘게 작은 파트는 empty(트랙 없음). 파트가 하나만 남으면(= 스템 그대로) 그 파트도 만들지 않는다. 경고: "almost everything is in the center", "only one side has a guitar", "no sustained pad found".
+  - result.json: 파트도 `stems.files`에 들어가고 `parent`(guitar / other)와 `partDb`(스템 대비)가 붙는다.
+- 합성 신호 측정 (테스트에 기준값으로 들어 있음)
+  | 경우 | L | C(리드) | R |
+  |------|---|---------|---|
+  | 기타 두 대 하드 패닝 + 가운데 리드 | 17.9 dB | 13.1 dB | 15.5 dB |
+  | 60 % 패닝 | 12.0 dB | 9.7 dB | 10.5 dB |
+  | 40 % 패닝 | 5.9 dB | 2.5 dB | 5.2 dB |
+  - 패드 + 아르페지오 + 히트: pad 12.3 dB, rest 6.1 dB (SDR).
+  - 실제 곡에서는 Demucs 기타 스템 자체의 섞임(SDR ~5 dB)이 먼저 들어오므로 이보다 낮다. 귀로 확인해야 한다.
+- 앱
+  - 분석 창 "+ Guitar L/C/R, synth pad" (Stems를 켰을 때만, 기본 켜짐). 분석기 `info`의 tasks에 `stemsplit`이 없으면(이전 버전) 꺼진다.
+  - 파트는 음소거된 스템 트랙으로 원래 스템 뒤에 추가된다. 경고 "split by stereo position, not by lead / rhythm" / "split from other by how long notes are held".
+  - Audio to MIDI: `guitar_*`는 guitar, `other_rest`는 other 프로필, `synth_pad`는 다성 + GM 89(Pad 2 warm) 추천.
+  - 4분 곡 기준 추가 시간 수 초~십여 초(CPU). 공연 중 동작 없음(분석은 공연 모드에서 막혀 있다).
+- 알려진 한계
+  - 위치로 나누는 것이지 역할로 나누는 것이 아니다. 두 기타가 모두 가운데이거나, 한 기타에 스테레오 코러스/딜레이가 걸려 좌우로 퍼진 경우 L / R에 같은 기타가 나뉘어 들어간다.
+  - 패드 분리는 길게 끄는 오르간·스트링·피아노 화음도 같이 가져가고, 필터가 빠르게 움직이거나 트레몰로가 걸린 패드는 rest로 샌다.
+- 같이 고친 것: `separate_chunked`가 곡 길이가 40초 배수 + 2초 이내일 때 마지막 구간을 두 번 더하던 문제(끝 2초 이하가 최대 2배 크기).
+- 다음 단계 후보: 기타 스템 자체 품질을 올리려면 BS-RoFormer SW(약 350 MB, 0.2B 파라미터)를 선택 모델로 넣는다. 모델 출처·라이선스 확인과 CPU 시간 측정이 먼저 필요하다.
+
 ## 8. Phase 10 구현: Audio to MIDI (2026-11-18)
 
 - 스템별 변환 (`analyzer/b4nd_analyzer/transcribe.py`)

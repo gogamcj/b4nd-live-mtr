@@ -11,7 +11,7 @@ import scipy
 from . import __version__, audio, harmony, structure, tempo
 
 ANALYSIS_TASKS = ("tempo", "key", "chords", "structure")
-TASKS = ANALYSIS_TASKS + ("stems", "midi")
+TASKS = ANALYSIS_TASKS + ("stems", "stemsplit", "midi")   # stemsplit: finer parts of the stems
 DEFERRED = ()
 
 
@@ -46,7 +46,9 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None,
         errors.append(f"{t}: not available in this analyzer version")
 
     if "stems" in tasks:
-        _run_stems(result, errors, stems_input or input_path, out_dir, emit, log, separator)
+        _run_stems(result, errors, stems_input or input_path, out_dir, emit, log, separator, split="stemsplit" in tasks)
+    elif "stemsplit" in tasks:
+        errors.append("stemsplit: needs the stems task in the same run")
     if "midi" in tasks:
         _run_midi(result, errors, midi_inputs, out_dir, emit, log)
     if not any(x in tasks for x in ANALYSIS_TASKS):
@@ -137,7 +139,7 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None,
     return result, errors
 
 
-def _run_stems(result, errors, path, out_dir, emit, log, separator):
+def _run_stems(result, errors, path, out_dir, emit, log, separator, split=False):
     from . import stems
 
     try:
@@ -147,7 +149,7 @@ def _run_stems(result, errors, path, out_dir, emit, log, separator):
             raise RuntimeError("Demucs is not installed in this analyzer (pip install demucs)")
         emit("stems", 0.0)
         r = stems.run_stems(path, out_dir, separate=separator, names_versions={"model": "custom"} if separator else None,
-                            progress=lambda p: emit("stems", p))
+                            progress=lambda p: emit("stems", p), split=split)
         result["stems"] = r
         result["versions"].update({k: v for k, v in r.get("versions", {}).items() if k != "device"})
         emit("stems", 1.0)

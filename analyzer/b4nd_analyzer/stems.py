@@ -148,15 +148,19 @@ def load_stereo(path: str, sr: int = STEM_RATE) -> np.ndarray:
     return np.nan_to_num(x.astype(np.float32))
 
 
-def separate_chunked(mix: np.ndarray, separate, sr: int = STEM_RATE, progress=lambda p: None):
+def separate_chunked(mix: np.ndarray, separate, sr: int = STEM_RATE, progress=lambda p: None, chunk_sec: float = CHUNK_SEC):
     """Runs `separate` on overlapping chunks and cross-fades them. Returns (stems, names) with
     stems shaped (n_stems, 2, n)."""
     n = mix.shape[1]
-    chunk = int(CHUNK_SEC * sr)
+    chunk = int(chunk_sec * sr)
     fade = int(FADE_SEC * sr)
     out = None
     names = None
     starts = list(range(0, max(1, n), chunk))
+    # A last chunk that starts inside the previous one's look-ahead is already covered: running it
+    # would count the end of the song twice (songs whose length is a few seconds over a chunk).
+    while len(starts) > 1 and starts[-2] + chunk + fade >= n:
+        starts.pop()
     for k, s in enumerate(starts):
         e = min(n, s + chunk + fade)
         src, nm = separate(mix[:, s:e])
@@ -214,8 +218,10 @@ def write_wav24(path: str, x: np.ndarray, sr: int):
 
 
 def run_stems(input_path: str, out_dir: str, separate=None, names_versions=None, progress=lambda p: None,
-              device: str = "cpu") -> dict:
-    """Separates `input_path` into out_dir/stems/<name>.wav. Returns the result["stems"] dict."""
+              device: str = "cpu", split: bool = False) -> dict:
+    """Separates `input_path` into out_dir/stems/<name>.wav. Returns the result["stems"] dict.
+    split: also the finer parts of stemsplit.py (guitar left / center / right, synth pad), as
+    extra files with "parent" set. The residual is of the parent stems only."""
     versions = {}
     if separate is None:
         if not demucs_available():
@@ -226,7 +232,8 @@ def run_stems(input_path: str, out_dir: str, separate=None, names_versions=None,
     progress(0.05)
     mix = load_stereo(input_path)
     progress(0.1)
-    stems, names = separate_chunked(mix, separate, progress=lambda p: progress(0.1 + 0.8 * p))
+    end = 0.75 if split else 0.9
+    stems, names = separate_chunked(mix, separate, progress=lambda p: progress(0.1 + (end - 0.1) * p))
     q = quality(mix, stems, names)
     stem_dir = os.path.join(out_dir, "stems")
     os.makedirs(stem_dir, exist_ok=True)
@@ -237,6 +244,35 @@ def run_stems(input_path: str, out_dir: str, separate=None, names_versions=None,
         f["clipped"] = peak > 1.0
         if f["clipped"]:
             q["warnings"].append(f"{f['name']}: peaks over 0 dBFS were clipped")
+    if split:
+        q["files"] += _split_parts(stems, names, q, out_dir, lambda p: progress(end + (0.98 - end) * p))
     progress(1.0)
     q.update({"sampleRate": STEM_RATE, "versions": versions, "model": versions.get("model", "custom")})
     return q
+
+
+def _split_parts(stems: np.ndarray, names, q: dict, out_dir: str, progress=lambda p: None) -> list:
+    """The finer parts of the non-empty stems that have a split (stemsplit.py), written next to
+    the stems. Parts much quieter than their stem are marked empty (no track)."""
+    from . import stemsplit
+
+    todo = [i for i, f in enumerate(q["files"]) if not f["empty"] and f["name"] in stemsplit.SPLITS]
+    files = []
+    for k, i in enumerate(todo):
+        parts, part_names, info = stemsplit.split_stem(names[i], stems[i],
+                                                       progress=lambda p, k=k: progress((k + p) / len(todo)))
+        q["warnings"] += info["notes"]
+        parent_db = q["files"][i]["energyDb"]
+        keep = [rel >= stemsplit.PART_EMPTY_DB and parent_db + rel >= SILENT_DB for rel in info["relDb"]]
+        if sum(keep) < 2:   # one part is the whole stem again: no extra track
+            keep = [False] * len(keep)
+        for j, pn in enumerate(part_names):
+            rel = info["relDb"][j]
+            f = {"name": pn, "parent": names[i], "energyDb": round(parent_db + rel, 1), "partDb": round(rel, 1),
+                 "empty": not keep[j]}
+            f["path"] = f"stems/{pn}.wav"
+            peak = write_wav24(os.path.join(out_dir, f["path"]), parts[j], STEM_RATE)
+            f["clipped"] = peak > 1.0
+            files.append(f)
+    progress(1.0)
+    return files

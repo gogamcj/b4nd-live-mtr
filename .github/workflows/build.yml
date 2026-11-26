@@ -398,9 +398,11 @@ jobs:
           (cd analyzer && B4ND_TEST_DEMUCS=1 python -m unittest tests.test_stems -v)
           APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
           xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-stems.png --analysis --project ai-test.b4nd \
-            --analyze --analyze-tasks stems --apply-analysis | tee stems.txt
+            --analyze --analyze-tasks stems,stemsplit --apply-analysis | tee stems.txt
           grep -q "analysis: done" stems.txt
           grep -Eq "analysis stems: .*model htdemucs_6s" stems.txt
+          # The finer parts ran too (the synthetic song has no guitar to split, but a pad in "other").
+          grep -Eq "analysis stems: .*synth_pad " stems.txt
           grep -q "analysis apply: ok" stems.txt
           grep -q "project save: ok" stems.txt
           ls -la ai-test.b4nd/stems/*/*

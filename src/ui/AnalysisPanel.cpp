@@ -114,7 +114,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
     }
     analyzeButton.setColour (juce::TextButton::buttonColourId, theme::accent.darker (0.4f));
     applyButton.setColour (juce::TextButton::buttonColourId, theme::play.darker (0.5f));
-    for (auto* t : { &taskTempo, &taskKey, &taskChords, &taskSections, &taskStems, &taskMidi,
+    for (auto* t : { &taskTempo, &taskKey, &taskChords, &taskSections, &taskStems, &taskStemSplit, &taskMidi,
                      &useTempo, &useTimeSig, &useKey, &useChords, &useCues, &useStems, &useMidi })
     {
         t->setToggleState (true, juce::dontSendNotification);
@@ -126,6 +126,11 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
                          "chords, drums: kick / snare / hi-hat). The parts are added as muted MIDI tracks without an instrument.");
     taskStems.setToggleState (false, juce::dontSendNotification);   // minutes on a CPU: only when asked for
     taskStems.setTooltip (stemsTip);
+    taskStemSplit.setTooltip ("With Stems: also split the guitar stem by stereo position into Guitar L / C / R (1st and 2nd "
+                              "guitars are usually panned left and right, a lead often sits in the middle) and take the held "
+                              "chords out of Other as Synth pad. Seconds, not minutes. Parts that come out (nearly) empty get "
+                              "no track; the full Guitar and Other stems stay.");
+    taskStems.onClick = [this] { refresh(); };
     for (auto* e : { &bpmEditor, &gridEditor })
     {
         e->setFont (theme::mono (15.0f));
@@ -171,6 +176,7 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
         if (taskChords.getToggleState()) tasks.add ("chords");
         if (taskSections.getToggleState()) tasks.add ("structure");
         if (taskStems.getToggleState() && taskStems.isEnabled()) tasks.add ("stems");
+        if (tasks.contains ("stems") && taskStemSplit.getToggleState() && taskStemSplit.isEnabled()) tasks.add ("stemsplit");
         if (taskMidi.getToggleState() && taskMidi.isEnabled()) tasks.add ("midi");
         if (tasks.isEmpty())
             return setMessage ("Choose at least one analysis.", true);
@@ -239,6 +245,7 @@ void AnalysisPanel::probeAnalyzer()
             safe->analyzerError = error;
             safe->analyzerInfo = info;
             safe->stemsAvailable = false;
+            safe->stemSplitAvailable = false;
             safe->stemsReason = "the analyzer is not available";
             if (info.isNotEmpty())
             {
@@ -252,6 +259,7 @@ void AnalysisPanel::probeAnalyzer()
                     safe->stemsReason = ! st.isObject() ? juce::String ("this analyzer version has no stem separation")
                                                         : st["reason"].toString();
                     safe->pitchedMidi = v["midi"].isObject() && (bool) v["midi"]["pitched"];
+                    safe->stemSplitAvailable = v["tasks"].isArray() && v["tasks"].getArray()->contains ("stemsplit");
                     safe->analyzerInfo << (safe->pitchedMidi ? ", MIDI: Basic Pitch" : ", MIDI: drums only (no onnxruntime)");
                     safe->analyzerInfo << (safe->stemsAvailable ? ", stems: Demucs " + st["demucs"].toString()
                                                                       + (st["repo"].isString() ? " (model included)" : " (model downloads on first use)")
@@ -353,6 +361,7 @@ void AnalysisPanel::refresh()
     analyzeButton.setEnabled (! busy && ! locked && song != nullptr);
     cancelButton.setEnabled (busy);
     taskStems.setEnabled (stemsAvailable && ! busy);
+    taskStemSplit.setEnabled (stemsAvailable && stemSplitAvailable && ! busy && taskStems.getToggleState());
     taskMidi.setEnabled (! busy);
     taskStems.setTooltip (stemsAvailable || ! analyzerChecked ? juce::String (stemsTip) : "Stems are not available: " + stemsReason);
     analyzerButton.setEnabled (! busy && ! state.isLiveMode());
@@ -568,7 +577,8 @@ void AnalysisPanel::paint (juce::Graphics& g)
         {
             juce::StringArray names;
             for (const auto& x : r->stems)
-                names.add (x.name + (x.empty ? " (empty)" : ""));
+                if (! (x.empty && x.parent.isNotEmpty()))   // an empty finer part is just not there
+                    names.add (x.name + (x.empty ? " (empty)" : ""));
             line (stemsInfoArea, names.joinIntoString (", ") + "  residual " + juce::String (r->stemResidualDb, 1) + " dB"
                                      + (r->stemWarnings.isEmpty() ? juce::String() : "  ! " + r->stemWarnings.joinIntoString ("; ")),
                   r->stemConfidence);
@@ -632,6 +642,7 @@ void AnalysisPanel::resized()
     auto src2 = r.removeFromTop (26);
     src2.removeFromLeft (312);
     taskStems.setBounds (src2.removeFromLeft (150));
+    taskStemSplit.setBounds (src2.removeFromLeft (200));
     taskMidi.setBounds (src2.removeFromLeft (200));
     r.removeFromTop (6);
     auto run = r.removeFromTop (30);

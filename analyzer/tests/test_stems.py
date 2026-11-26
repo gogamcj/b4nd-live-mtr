@@ -49,6 +49,14 @@ class StemTests(unittest.TestCase):
         self.assertEqual(np.max(np.abs(out[1])), 0.0)
         self.assertEqual(progress[-1], 1.0)
 
+    def test_a_song_just_over_a_chunk_is_not_counted_twice_at_the_end(self):
+        sr = 1000
+        for extra in (1, stems.FADE_SEC * sr - 1, stems.FADE_SEC * sr, stems.FADE_SEC * sr + 1):
+            n = int(stems.CHUNK_SEC * sr + extra)
+            mix = np.ones((2, n), np.float32)
+            out, _ = stems.separate_chunked(mix, lambda s: (np.stack([s]), ["x"]), sr=sr)
+            self.assertLess(np.max(np.abs(out[0] - mix)), 1e-5, extra)
+
     def test_short_input_is_one_chunk(self):
         mix = np.ones((2, 1000), np.float32) * 0.2
         out, _ = stems.separate_chunked(mix, lambda s: (np.stack([s]), ["x"]))
