@@ -217,6 +217,9 @@ AnalysisResult AnalysisResult::parse (const juce::String& json)
                 Stem x;
                 x.name = f["name"].toString();
                 x.relPath = f["path"].toString();
+                x.parent = f["parent"].toString();
+                if (! stemNameOk (x.parent))
+                    x.parent.clear();
                 x.energyDb = num (f["energyDb"], -120.0);
                 x.empty = (bool) f["empty"];
                 x.clipped = (bool) f["clipped"];

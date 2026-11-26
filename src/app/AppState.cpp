@@ -2188,7 +2188,7 @@ void AppState::applyProjectData (const ProjectData& p, const juce::File& folder)
                         t.aiConfidence = (float) td.aiConfidence;
                         if (td.aiConfidence >= 0.0 && td.aiConfidence < 0.5)
                             t.aiWarning = "low separation quality (" + juce::String (juce::roundToInt (td.aiConfidence * 100)) + "%)";
-                        if (t.stemName == "piano" || t.stemName == "guitar")
+                        if (t.stemName == "piano" || t.stemName.startsWith ("guitar"))
                             t.aiWarning << (t.aiWarning.isEmpty() ? "" : "; ") << "check by ear";
                     }
                 }

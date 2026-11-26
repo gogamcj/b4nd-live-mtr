@@ -55,7 +55,8 @@ private:
                      halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" };
     juce::ComboBox sourceBox, timeSigBox, keyBox;
     juce::ToggleButton taskTempo { "Tempo / beats / bars" }, taskKey { "Key" }, taskChords { "Chords" },
-                       taskSections { "Sections (cues)" }, taskStems { "Stems (Demucs, slow)" }, taskMidi { "Audio to MIDI (from stems)" };
+                       taskSections { "Sections (cues)" }, taskStems { "Stems (Demucs, slow)" },
+                       taskStemSplit { "+ Guitar L/C/R, synth pad" }, taskMidi { "Audio to MIDI (from stems)" };
     juce::ToggleButton useTempo { "TEMPO" }, useTimeSig { "TIME SIG" }, useKey { "KEY" }, useChords { "CHORDS" }, useCues { "CUES" }, useStems { "STEMS" }, useMidi { "MIDI" };
     juce::TextEditor bpmEditor, gridEditor;
     juce::ListBox sectionList { "sections", this };
@@ -71,6 +72,7 @@ private:
     juce::String analyzerInfo, analyzerError;
     bool analyzerChecked = false;
     bool stemsAvailable = false, stemsRequested = false, midiRequested = false, pitchedMidi = false;
+    bool stemSplitAvailable = false;   // the analyzer knows the "stemsplit" task (older ones do not)
     juce::String stemsReason;
     juce::String message;
     bool messageIsError = false;

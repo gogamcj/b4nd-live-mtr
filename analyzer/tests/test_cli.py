@@ -108,7 +108,7 @@ class CliTests(unittest.TestCase):
         code, out, _ = run_cli("info")
         self.assertEqual(code, 0)
         info = json.loads(out)
-        self.assertEqual(info["tasks"], ["tempo", "key", "chords", "structure", "stems", "midi"])
+        self.assertEqual(info["tasks"], ["tempo", "key", "chords", "structure", "stems", "stemsplit", "midi"])
         self.assertTrue(info["midi"]["drums"])
         self.assertIn("available", info["stems"])
 

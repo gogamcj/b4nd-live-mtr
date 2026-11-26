@@ -51,7 +51,9 @@ struct AnalysisResult
 
     struct Stem
     {
-        juce::String name;               // vocals | drums | bass | guitar | piano | other
+        juce::String name;               // vocals | drums | bass | guitar | piano | other, or a finer part
+                                         // (task "stemsplit"): guitar_left | guitar_center | guitar_right | synth_pad | other_rest
+        juce::String parent;             // the stem a finer part came from ("" for a stem)
         juce::String relPath;            // relative to the result folder
         double energyDb = 0.0;           // stem RMS against the mix RMS
         bool empty = false;              // nearly silent: nothing of this instrument in the song

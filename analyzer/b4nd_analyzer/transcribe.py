@@ -39,7 +39,14 @@ PROFILES = {
     "guitar": {"mode": "poly", "min_hz": 75.0, "max_hz": 1600.0, "program": 27},   # Electric Guitar (clean)
     "other":  {"mode": "poly", "min_hz": 40.0, "max_hz": 4200.0, "program": 48},   # Strings
     "drums":  {"mode": "drums", "program": 0},
+    "synth_pad": {"mode": "poly", "min_hz": 40.0, "max_hz": 4200.0, "program": 89},  # Pad 2 (warm)
 }
+
+
+def profile(name: str) -> dict:
+    """The stem's profile; finer parts (guitar_left, other_rest: stemsplit.py) use their
+    instrument's."""
+    return PROFILES.get(name) or PROFILES.get(name.split("_")[0]) or PROFILES["other"]
 
 
 def model_path() -> str:
@@ -347,7 +354,7 @@ def drum_notes(y: np.ndarray, sr: int = DR_SR):
 # --- per stem --------------------------------------------------------------------------------
 
 def transcribe_file(path: str, name: str, model=None, progress=lambda p: None) -> dict:
-    prof = PROFILES.get(name, PROFILES["other"])
+    prof = profile(name)
     if prof["mode"] == "drums":
         y = load_mono(path, DR_SR)
         notes = drum_notes(y)
@@ -374,7 +381,7 @@ def run_midi(inputs, progress=lambda p: None, log=lambda m: None):
     model = None
     errors = []
     versions = {}
-    if any(PROFILES.get(i.get("name"), PROFILES["other"])["mode"] != "drums" for i in inputs):
+    if any(profile(str(i.get("name", "other")))["mode"] != "drums" for i in inputs):
         if onnx_available():
             model = BasicPitch()
             versions = {"onnxruntime": model.version, "basicPitchModel": "icassp_2022"}
@@ -384,7 +391,7 @@ def run_midi(inputs, progress=lambda p: None, log=lambda m: None):
     for k, inp in enumerate(inputs):
         name = str(inp.get("name", "other"))
         try:
-            if PROFILES.get(name, PROFILES["other"])["mode"] != "drums" and model is None:
+            if profile(name)["mode"] != "drums" and model is None:
                 continue
             r = transcribe_file(inp["path"], name, model, progress=lambda p, k=k: progress((k + p) / len(inputs)))
             r["sourceId"] = str(inp.get("id", ""))[:64]
