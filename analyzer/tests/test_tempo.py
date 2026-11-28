@@ -30,6 +30,33 @@ class TempoTests(unittest.TestCase):
     def test_three_four(self):
         self.check_song(140.0, 3, 0.4)
 
+    def test_meter_hint_keeps_the_users_beats_per_bar(self):
+        # The user says "3 beats per bar": only the downbeat is searched (3/4 is never voted down).
+        import tempfile, os
+        from b4nd_analyzer import analyze
+        for numerator, lead in ((3, 0.4), (4, 0.6)):
+            with self.subTest(numerator=numerator):
+                song = synth.demo_song(120.0, numerator, lead, sr=44100)
+                y = synth.render(song)
+                with tempfile.TemporaryDirectory() as d:
+                    path = os.path.join(d, "song.wav")
+                    synth.write_wav(path, y, song.sr, channels=2)
+                    r, errors = analyze.run(path, ["tempo"], meter_hint=numerator)
+                self.assertFalse(errors, errors)
+                self.assertEqual(r["timeSig"], f"{numerator}/4")
+                self.assertEqual(r["meterHint"], numerator)
+                self.assertAlmostEqual(r["gridStartSec"], lead, delta=0.010)
+        # A wrong hint is still obeyed (the user decides), the downbeat stays on a beat.
+        song = synth.demo_song(120.0, 4, 0.6, sr=44100)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "song.wav")
+            synth.write_wav(path, synth.render(song), song.sr, channels=2)
+            r, _ = analyze.run(path, ["tempo"], meter_hint=3)
+            bad, _ = analyze.run(path, ["tempo"], meter_hint=99)   # out of range: ignored
+        self.assertEqual(r["timeSig"], "3/4")
+        self.assertEqual(bad["timeSig"], "4/4")
+        self.assertNotIn("meterHint", bad)
+
     def test_lead_in_of_several_seconds(self):
         self.check_song(100.0, 4, 3.1)
 

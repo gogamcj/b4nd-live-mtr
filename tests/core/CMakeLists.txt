@@ -9,7 +9,8 @@ add_executable(b4nd_core_tests
     LatencyProbeTests.cpp
     LimiterTests.cpp
     MidiNoteEditTests.cpp
-    FootswitchTests.cpp)
+    FootswitchTests.cpp
+    TempoEditTests.cpp)
 
 target_link_libraries(b4nd_core_tests PRIVATE b4nd_core)
 add_test(NAME b4nd_core_tests COMMAND b4nd_core_tests)

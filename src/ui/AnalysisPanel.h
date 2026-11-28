@@ -52,8 +52,9 @@ private:
 
     juce::TextButton analyzerButton { "ANALYZER..." }, checkButton { "CHECK" }, analyzeButton { "ANALYZE" },
                      cancelButton { "CANCEL" }, applyButton { "APPLY TO SONG" }, undoButton { "UNDO APPLY" },
-                     halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" };
-    juce::ComboBox sourceBox, timeSigBox, keyBox;
+                     halfButton { "/2" }, doubleButton { "x2" }, earlierButton { "-1 BEAT" }, laterButton { "+1 BEAT" },
+                     songTimingButton { "EDIT SONG TEMPO / SIG / KEY..." };
+    juce::ComboBox sourceBox, timeSigBox, keyBox, meterHintBox;
     juce::ToggleButton taskTempo { "Tempo / beats / bars" }, taskKey { "Key" }, taskChords { "Chords" },
                        taskSections { "Sections (cues)" }, taskStems { "Stems (Demucs, slow)" }, taskMidi { "Audio to MIDI (from stems)" };
     juce::ToggleButton useTempo { "TEMPO" }, useTimeSig { "TIME SIG" }, useKey { "KEY" }, useChords { "CHORDS" }, useCues { "CUES" }, useStems { "STEMS" }, useMidi { "MIDI" };

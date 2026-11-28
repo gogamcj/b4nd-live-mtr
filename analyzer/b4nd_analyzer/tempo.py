@@ -179,10 +179,14 @@ def _segments(beats: np.ndarray):
     return list(zip(starts, ends))
 
 
-def _meter(beats: np.ndarray, feats: Features):
-    """(numerator, first downbeat index, confidence) from kick accents + harmonic change."""
+def _meter(beats: np.ndarray, feats: Features, hint: int = 0):
+    """(numerator, first downbeat index, confidence) from kick accents + harmonic change.
+    hint 2..12: the user knows the beats per bar; only the downbeat (phase) is searched, and
+    the confidence is how clearly one phase wins."""
+    if hint and not 2 <= hint <= 12:
+        hint = 0
     if len(beats) < 9:
-        return 4, 0, 0.0
+        return (hint or 4), 0, 0.0
     bounds = np.concatenate([beats, [beats[-1] + (beats[-1] - beats[-2])]])
     # Accent on the beat itself (+-1 frame).
     fr = np.round((beats - ONSET_LAG) * feats.fps).astype(int)
@@ -200,24 +204,27 @@ def _meter(beats: np.ndarray, feats: Features):
     d = z(kick) + z(change)
     best = None
     scores = {}
-    for m in (3, 4):
+    for m in ((hint,) if hint else (3, 4)):
         for ph in range(m):
             on = d[ph::m]
             off = np.delete(d, np.arange(ph, len(d), m))
             s = on.mean() - off.mean()
-            if m == 3:
+            if m == 3 and not hint:
                 s *= 0.85   # 4/4 is far more common in band repertoire: 3/4 must win clearly
             scores[(m, ph)] = s
             if best is None or s > scores[best]:
                 best = (m, ph)
     ordered = sorted(scores.values(), reverse=True)
-    other_m = max(v for (m, _), v in scores.items() if m != best[0])
+    if hint:
+        other_m = ordered[1] if len(ordered) > 1 else 0.0   # the next best downbeat position
+    else:
+        other_m = max(v for (m, _), v in scores.items() if m != best[0])
     margin = scores[best] - other_m
     conf = float(np.clip(margin / 1.0, 0.0, 1.0)) if ordered[0] > 0 else 0.0
     return best[0], best[1], conf
 
 
-def analyse_tempo(feats: Features, progress=None) -> TempoResult:
+def analyse_tempo(feats: Features, progress=None, meter_hint: int = 0) -> TempoResult:
     fps = feats.fps
     o = _normalise(feats.onset.astype(np.float64), fps)
     a, b = active_range(feats.rms, fps)
@@ -235,7 +242,7 @@ def analyse_tempo(feats: Features, progress=None) -> TempoResult:
     if len(beats) < 4:
         raise ValueError("no steady beat found")
 
-    num, phase, meter_conf = _meter(beats, feats)
+    num, phase, meter_conf = _meter(beats, feats, meter_hint)
 
     segs = _segments(beats)
     fits = []

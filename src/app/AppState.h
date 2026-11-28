@@ -373,7 +373,7 @@ public:
     int findAnalysisSourceTrack() const;
     /** Analyses a track of the current song (default: findAnalysisSourceTrack). Needs a saved
         project (results go to analysis/<song-id>/), not in Live Mode, not while playing. */
-    juce::String startAnalysis (int trackIndex = -1, juce::StringArray tasks = {});
+    juce::String startAnalysis (int trackIndex = -1, juce::StringArray tasks = {}, int meterHint = 0);
     void cancelAnalysis();
     AnalyzerRunner::Status getAnalysisStatus() const { return analyzer.getStatus(); }
     /** Running, or finished but its result not yet taken in (that happens on the next timer tick). */
@@ -392,6 +392,7 @@ public:
         double tempoScale = 1.0;     // 2 or 0.5: the analyser picked half / double tempo
         double gridStartSec = -1.0;  // >= 0: bar 1 starts here instead
         int numerator = 0;           // > 0: instead of the analysed time signature
+        int denominator = 0;         // > 0 (2, 4, 8, 16): with numerator, e.g. 6/8
         juce::String key;            // not empty: instead of the analysed key
         bool useEditedSections = false;
         std::vector<AnalysisResult::Section> sections;   // edited list (names, removed rows)
@@ -403,6 +404,26 @@ public:
     juce::String applyAnalysis (const AnalysisApply&);
     bool canUndoAnalysisApply() const;
     juce::String undoAnalysisApply();
+
+    /** Hand corrections of the current song's tempo / time signature / bar 1 / key, at any
+        time (after an analysis, or without one): stopped, not in Live Mode. Applied in this
+        order: tempoScale, bpm, time signature, barOneSec, shiftBeats, key. Cues and chords
+        stay at their times; MIDI tracks follow the new tempo map (they are in beats). One
+        level of undo (its own, separate from the analysis apply). Saved with the project. */
+    struct SongTimingEdit
+    {
+        double tempoScale = 1.0;     // 0.5 / 2: half / double the whole tempo map
+        double bpm = 0.0;            // > 0: one constant tempo
+        int numerator = 0, denominator = 0;   // > 0: one time signature for the song
+        double barOneSec = -1.0;     // >= 0: bar 1 beat 1 here
+        double shiftBeats = 0.0;     // move bar 1 by quarter notes (negative: earlier)
+        juce::String key;            // not empty: the song's key
+    };
+    juce::String editSongTiming (const SongTimingEdit&);
+    bool canUndoSongTiming() const;
+    juce::String undoSongTiming();
+    /** Why a timing edit may need a second look (AI MIDI written at the old tempo), or "". */
+    juce::String songTimingWarning() const;
 
     // --- modes ---
     bool isLiveMode() const noexcept { return liveMode; }
@@ -550,6 +571,15 @@ private:
         juce::File stemsFrom, stemsTo;                  // the moved stem folder
     };
     std::optional<AnalysisUndo> analysisUndo;
+    struct TimingUndo
+    {
+        juce::String songId;
+        TempoMap tempo;
+        juce::String key;
+        double bpmConfidence = -1.0, keyConfidence = -1.0;
+    };
+    std::optional<TimingUndo> timingUndo;
+    void afterTempoChange (SongInfo&);
     juce::String applyStems (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
     juce::String applyMidi (SongInfo&, const AnalysisResult&, AnalysisUndo&, juce::StringArray& applied, bool checkOnly);
     MediaPool mediaPool;   // last: its thread stops first on destruction

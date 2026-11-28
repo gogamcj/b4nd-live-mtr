@@ -6,6 +6,7 @@
 #include "ui/FootswitchPanel.h"
 #include "ui/SetlistPanel.h"
 #include "ui/ShowCheckPanel.h"
+#include "ui/SongTimingPanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
 #include "ui/Theme.h"
@@ -52,6 +53,7 @@ void MainComponent::toggleLiveMode (bool skipCheck)
         return;
     }
     closeShowCheckWindow();
+    closeSongTimingWindow();
     state.setLiveMode (true);
 }
 
@@ -104,6 +106,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key == juce::KeyPress ('l', juce::ModifierKeys::commandModifier, 0)) { showSetlistWindow (state); return true; }
     if (key == juce::KeyPress ('k', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) showShowCheckWindow (state, [this] { toggleLiveMode (true); }); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { if (! state.isLiveMode()) showAnalysisWindow (state); return true; }
+    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { if (! state.isLiveMode()) showSongTimingWindow (state); return true; }
     if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier, 0))
     {
         // MIDI editor on the first MIDI track that has notes (or double-click a MIDI lane)

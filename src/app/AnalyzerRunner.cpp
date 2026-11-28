@@ -612,6 +612,8 @@ void AnalyzerRunner::run()
     for (const auto& t : j.tasks)
         tasks.add (t);
     o->setProperty ("tasks", tasks);
+    if (j.meterHint > 0)
+        o->setProperty ("meterHint", j.meterHint);
     o->setProperty ("device", "cpu");
     o->setProperty ("out", ".");
     if (withStems)

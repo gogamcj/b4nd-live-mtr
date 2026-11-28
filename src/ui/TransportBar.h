@@ -17,6 +17,8 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    /** A click on BPM / KEY / TIME SIG opens the tempo / time signature / key editor. */
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
@@ -31,6 +33,7 @@ private:
     void showClickMenu();
 
     juce::Rectangle<int> infoArea, cellsArea;
+    juce::Rectangle<int> timingCells;   // BPM, KEY, TIME SIG (set in paint)
 };
 
 } // namespace b4nd

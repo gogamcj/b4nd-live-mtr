@@ -1,4 +1,5 @@
 #include "ui/TransportBar.h"
+#include "ui/SongTimingPanel.h"
 #include "core/TimeFormat.h"
 #include "ui/Theme.h"
 
@@ -98,6 +99,12 @@ void TransportBar::refresh()
     repaint (infoArea);
 }
 
+void TransportBar::mouseDown (const juce::MouseEvent& e)
+{
+    if (! state.isLiveMode() && timingCells.contains (e.getPosition()))
+        showSongTimingWindow (state);
+}
+
 void TransportBar::paintCell (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& caption,
                               const juce::String& value, juce::Colour valueColour, bool monoValue) const
 {
@@ -154,9 +161,12 @@ void TransportBar::paint (juce::Graphics& g)
     int idx = 0;
     auto take = [&] { auto c = cells.removeFromLeft ((int) (preferred[idx++] * scale)); cells.removeFromLeft (gap); return c; };
 
-    paintCell (g, take(), "BPM", juce::String (song->tempo.bpmAtBeat (beat), 1), theme::text, true);
+    const auto bpmCell = take();
+    paintCell (g, bpmCell, "BPM", juce::String (song->tempo.bpmAtBeat (beat), 1), theme::text, true);
     paintCell (g, take(), "KEY", song->key, theme::text, false);
-    paintCell (g, take(), "TIME SIG", juce::String (bb.numerator) + "/" + juce::String (bb.denominator), theme::text, true);
+    const auto sigCell = take();
+    paintCell (g, sigCell, "TIME SIG", juce::String (bb.numerator) + "/" + juce::String (bb.denominator), theme::text, true);
+    const_cast<TransportBar*> (this)->timingCells = bpmCell.getUnion (sigCell);
     if (state.isCountingIn())
         paintCell (g, take(), "BAR . BEAT", "COUNT-IN", theme::warn, false);
     else
