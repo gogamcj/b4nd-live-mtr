@@ -34,13 +34,14 @@ def grid_beats(t: tempo.TempoResult, duration: float) -> np.ndarray:
 
 
 def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None, out_dir=None, stems_input=None,
-        separator=None, midi_inputs=None):
+        separator=None, midi_inputs=None, meter_hint=0):
     """Returns (result dict, list of error strings). Never raises for a failed task.
     Stems are written to out_dir/stems/ from stems_input (the stereo source; default input_path)."""
     result = {"input": input_path, "tasks": list(tasks), "errors": [],
               "versions": {"b4nd_analyzer": __version__, "numpy": np.__version__, "scipy": scipy.__version__,
                            "python": platform.python_version(), "backend": "builtin"}}
     errors = []
+    meter_hint = meter_hint if isinstance(meter_hint, int) and 2 <= meter_hint <= 12 else 0   # beats per bar from the user
     unknown = [t for t in tasks if t not in TASKS]
     for t in unknown:
         errors.append(f"{t}: not available in this analyzer version")
@@ -63,7 +64,7 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None,
     want = [x for x in ANALYSIS_TASKS if x in tasks]
     if want:
         try:
-            t = tempo.analyse_tempo(feats, progress=lambda p: emit("tempo", p))
+            t = tempo.analyse_tempo(feats, progress=lambda p: emit("tempo", p), meter_hint=meter_hint)
         except Exception as e:  # noqa: BLE001 - reported, other tasks still run
             errors.append(f"tempo: {e}")
             log(traceback.format_exc())
@@ -75,6 +76,8 @@ def run(input_path: str, tasks, emit=lambda task, p: None, log=lambda msg: None,
         result["variableTempo"] = t.variable
         result["timeSig"] = f"{t.numerator}/4"
         result["timeSigConfidence"] = t.meter_confidence
+        if meter_hint:
+            result["meterHint"] = int(meter_hint)
         result["beats"] = [round(float(b), 4) for b in t.beats]
 
     beats = grid_beats(t, feats.duration) if t is not None else None

@@ -385,6 +385,32 @@ jobs:
           fi
           grep -q "analysis: FAILED.*NOT FOUND" analysis-missing.txt
 
+      - name: Tempo / time signature / key correction after analysis (edit, undo, save, reopen, meter hint)
+        run: |
+          set -o pipefail
+          APP="$PWD/build/src/app/B4ND_LIVE_MTR_artefacts/Release/B4ND LIVE MTR"
+          # The analysed song from the step above: fix it by hand, save, reopen.
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-timing.png --project ai-test.b4nd \
+            --timing-ops "sig:3:4,scale:0.5,shift:1,key:D major,bpm:900,live,sig:4:4,live,undo,scale:2,tap:0.5" | tee timing.txt
+          grep -Eq "timing op sig:3:4: ok; 128\.0[0-9]+ BPM \(1 tempo points\), 3/4, bar 1 at 0\.6" timing.txt
+          grep -Eq "timing op scale:0.5: ok; 64\.0[0-9]+ BPM .*bpm confidence -1\.00" timing.txt
+          grep -Eq "timing op shift:1: ok; 64\.0[0-9]+ BPM .*bar 1 at 1\.5[0-9]+ s" timing.txt
+          grep -q "timing op key:D major: ok; .*key D major" timing.txt
+          grep -q "timing op bpm:900: BPM must be 20 - 400" timing.txt
+          grep -q "timing op sig:4:4: Live Mode: songs cannot be changed during a show" timing.txt
+          grep -Eq "timing op undo: ok; 64\.0[0-9]+ BPM .*bar 1 at 1\.5[0-9]+ s, key A minor" timing.txt
+          grep -Eq "timing op scale:2: ok; 128\.0[0-9]+ BPM .*3/4, bar 1 at 1\.5" timing.txt
+          grep -q "timing op tap:0.5: tapped 120.00 BPM" timing.txt
+          grep -q "project save: ok" timing.txt
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-timing-reopened.png --project ai-test.b4nd | tee timing-reopen.txt
+          grep -Eq "analysis: 128\.0[0-9]+ BPM \(1 tempo points\), bar 1 at 1\.5[0-9]+ s, 3/4, key A minor" timing-reopen.txt
+          # A 3/4 song analysed with the "3 beats per bar" hint.
+          PYTHONPATH=analyzer python -m b4nd_analyzer synth --out waltz.wav --bpm 120 --numerator 3 --lead-in 0.4
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$APP" --screenshot screenshot-waltz.png --media waltz.wav \
+            --save-as waltz.b4nd --analyze --analyze-tasks tempo --meter-hint 3 --apply-analysis | tee waltz.txt
+          grep -Eq "analysis result: 120\.0[0-9]+ BPM .*bar 1 at 0\.4[0-9]+ s, 3/4" waltz.txt
+          grep -q '"meterHint": 3' waltz.b4nd/analysis/*/job.json || grep -q '"meterHint": 3' waltz.b4nd/analysis/*/result.json
+
       - uses: actions/cache@v4
         with:
           path: ~/.cache/torch/hub/checkpoints

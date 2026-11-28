@@ -4,6 +4,7 @@
 #include "ui/AnalysisPanel.h"
 #include "ui/FootswitchPanel.h"
 #include "ui/SetlistPanel.h"
+#include "ui/SongTimingPanel.h"
 #include "ui/ModulePanel.h"
 #include "ui/PluginPanel.h"
 #include "ui/ProjectCommands.h"
@@ -20,7 +21,7 @@ SidePanel::SidePanel (AppState& s) : state (s)
     addAndMakeVisible (songList);
 
     const char* items[] = { "Import Song (MP3/WAV)", "BPM / Beat / Key", "Chord Analysis", "Song Structure",
-                            "Stem Separation", "Audio to MIDI" };
+                            "Stem Separation", "Audio to MIDI", "Edit Tempo / Time Sig / Key" };
     for (auto* name : items)
     {
         auto* b = aiButtons.add (new juce::TextButton (name));
@@ -64,6 +65,10 @@ SidePanel::SidePanel (AppState& s) : state (s)
             p->preselectMidi();
     };
 
+    aiButtons[6]->setTooltip ("Correct the song's BPM (/2, x2, tap), time signature (e.g. 3/4, 6/8), bar 1 and key at any time, "
+                              "also after an analysis (Ctrl+T, or click BPM / KEY / TIME SIG at the top)");
+    aiButtons[6]->onClick = [this] { showSongTimingWindow (state); };
+
     newButton.onClick  = [this] { projectCommands::newProject (state); };
     openButton.onClick = [this] { projectCommands::openProject (state); };
     saveButton.onClick = [this] { projectCommands::save (state); };
@@ -106,7 +111,7 @@ void SidePanel::changeListenerCallback (juce::ChangeBroadcaster*)
         repaint();
     }
     const bool canChange = ! state.isLiveMode() && state.getTransportState() != TransportState::Playing;
-    for (int i = 0; i <= 5 && i < aiButtons.size(); ++i)
+    for (int i = 0; i < aiButtons.size(); ++i)
         aiButtons[i]->setEnabled (! state.isLiveMode());
     newButton.setEnabled (canChange);
     openButton.setEnabled (canChange);

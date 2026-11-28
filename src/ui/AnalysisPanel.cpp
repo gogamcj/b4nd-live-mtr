@@ -1,6 +1,7 @@
 #include "ui/AnalysisPanel.h"
 
 #include "core/TimeFormat.h"
+#include "ui/SongTimingPanel.h"
 #include "ui/Theme.h"
 
 namespace b4nd
@@ -107,7 +108,7 @@ private:
 AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
 {
     for (auto* b : { &analyzerButton, &checkButton, &analyzeButton, &cancelButton, &applyButton, &undoButton,
-                     &halfButton, &doubleButton, &earlierButton, &laterButton })
+                     &halfButton, &doubleButton, &earlierButton, &laterButton, &songTimingButton })
     {
         b->setWantsKeyboardFocus (false);
         addAndMakeVisible (*b);
@@ -138,10 +139,20 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
     gridEditor.setInputRestrictions (8, "0123456789.");
     bpmEditor.setTooltip ("BPM to use. Leave the analysed value to keep its tempo map (with tempo changes).");
     gridEditor.setTooltip ("Where bar 1 beat 1 is, in seconds from the start of the song");
-    for (auto* c : { &sourceBox, &timeSigBox, &keyBox })
+    for (auto* c : { &sourceBox, &timeSigBox, &keyBox, &meterHintBox })
         addAndMakeVisible (*c);
+    // Id = numerator * 100 + denominator.
+    static constexpr int sigs[][2] = { { 2, 4 }, { 3, 4 }, { 4, 4 }, { 5, 4 }, { 6, 4 }, { 7, 4 }, { 6, 8 }, { 9, 8 }, { 12, 8 } };
+    for (const auto& sg : sigs)
+        timeSigBox.addItem (juce::String (sg[0]) + "/" + juce::String (sg[1]), sg[0] * 100 + sg[1]);
+    meterHintBox.addItem ("Beats per bar: auto", 1);
     for (int n : { 2, 3, 4, 5, 6, 7 })
-        timeSigBox.addItem (juce::String (n) + "/4", n);
+        meterHintBox.addItem ("Beats per bar: " + juce::String (n) + (n == 3 ? " (3/4, 6/8)" : ""), n);
+    meterHintBox.setSelectedId (1, juce::dontSendNotification);
+    meterHintBox.setTooltip ("If you know the song's beats per bar (e.g. 3 for a waltz), the analysis only looks for "
+                             "where bar 1 is instead of guessing 3 or 4 (4 wins when it is unsure)");
+    songTimingButton.setTooltip ("Change the song's tempo, time signature, bar 1 and key directly, at any time (Ctrl+T)");
+    songTimingButton.onClick = [this] { showSongTimingWindow (state); };
     for (int i = 0; i < allKeys().size(); ++i)
         keyBox.addItem (allKeys()[i], i + 1);
     sectionList.setRowHeight (32);
@@ -174,7 +185,8 @@ AnalysisPanel::AnalysisPanel (AppState& s) : state (s)
         if (taskMidi.getToggleState() && taskMidi.isEnabled()) tasks.add ("midi");
         if (tasks.isEmpty())
             return setMessage ("Choose at least one analysis.", true);
-        const auto err = state.startAnalysis (sourceBox.getSelectedId() - 1, tasks);
+        const int hint = meterHintBox.getSelectedId() >= 2 ? meterHintBox.getSelectedId() : 0;
+        const auto err = state.startAnalysis (sourceBox.getSelectedId() - 1, tasks, hint);
         setMessage (err.isEmpty() ? "Analysing. You can keep working; the song is not changed until APPLY." : err, err.isNotEmpty());
     };
     cancelButton.onClick = [this] { state.cancelAnalysis(); };
@@ -304,7 +316,7 @@ void AnalysisPanel::loadDraft (const AnalysisResult& r)
     gridSec = r.gridStartSec;
     gridEditor.setText (juce::String (gridSec, 3), false);
     bpmEditor.setText (r.hasTempo ? juce::String (r.bpm, 2) : juce::String(), false);
-    timeSigBox.setSelectedId (r.numerator, juce::dontSendNotification);
+    timeSigBox.setSelectedId (r.numerator * 100 + r.denominator, juce::dontSendNotification);
     keyBox.clear (juce::dontSendNotification);
     int id = 1;
     for (const auto& k : r.keyCandidates)
@@ -354,6 +366,7 @@ void AnalysisPanel::refresh()
     cancelButton.setEnabled (busy);
     taskStems.setEnabled (stemsAvailable && ! busy);
     taskMidi.setEnabled (! busy);
+    meterHintBox.setEnabled (! busy && ! locked);
     taskStems.setTooltip (stemsAvailable || ! analyzerChecked ? juce::String (stemsTip) : "Stems are not available: " + stemsReason);
     analyzerButton.setEnabled (! busy && ! state.isLiveMode());
     const bool hasResult = r != nullptr;
@@ -396,8 +409,11 @@ void AnalysisPanel::apply()
         a.bpm = typed;   // a hand-typed BPM: one constant tempo
     if (std::abs (gridSec - r->gridStartSec) > 0.0005)
         a.gridStartSec = gridSec;
-    if (timeSigBox.getSelectedId() > 0 && timeSigBox.getSelectedId() != r->numerator)
-        a.numerator = timeSigBox.getSelectedId();
+    if (const int id = timeSigBox.getSelectedId(); id > 0 && id != r->numerator * 100 + r->denominator)
+    {
+        a.numerator = id / 100;
+        a.denominator = id % 100;
+    }
     if (keyBox.getSelectedId() > 0)
     {
         const auto k = keyBox.getText().upToFirstOccurrenceOf ("  (", false, false);
@@ -409,7 +425,7 @@ void AnalysisPanel::apply()
         if (d.include && d.s.label.trim().isNotEmpty())
             a.sections.push_back (d.s);
     const auto err = state.applyAnalysis (a);
-    setMessage (err.isEmpty() ? "Applied to the song. AI cues, stems and MIDI are marked (new tracks start muted); UNDO APPLY restores the song." : err, err.isNotEmpty());
+    setMessage (err.isEmpty() ? "Applied to the song. AI cues, stems and MIDI are marked (new tracks start muted); UNDO APPLY restores the song. Tempo / time signature / key can be corrected later at any time (Ctrl+T)." : err, err.isNotEmpty());
 }
 
 void AnalysisPanel::preselectMidi()
@@ -633,6 +649,8 @@ void AnalysisPanel::resized()
     src2.removeFromLeft (312);
     taskStems.setBounds (src2.removeFromLeft (150));
     taskMidi.setBounds (src2.removeFromLeft (200));
+    src2.removeFromLeft (8);
+    meterHintBox.setBounds (src2.removeFromLeft (220));
     r.removeFromTop (6);
     auto run = r.removeFromTop (30);
     analyzeButton.setBounds (run.removeFromLeft (140));
@@ -648,6 +666,7 @@ void AnalysisPanel::resized()
     applyButton.setBounds (bottom.removeFromLeft (180));
     bottom.removeFromLeft (8);
     undoButton.setBounds (bottom.removeFromLeft (130));
+    songTimingButton.setBounds (bottom.removeFromRight (240));
     r.removeFromBottom (8);
 
     auto left = r.removeFromLeft (r.getWidth() / 2 + 60);

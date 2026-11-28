@@ -13,6 +13,7 @@
 #include "ui/FootswitchPanel.h"
 #include "ui/SetlistPanel.h"
 #include "ui/ShowCheckPanel.h"
+#include "ui/SongTimingPanel.h"
 #include "app/SystemGuard.h"
 #include "core/TimeFormat.h"
 #include "ui/PluginPanel.h"
@@ -84,6 +85,9 @@ struct ScreenshotRequest
     double soakSongSeconds = 0.0;  // --soak-song-seconds <s>: go to the next song after this long (0: play songs to the end)
     juce::File soakCsv;            // --soak-csv <file>
     bool soakIgnoreDropouts = false;   // --soak-ignore-dropouts: count them but do not fail (virtual devices that are not real time)
+    int meterHint = 0;             // --meter-hint <beats per bar>: for --analyze
+    bool timingWindow = false;     // --timing: show (and capture) the tempo / time signature / key window
+    juce::StringArray timingOps;   // --timing-ops scale:2,bpm:96.5,sig:3:4,bar1:1.25,shift:-1,key:A minor,undo,tap:0.5,play,stop,live
     juce::StringArray analyzeTasks;   // --analyze-tasks tempo,key,chords,structure,stems (default: all but stems)
 
     static std::optional<ScreenshotRequest> parse (const juce::StringArray& args)
@@ -106,6 +110,11 @@ struct ScreenshotRequest
             r.analyzer = args[s + 1].unquoted();
         if (const int s = args.indexOf ("--analyze-tasks"); s >= 0 && s + 1 < args.size())
             r.analyzeTasks = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
+        if (const int s = args.indexOf ("--meter-hint"); s >= 0 && s + 1 < args.size())
+            r.meterHint = args[s + 1].getIntValue();
+        r.timingWindow = args.contains ("--timing");
+        if (const int s = args.indexOf ("--timing-ops"); s >= 0 && s + 1 < args.size())
+            r.timingOps = juce::StringArray::fromTokens (args[s + 1].unquoted(), ",", "");
         r.footswitchWindow = args.contains ("--footswitch");
         r.setlistWindow = args.contains ("--setlist");
         r.showCheckWindow = args.contains ("--show-check");
@@ -510,6 +519,70 @@ public:
         return false;
     }
 
+    /** --timing-ops: the tempo / time signature / key window's functions on the current song. */
+    void runTimingOps()
+    {
+        showSongTimingWindow (*state);
+        auto describe = [this]
+        {
+            const auto* s = state->getCurrentSong();
+            if (s == nullptr)
+                return juce::String ("no song");
+            const auto sig = s->tempo.barBeatAtBeat (0.0);
+            juce::String t;
+            t << juce::String (s->tempo.bpmAtBeat (0.0), 3) << " BPM (" << (int) s->tempo.getTempoPoints().size() << " tempo points), "
+              << sig.numerator << "/" << sig.denominator << ", bar 1 at " << juce::String (s->tempo.getOffsetSeconds(), 4) << " s, key "
+              << s->key << ", bpm confidence " << juce::String (s->bpmConfidence, 2) << ", undo " << (state->canUndoSongTiming() ? "yes" : "no");
+            return t;
+        };
+        double tapClock = 1000.0;
+        for (const auto& op : screenshot->timingOps)
+        {
+            const auto p = juce::StringArray::fromTokens (op, ":", "");
+            AppState::SongTimingEdit e;
+            juce::String err;
+            bool edit = true;
+            if (p[0] == "scale") e.tempoScale = p[1].getDoubleValue();
+            else if (p[0] == "bpm") e.bpm = p[1].getDoubleValue();
+            else if (p[0] == "sig") { e.numerator = p[1].getIntValue(); e.denominator = p[2].getIntValue(); }
+            else if (p[0] == "bar1") e.barOneSec = p[1].getDoubleValue();
+            else if (p[0] == "shift") e.shiftBeats = p[1].getDoubleValue();
+            else if (p[0] == "key") e.key = p[1];
+            else
+            {
+                edit = false;
+                if (p[0] == "undo") err = state->undoSongTiming();
+                else if (p[0] == "play") state->play();
+                else if (p[0] == "stop") state->stop();
+                else if (p[0] == "live") { window->getMainComponent().onLiveModeChanged = nullptr; state->setLiveMode (! state->isLiveMode()); }
+                else if (p[0] == "tap")
+                {
+                    // Four taps p[1] seconds apart, through the window (as the TAP button does).
+                    double bpm = 0.0;
+                    if (auto* w = getSongTimingWindowContent())
+                        for (int i = 0; i < 4; ++i)
+                            bpm = w->tapAt (tapClock += p[1].getDoubleValue());
+                    tapClock += 10.0;
+                    std::printf ("timing op %s: tapped %.2f BPM\n", op.toRawUTF8(), bpm);
+                    continue;
+                }
+                else { err = "UNKNOWN OP"; setApplicationReturnValue (1); }
+            }
+            if (edit)
+                err = state->editSongTiming (e);
+            std::printf ("timing op %s: %s; %s\n", op.toRawUTF8(), err.isEmpty() ? "ok" : err.toRawUTF8(), describe().toRawUTF8());
+        }
+        if (state->isLiveMode())
+            state->setLiveMode (false);
+        if (state->getTransportState() != TransportState::Stopped)
+            state->stop();
+        if (state->hasProjectFile())
+        {
+            const auto err = state->saveProject();
+            std::printf ("project save: %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
+        }
+    }
+
     /** --setlist-ops: the setlist window's functions (1-based song numbers). */
     void runSetlistOps()
     {
@@ -722,6 +795,7 @@ public:
         closeMidiEditor();
         closeFootswitchWindow();
         closeSetlistWindow();
+        closeSongTimingWindow();
         window = nullptr;
         if (audioDevice != nullptr)
             audioDevice->close();
@@ -790,7 +864,7 @@ private:
             }
             if (screenshot->analyze)
             {
-                const auto err = state->startAnalysis (-1, screenshot->analyzeTasks);
+                const auto err = state->startAnalysis (-1, screenshot->analyzeTasks, screenshot->meterHint);
                 std::printf ("analysis: start %s\n", err.isEmpty() ? "ok" : err.toRawUTF8());
                 if (err.isEmpty())
                 {
@@ -869,6 +943,10 @@ private:
         {
             if (screenshot->midiEditTrack.isNotEmpty())
                 runMidiEdit();
+            if (! screenshot->timingOps.isEmpty())
+                runTimingOps();
+            if (screenshot->timingWindow)
+                showSongTimingWindow (*state);
             if (! screenshot->setlistOps.isEmpty())
                 runSetlistOps();
             if (screenshot->setlistWindow)
@@ -1017,6 +1095,8 @@ private:
             comp = getFootswitchWindowContent();
         if (screenshot->showCheckWindow && getShowCheckWindowContent() != nullptr)
             comp = getShowCheckWindowContent();
+        if ((screenshot->timingWindow || ! screenshot->timingOps.isEmpty()) && getSongTimingWindowContent() != nullptr)
+            comp = getSongTimingWindowContent();
         if (screenshot->settings)
             for (int i = juce::TopLevelWindow::getNumTopLevelWindows(); --i >= 0;)
                 if (auto* w = dynamic_cast<juce::DocumentWindow*> (juce::TopLevelWindow::getTopLevelWindow (i)))

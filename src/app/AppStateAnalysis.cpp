@@ -60,7 +60,7 @@ int AppState::findAnalysisSourceTrack() const
     return fallback;
 }
 
-juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks)
+juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks, int meterHint)
 {
     if (liveMode)
         return "Live Mode: analysis is for preparation, not during a show";
@@ -78,6 +78,7 @@ juce::String AppState::startAnalysis (int trackIndex, juce::StringArray tasks)
     job.outDir = analysisDir (session.getFolder(), s->id);
     if (! tasks.isEmpty())
         job.tasks = tasks;
+    job.meterHint = meterHint >= 2 && meterHint <= 12 ? meterHint : 0;
     juce::String sourceName = "stem tracks";
     if (job.needsMedia())
     {
@@ -283,10 +284,11 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
     }
     if (a.withTimeSig && r.hasTempo)
     {
-        const int n = a.numerator > 0 ? a.numerator : r.numerator;
-        if (! tempo.setTimeSigPoints ({ { 0, juce::jlimit (1, 16, n), r.denominator } }))
+        const int n = juce::jlimit (1, 16, a.numerator > 0 ? a.numerator : r.numerator);
+        const int d = a.numerator > 0 && a.denominator > 0 ? a.denominator : r.denominator;
+        if (! tempo.setTimeSigPoints ({ { 0, n, d } }))
             return "Invalid time signature";
-        applied.add (juce::String (n) + "/" + juce::String (r.denominator));
+        applied.add (juce::String (n) + "/" + juce::String (d));
     }
     s->tempo = tempo;
     if (a.withKey && (r.hasKey || a.key.isNotEmpty()))
@@ -347,6 +349,8 @@ juce::String AppState::applyAnalysis (const AnalysisApply& a)
         return "Nothing selected to apply";
 
     analysisUndo = std::move (undo);
+    timingUndo.reset();   // its "before" is gone now
+    afterTempoChange (*s);
     rebuildPlan();
     markDirty();
     juce::Logger::writeToLog ("Analysis applied to " + s->title + ": " + applied.joinIntoString (", "));
@@ -581,6 +585,8 @@ juce::String AppState::undoAnalysisApply()
         requestAllMedia();
     }
     analysisUndo.reset();
+    timingUndo.reset();
+    afterTempoChange (*s);
     rebuildPlan();
     markDirty();
     juce::Logger::writeToLog ("Analysis apply undone: " + s->title);

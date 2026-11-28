@@ -131,6 +131,7 @@ public:
         double timeoutSec = 0.0;                        // 0: the runner's default
         struct MidiInput { juce::String name, path, id; };
         std::vector<MidiInput> midiInputs;              // audio to MIDI: stem files (absolute paths)
+        int meterHint = 0;                              // 2..12: the user's beats per bar (only the downbeat is searched)
         /** Analysis and stems need the decoded media; MIDI alone reads its input files. */
         bool needsMedia() const;
     };

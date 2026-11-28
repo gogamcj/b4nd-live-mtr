@@ -51,6 +51,11 @@ B4ND(기타·베이스·드럼·보컬 + 곡에 따라 키보드) 카피 공연�
 - AI 분석: 좌측 AI ANALYSIS의 BPM / Beat / Key 등을 누르거나 Ctrl+Shift+A로 엽니다.
   - 곡의 MR 트랙을 분석해 BPM, 마디 1 위치, 박자, Key, 코드, 구간(Intro/Verse/Chorus...)을 신뢰도와 함께 보여 줍니다.
   - 결과는 초안입니다. 고친 뒤 APPLY TO SONG을 눌러야 곡에 들어가고, UNDO APPLY로 되돌릴 수 있습니다.
+  - 3/4 곡이 4/4로 나오면: 박자 상자에서 3/4(또는 6/8)를 고르거나, "Beats per bar: 3"을 고르고 다시 ANALYZE 하세요. 박자 힌트를 주면 마디 1 위치만 찾습니다.
+- 템포 / 박자 / Key 수정: 좌측 "Edit Tempo / Time Sig / Key", Ctrl+T, 또는 상단의 BPM·KEY·TIME SIG 칸을 클릭합니다.
+  - 분석 후에도, 분석 없이도 언제든 고칠 수 있습니다: BPM 입력(템포 하나로), /2 · x2(템포맵 전체), TAP(또는 T 키) 탭 템포, 박자(1–16 / 2·4·8·16, 3/4·4/4·6/8 바로가기), 마디 1 위치(±1박, ±10 ms, 재생 위치에), Key.
+  - 바꾸면 바로 곡에 들어가고 프로젝트와 함께 저장됩니다. UNDO로 한 단계 되돌립니다. 큐와 코드는 제자리에 있고, MIDI 트랙은 새 템포를 따라갑니다(AI MIDI는 템포를 바꾸면 다시 변환하라는 경고가 나옵니다).
+  - 재생 중과 공연 모드에서는 잠깁니다.
   - 분석기는 앱 옆의 `b4nd-analyzer` 폴더(Windows 빌드에 포함, Python 불필요)나 Python 3 + numpy + scipy로 실행됩니다. 공연 모드에서는 쓸 수 없습니다.
 - 스템 분리: 좌측 Stem Separation을 누르거나 분석 창에서 "Stems"를 켜고 ANALYZE를 누릅니다.
   - Demucs(htdemucs_6s)로 Vocals / Drums / Bass / Guitar / Piano / Other를 나눕니다. CPU에서는 곡당 몇 분 걸립니다.
